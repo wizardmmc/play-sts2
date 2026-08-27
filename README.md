@@ -56,6 +56,13 @@ Harness 使用严格的单行 `ACTION:` 协议，并根据完整状态区分战�
 可读观测目前覆盖战斗、事件、地图、奖励和选牌屏幕，并统一过滤模型不应执行的
 存档、退出及底层重复动作。
 
+## 推理适配
+
+`src/play_sts2/inference/` 定义与游戏无关的 `DecisionProvider` 协议。
+`OpenAICompatibleProvider` 可以连接本地 MLX 等兼容服务；原版 Qwen 与合并后的
+SFT 模型复用同一份 Python 接入代码，只在启动推理服务时选择不同模型目录。
+LoRA adapter 是训练权重，不是另一套 Provider 实现。
+
 ## 目录边界
 
 - `src/play_sts2/`：Python 客户端、录制、转录、推理与训练代码。
