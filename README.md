@@ -36,6 +36,18 @@ uv run play-sts2-record \
   --output-root data/raw
 ```
 
+## 转录精确决策
+
+将一局原始人类轨迹转换为无损的结构化决策：
+
+```bash
+uv run play-sts2-transcribe data/raw/human/<run_id>
+```
+
+命令默认写入 `data/transcripts/<run_id>.jsonl`。这一层只提取动作前状态、
+原生 UI 动作和非空参数；面向模型的状态文本与 SFT messages 将由后续 Harness
+共享组件生成。
+
 ## 目录边界
 
 - `src/play_sts2/`：Python 客户端、录制、转录、推理与训练代码。
