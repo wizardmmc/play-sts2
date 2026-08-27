@@ -52,7 +52,7 @@ def test_decision_engine_executes_model_action() -> None:
             in (body["messages"][1]["content"])
         )
         assert body["messages"][1]["content"].endswith(
-            "可执行动作:\n- play_card\n- end_turn"
+            "可执行动作:\n- play_card(card_index, target_index)\n- end_turn"
         )
         return httpx.Response(
             200,
@@ -285,6 +285,58 @@ def test_decision_engine_stops_after_retry_limit() -> None:
     assert game.actions == []
 
 
+@pytest.mark.parametrize(
+    ("status_code", "code", "message", "expected"),
+    [
+        (
+            409,
+            "invalid_action",
+            "Action is not available in the current state.",
+            True,
+        ),
+        (
+            409,
+            "invalid_target",
+            "Action is not available in the current state.",
+            False,
+        ),
+        (409, "invalid_action", "Action parameters are invalid.", False),
+        (
+            400,
+            "invalid_action",
+            "Action is not available in the current state.",
+            False,
+        ),
+    ],
+)
+def test_action_window_conflict_matches_only_observed_mod_error(
+    status_code: int,
+    code: str,
+    message: str,
+    expected: bool,
+) -> None:
+    """只把实际观测到的 Mod 输入窗口错误视为可重试冲突。
+
+    Args:
+        status_code (int): Mod 返回的 HTTP 状态码。
+        code (str): Mod 错误代码。
+        message (str): Mod 错误消息。
+        expected (bool): 该响应是否应进入瞬时重试。
+
+    Raises:
+        AssertionError: 错误匹配边界过宽或拒绝了真实冲突。
+
+    Returns:
+        None: 此测试只验证错误响应分类。
+    """
+    decision = importlib.import_module("play_sts2.runtime.decision")
+
+    assert (
+        decision.is_action_window_conflict(_action_error(status_code, code, message))
+        is expected
+    )
+
+
 def _combat_state() -> dict[str, Any]:
     """构造与真实 Mod 字段一致的最小稳定战斗状态。
 
@@ -344,3 +396,31 @@ def _combat_state() -> dict[str, Any]:
             "discard_count": 0,
         },
     }
+
+
+def _action_error(
+    status_code: int,
+    code: str,
+    message: str,
+) -> httpx.HTTPStatusError:
+    """构造用于分类测试的 Mod HTTP 错误。
+
+    Args:
+        status_code (int): HTTP 状态码。
+        code (str): Mod 错误代码。
+        message (str): Mod 错误消息。
+
+    Returns:
+        httpx.HTTPStatusError: 包含指定错误外壳的异常。
+    """
+    request = httpx.Request("POST", "http://127.0.0.1:8080/action")
+    response = httpx.Response(
+        status_code,
+        request=request,
+        json={"error": {"code": code, "message": message}},
+    )
+    return httpx.HTTPStatusError(
+        f"{status_code} response",
+        request=request,
+        response=response,
+    )

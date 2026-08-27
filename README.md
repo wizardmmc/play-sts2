@@ -19,6 +19,19 @@ uv run pytest e2e --run-e2e
 uv run pytest e2e --run-e2e --sts2-mode=headed
 ```
 
+正式运行模型时可用同一套隔离启动基础拉起游戏：
+
+```bash
+uv run play-sts2-game
+uv run play-sts2-game --mode headed
+```
+
+命令默认监听 `http://127.0.0.1:8080`，使用
+`e2e/fixtures/profile/` 中不含个人信息的全解锁模板，并在临时 HOME 中关闭
+Steam 与 `UnifiedSavePath`。命令保持前台运行，退出时会结束游戏进程并删除本次
+隔离存档；端口、游戏路径或模板不同时可传入 `--port`、`--app-path` 和
+`--profile`。
+
 ## 录制人类轨迹
 
 先启动已经加载 Agent Mod 的有头 STS2，再运行：
@@ -104,9 +117,11 @@ uv run play-sts2-battle
 
 ## Qwen 整局闭环
 
-让已经加载 Agent Mod 的 STS2 停在主菜单，再运行：
+分别启动 SFT 模型服务、隔离游戏和整局 Agent：
 
 ```bash
+uv run --group inference play-sts2-model serve
+uv run play-sts2-game
 uv run play-sts2-run --character DEFECT --ascension 0
 ```
 

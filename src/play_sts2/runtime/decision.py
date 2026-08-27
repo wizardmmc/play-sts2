@@ -4,6 +4,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from ..client import GameClient
 from ..harness import (
     ActionParseError,
@@ -18,6 +20,7 @@ from ..inference import ChatMessage, DecisionProvider, ModelReply
 _RETRY_NOTE = (
     "注意: 上次动作无效({error})。立刻重新输出一行合法的 `ACTION: ...`，不要解释。"
 )
+_ACTION_WINDOW_MESSAGE = "Action is not available in the current state."
 
 
 class DecisionRetriesExhausted(ActionParseError):
@@ -172,3 +175,28 @@ class DecisionEngine:
             )
 
         raise RuntimeError("模型动作循环意外结束")
+
+
+def is_action_window_conflict(exc: httpx.HTTPStatusError) -> bool:
+    """判断 Mod 是否因输入窗口短暂关闭而拒绝动作。
+
+    Args:
+        exc (httpx.HTTPStatusError): Mod 返回的 HTTP 错误。
+
+    Returns:
+        bool: 仅对真实观测到的瞬时动作窗口冲突返回 ``True``。
+    """
+    if exc.response.status_code != 409:
+        return False
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    error = payload.get("error")
+    return (
+        isinstance(error, Mapping)
+        and error.get("code") == "invalid_action"
+        and error.get("message") == _ACTION_WINDOW_MESSAGE
+    )

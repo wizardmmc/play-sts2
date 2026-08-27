@@ -332,7 +332,11 @@ def test_build_observation_renders_combat_decision() -> None:
     assert "[0] 火焰药水 | 可使用 | 目标: [0]" in observation.text
     assert "牌堆: 抽牌 4 | 弃牌 2" in observation.text
     assert observation.text.endswith(
-        "可执行动作:\n- play_card\n- use_potion\n- discard_potion\n- end_turn"
+        "可执行动作:\n"
+        "- play_card(card_index, target_index)\n"
+        "- use_potion(option_index, target_index)\n"
+        "- discard_potion(option_index)\n"
+        "- end_turn"
     )
 
 
@@ -420,6 +424,7 @@ def test_build_observation_renders_combat_decision() -> None:
                 "=== 奖励 ===",
                 "[0] 奥术卷轴 | 获得一张稀有牌。",
                 "[1] 金币 | 暂不可领取 | 获得20金币。",
+                "- claim_reward(option_index)",
             ),
             ("claim_reward", "proceed"),
         ),

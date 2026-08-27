@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import httpx
+
 from ..client import GameClient
 from ..harness import HarnessLayer
 from ..inference import DecisionProvider
 from .battle import BattleRunner
-from .decision import DecisionStep
+from .decision import DecisionStep, is_action_window_conflict
 from .router import RunRoute, classify_run_state
 from .strategic import StrategicRunner
 
@@ -108,6 +110,7 @@ class RunRunner:
             temperature=temperature,
             max_retries=max_retries,
         )
+        self._max_retries = max_retries
         self._max_strategic_steps = max_strategic_steps
         self._poll_interval = poll_interval
         self._state_timeout = state_timeout
@@ -132,6 +135,7 @@ class RunRunner:
         decisions: list[RunDecision] = []
         battle_count = 0
         strategic_steps = 0
+        conflict_retries = 0
 
         while True:
             route = classify_run_state(state)
@@ -158,7 +162,18 @@ class RunRunner:
 
             if strategic_steps >= self._max_strategic_steps:
                 raise RunError(f"战略动作数超过上限: {self._max_strategic_steps}")
-            step = self._strategic.step(state)
+            try:
+                step = self._strategic.step(state)
+            except httpx.HTTPStatusError as exc:
+                if (
+                    not is_action_window_conflict(exc)
+                    or conflict_retries >= self._max_retries
+                ):
+                    raise
+                conflict_retries += 1
+                state = self._wait_for_route()
+                continue
+            conflict_retries = 0
             strategic_steps += 1
             decisions.append(RunDecision(HarnessLayer.STRATEGIC, step))
             state = self._state_after(step.action_result)

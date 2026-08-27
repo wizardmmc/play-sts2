@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from . import conftest
+from play_sts2 import game_launcher
 
 
 def _write_test_profile(profile: Path, mod_list: list[dict[str, object]]) -> None:
@@ -55,7 +55,7 @@ def test_game_command_matches_requested_mode(
     Returns:
         None: 此测试仅验证启动参数生成规则。
     """
-    assert conftest._game_command(Path("/game/sts2"), mode) == expected
+    assert game_launcher.game_command(Path("/game/sts2"), mode) == expected
 
 
 def test_game_command_rejects_unknown_mode() -> None:
@@ -68,7 +68,7 @@ def test_game_command_rejects_unknown_mode() -> None:
         None: 此测试仅验证启动模式的输入边界。
     """
     with pytest.raises(ValueError, match="未知的 STS2 启动模式"):
-        conftest._game_command(Path("/game/sts2"), "invalid")
+        game_launcher.game_command(Path("/game/sts2"), "invalid")
 
 
 def test_stage_test_profile_copies_only_non_steam_save_files(tmp_path: Path) -> None:
@@ -93,7 +93,7 @@ def test_stage_test_profile_copies_only_non_steam_save_files(tmp_path: Path) -> 
     )
     isolated_home = tmp_path / "home"
 
-    conftest._stage_test_profile(profile, isolated_home)
+    game_launcher.stage_profile(profile, isolated_home)
 
     data_root = isolated_home / "Library/Application Support/SlayTheSpire2"
     expected_files = {
@@ -144,8 +144,8 @@ def test_stage_test_profile_rejects_unsafe_mod_list(
     profile = tmp_path / "profile"
     _write_test_profile(profile, mod_list)
 
-    with pytest.raises(ValueError, match="专用测试档的 Mod 配置无效"):
-        conftest._stage_test_profile(profile, tmp_path / "home")
+    with pytest.raises(ValueError, match="Mod 配置无效|必须仅启用 Agent"):
+        game_launcher.stage_profile(profile, tmp_path / "home")
 
 
 def test_isolated_mod_configuration_requires_disabled_unified_save_path(
@@ -175,14 +175,14 @@ def test_isolated_mod_configuration_requires_disabled_unified_save_path(
         ),
         encoding="utf-8",
     )
-    conftest._verify_isolated_mod_configuration(log_path)
+    game_launcher._verify_isolated_mod_configuration(log_path)
 
     log_path.write_text(
         "[INFO] Finished mod initialization for 'STS2 AI Agent' (STS2AIAgent).",
         encoding="utf-8",
     )
-    with pytest.raises(RuntimeError, match="无法确认测试存档隔离"):
-        conftest._verify_isolated_mod_configuration(log_path)
+    with pytest.raises(RuntimeError, match="无法确认游戏隔离"):
+        game_launcher._verify_isolated_mod_configuration(log_path)
 
     log_path.write_text(
         (
@@ -197,8 +197,8 @@ def test_isolated_mod_configuration_requires_disabled_unified_save_path(
         ),
         encoding="utf-8",
     )
-    with pytest.raises(RuntimeError, match="无法确认测试存档隔离"):
-        conftest._verify_isolated_mod_configuration(log_path)
+    with pytest.raises(RuntimeError, match="无法确认游戏隔离"):
+        game_launcher._verify_isolated_mod_configuration(log_path)
 
 
 def test_main_menu_readiness_requires_expected_action() -> None:
@@ -210,7 +210,7 @@ def test_main_menu_readiness_requires_expected_action() -> None:
     Returns:
         None: 此测试仅验证游戏实例的就绪边界。
     """
-    assert not conftest._main_menu_is_ready(
+    assert not game_launcher._main_menu_is_ready(
         {
             "ok": True,
             "data": {
@@ -219,7 +219,7 @@ def test_main_menu_readiness_requires_expected_action() -> None:
             },
         }
     )
-    assert not conftest._main_menu_is_ready(
+    assert not game_launcher._main_menu_is_ready(
         {
             "ok": True,
             "data": {
@@ -228,7 +228,7 @@ def test_main_menu_readiness_requires_expected_action() -> None:
             },
         }
     )
-    assert conftest._main_menu_is_ready(
+    assert game_launcher._main_menu_is_ready(
         {
             "ok": True,
             "data": {

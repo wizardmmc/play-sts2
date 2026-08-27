@@ -3,6 +3,7 @@
 from .actions import (
     ActionParseError,
     HarnessAction,
+    action_signature,
     format_action,
     model_actions,
     parse_action,
@@ -17,6 +18,7 @@ __all__ = [
     "HarnessLayer",
     "Observation",
     "ObservationError",
+    "action_signature",
     "build_observation",
     "format_action",
     "model_actions",

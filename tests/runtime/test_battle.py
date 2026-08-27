@@ -4,6 +4,7 @@ import importlib
 from collections.abc import Sequence
 from typing import Any
 
+import httpx
 import pytest
 
 from play_sts2.inference import ChatMessage, ModelReply
@@ -179,6 +180,55 @@ class SelectionBattleGame:
         return _combat_selection_state()
 
 
+class ConflictingBattleGame:
+    """模拟动作窗口短暂关闭后重新开放的真实战斗状态。"""
+
+    def __init__(self, conflicts: int = 1) -> None:
+        """初始化冲突数量与调用计数。
+
+        Args:
+            conflicts (int): 开始时连续返回的动作窗口冲突数。
+
+        Returns:
+            None: 此方法只初始化测试游戏。
+        """
+        self._conflicts = conflicts
+        self.action_calls = 0
+        self.state_calls = 0
+
+    def execute_action(self, action: str, **_parameters: int) -> dict[str, Any]:
+        """在配置次数内返回动作窗口冲突，随后结束战斗。
+
+        Args:
+            action (str): Runtime 提交的动作名称。
+            _parameters (int): 当前测试不会使用的动作参数。
+
+        Raises:
+            httpx.HTTPStatusError: 动作仍在配置的冲突次数内时抛出。
+
+        Returns:
+            dict[str, Any]: 冲突结束后动作完成的奖励状态。
+        """
+        assert action == "end_turn"
+        self.action_calls += 1
+        if self.action_calls <= self._conflicts:
+            raise _action_unavailable("end_turn")
+        return {
+            "status": "completed",
+            "stable": True,
+            "state": _reward_state(),
+        }
+
+    def state(self) -> dict[str, Any]:
+        """返回重新开放动作的稳定战斗状态。
+
+        Returns:
+            dict[str, Any]: 可再次交给模型的战斗状态。
+        """
+        self.state_calls += 1
+        return _combat_state()
+
+
 def test_battle_runner_keeps_history_and_waits_for_pending_action() -> None:
     """战斗循环等待下一可决策帧，并把前一步动作留在后续对话中。
 
@@ -212,6 +262,60 @@ def test_battle_runner_keeps_history_and_waits_for_pending_action() -> None:
     )
     assert provider.requests[1][2].content == "ACTION: end_turn"
     assert "回合 2" in provider.requests[1][-1].content
+
+
+def test_battle_runner_retries_temporary_action_window_conflict() -> None:
+    """Mod 暂时关闭输入窗口时重新等待状态并再次决策。
+
+    Raises:
+        AssertionError: 合法动作的短暂 409 直接终止战斗或污染成功步骤。
+
+    Returns:
+        None: 此测试只验证真实出现过的输入窗口竞争。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ConflictingBattleGame()
+    provider = BattleProvider(["ACTION: end_turn", "ACTION: end_turn"])
+
+    result = runtime.BattleRunner(
+        game,
+        provider,
+        poll_interval=0,
+        state_timeout=1,
+    ).run(_combat_state())
+
+    assert result.outcome is runtime.BattleOutcome.CLEARED
+    assert len(result.steps) == 1
+    assert game.action_calls == 2
+    assert game.state_calls == 1
+    assert len(provider.requests) == 2
+
+
+def test_battle_runner_stops_after_action_window_retry_limit() -> None:
+    """动作窗口持续冲突时在既有重试上限处停止。
+
+    Raises:
+        AssertionError: Runtime 超过配置上限继续请求模型或提交动作。
+
+    Returns:
+        None: 此测试只验证瞬时冲突的有限重试边界。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ConflictingBattleGame(conflicts=3)
+    provider = BattleProvider(["ACTION: end_turn", "ACTION: end_turn"])
+
+    with pytest.raises(httpx.HTTPStatusError, match="409 Conflict"):
+        runtime.BattleRunner(
+            game,
+            provider,
+            max_retries=1,
+            poll_interval=0,
+            state_timeout=1,
+        ).run(_combat_state())
+
+    assert game.action_calls == 2
+    assert game.state_calls == 1
+    assert len(provider.requests) == 2
 
 
 def test_battle_runner_reports_player_death() -> None:
@@ -516,3 +620,33 @@ def _combat_selection_state(
             ],
         },
     }
+
+
+def _action_unavailable(action: str) -> httpx.HTTPStatusError:
+    """构造与真实 Mod 输入窗口竞争一致的 409 异常。
+
+    Args:
+        action (str): 被暂时拒绝的动作名称。
+
+    Returns:
+        httpx.HTTPStatusError: 包含真实错误外壳的 HTTP 异常。
+    """
+    request = httpx.Request("POST", "http://127.0.0.1:8080/action")
+    response = httpx.Response(
+        409,
+        request=request,
+        json={
+            "ok": False,
+            "error": {
+                "code": "invalid_action",
+                "message": "Action is not available in the current state.",
+                "details": {"action": action, "screen": "COMBAT"},
+                "retryable": False,
+            },
+        },
+    )
+    return httpx.HTTPStatusError(
+        "409 Conflict",
+        request=request,
+        response=response,
+    )

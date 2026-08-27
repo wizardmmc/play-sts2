@@ -4,6 +4,7 @@ import importlib
 from collections.abc import Sequence
 from typing import Any
 
+import httpx
 import pytest
 
 from play_sts2.inference import ChatMessage, ModelReply
@@ -134,6 +135,47 @@ class StaticGame:
         raise AssertionError(f"不应执行动作: {action}")
 
 
+class ConflictingStrategicGame:
+    """模拟战略动作窗口短暂关闭后重新开放的游戏。"""
+
+    def __init__(self) -> None:
+        """初始化动作和状态读取计数。
+
+        Returns:
+            None: 此方法只初始化测试游戏。
+        """
+        self.action_calls = 0
+        self.state_calls = 0
+
+    def execute_action(self, action: str, **_parameters: int) -> dict[str, Any]:
+        """首次拒绝地图动作，第二次返回胜利终局。
+
+        Args:
+            action (str): Runtime 提交的地图动作。
+            _parameters (int): 模型提交的节点索引。
+
+        Raises:
+            httpx.HTTPStatusError: 首次动作落在暂不可用窗口时抛出。
+
+        Returns:
+            dict[str, Any]: 第二次动作完成后的胜利终局。
+        """
+        assert action == "choose_map_node"
+        self.action_calls += 1
+        if self.action_calls == 1:
+            raise _action_unavailable("choose_map_node", "MAP")
+        return _completed(_game_over_state(True))
+
+    def state(self) -> dict[str, Any]:
+        """返回重新开放动作的地图状态。
+
+        Returns:
+            dict[str, Any]: 可再次交给战略模型的地图状态。
+        """
+        self.state_calls += 1
+        return _map_state()
+
+
 def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
     """整局 Runner 按顺序处理战略、战斗、过渡状态和胜利终局。
 
@@ -182,6 +224,35 @@ def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
         == ("system", "user")
         for index in (0, 2, 3)
     )
+
+
+def test_run_runner_retries_temporary_strategic_action_conflict() -> None:
+    """战略动作窗口短暂关闭时刷新状态并重新决策。
+
+    Raises:
+        AssertionError: 合法动作的短暂 409 终止整局或被记录成成功决策。
+
+    Returns:
+        None: 此测试只验证战略层的输入窗口竞争。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ConflictingStrategicGame()
+    provider = WholeRunProvider(
+        ["ACTION: choose_map_node 0", "ACTION: choose_map_node 0"]
+    )
+
+    result = runtime.RunRunner(
+        game,
+        provider,
+        poll_interval=0,
+        state_timeout=1,
+    ).run(_map_state())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert len(result.decisions) == 1
+    assert game.action_calls == 2
+    assert game.state_calls == 1
+    assert len(provider.requests) == 2
 
 
 def test_run_runner_reports_terminal_loss_without_model_call() -> None:
@@ -360,3 +431,34 @@ def _game_over_state(victory: bool) -> dict[str, Any]:
         "run": _run_state(),
         "game_over": {"is_victory": victory},
     }
+
+
+def _action_unavailable(action: str, screen: str) -> httpx.HTTPStatusError:
+    """构造与真实 Mod 输入窗口竞争一致的 409 异常。
+
+    Args:
+        action (str): 被暂时拒绝的动作名称。
+        screen (str): 动作所属的当前页面。
+
+    Returns:
+        httpx.HTTPStatusError: 包含真实错误外壳的 HTTP 异常。
+    """
+    request = httpx.Request("POST", "http://127.0.0.1:8080/action")
+    response = httpx.Response(
+        409,
+        request=request,
+        json={
+            "ok": False,
+            "error": {
+                "code": "invalid_action",
+                "message": "Action is not available in the current state.",
+                "details": {"action": action, "screen": screen},
+                "retryable": False,
+            },
+        },
+    )
+    return httpx.HTTPStatusError(
+        "409 Conflict",
+        request=request,
+        response=response,
+    )

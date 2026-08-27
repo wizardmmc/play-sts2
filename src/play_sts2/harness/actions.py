@@ -187,6 +187,26 @@ def format_action(action: HarnessAction) -> str:
     return f"ACTION: {action.name}{suffix}"
 
 
+def action_signature(name: str, *, include_optional: bool = False) -> str:
+    """把动作的解析签名渲染为模型可读格式。
+
+    Args:
+        name (str): Agent Mod 使用的稳定动作名称。
+        include_optional (bool): 是否显示当前状态实际需要的可选目标参数。
+
+    Raises:
+        ActionParseError: 动作尚未纳入 Harness 输出契约。
+
+    Returns:
+        str: 标明必需参数与可选参数的动作签名。
+    """
+    parameter_names, required_count = _signature(name)
+    if not parameter_names:
+        return name
+    count = len(parameter_names) if include_optional else required_count
+    return f"{name}({', '.join(parameter_names[:count])})"
+
+
 def _build_action(name: str, values: list[int]) -> HarnessAction:
     """依据动作签名把有序索引映射成命名参数。
 

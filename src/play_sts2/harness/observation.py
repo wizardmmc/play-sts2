@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .actions import model_actions
+from .actions import action_signature, model_actions
 from .ownership import HarnessLayer, state_layer
 
 _MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
@@ -94,7 +94,7 @@ def build_observation(state: Mapping[str, Any]) -> Observation:
     sections = [_render_run(state)]
     if layer is HarnessLayer.STRATEGIC:
         sections.append(_render_inventory(state))
-    sections.extend((renderer(state), _render_actions(actions)))
+    sections.extend((renderer(state), _render_actions(state, actions)))
     return Observation(
         layer=layer,
         text="\n\n".join(section for section in sections if section),
@@ -535,16 +535,37 @@ def _render_card_selection(state: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_actions(actions: Sequence[str]) -> str:
+def _render_actions(state: Mapping[str, Any], actions: Sequence[str]) -> str:
     """渲染观测末尾唯一可信的模型动作列表。
 
     Args:
+        state (Mapping[str, Any]): 用于判断可选目标参数是否实际需要的状态。
         actions (Sequence[str]): 已按 Harness 权限过滤的动作名称。
 
     Returns:
         str: 每行一个动作的可执行动作菜单。
     """
-    return "可执行动作:\n" + "\n".join(f"- {action}" for action in actions)
+    combat = state.get("combat") or {}
+    run = state.get("run") or {}
+    rest = state.get("rest") or {}
+    target_sources = {
+        "play_card": combat.get("hand") or [],
+        "use_potion": run.get("potions") or [],
+        "choose_rest_option": rest.get("options") or [],
+    }
+    targeted = {
+        action
+        for action, items in target_sources.items()
+        if any(
+            item.get("requires_target") is True
+            or bool(item.get("valid_target_indices"))
+            for item in items
+        )
+    }
+    return "可执行动作:\n" + "\n".join(
+        f"- {action_signature(action, include_optional=action in targeted)}"
+        for action in actions
+    )
 
 
 def _format_card(card: Mapping[str, Any]) -> str:

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import httpx
+
 from ..client import GameClient
 from ..harness import (
     HarnessLayer,
@@ -15,7 +17,7 @@ from ..harness import (
     state_layer,
 )
 from ..inference import ChatMessage, DecisionProvider
-from .decision import DecisionEngine, DecisionStep
+from .decision import DecisionEngine, DecisionStep, is_action_window_conflict
 from .router import RunRoute, classify_run_state
 
 _DEFAULT_MAX_RETRIES = 3
@@ -113,15 +115,27 @@ class BattleRunner:
         state = self._wait_for_state(state)
         history: tuple[ChatMessage, ...] = ()
         steps: list[DecisionStep] = []
+        conflict_retries = 0
 
         while _fight_ongoing(state):
             if len(steps) >= self._max_steps:
                 raise BattleRunError(f"战斗动作数超过上限: {self._max_steps}")
-            step = self._engine.step(
-                state,
-                history=history,
-                max_retries=self._max_retries,
-            )
+            try:
+                step = self._engine.step(
+                    state,
+                    history=history,
+                    max_retries=self._max_retries,
+                )
+            except httpx.HTTPStatusError as exc:
+                if (
+                    not is_action_window_conflict(exc)
+                    or conflict_retries >= self._max_retries
+                ):
+                    raise
+                conflict_retries += 1
+                state = self._wait_for_state()
+                continue
+            conflict_retries = 0
             steps.append(step)
             history = (
                 *step.messages[1:],
