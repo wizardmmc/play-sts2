@@ -9,7 +9,7 @@ import pytest
 
 from play_sts2.client import GameClient
 from play_sts2.harness import ActionParseError
-from play_sts2.inference import OpenAICompatibleProvider
+from play_sts2.inference import ChatMessage, ModelReply, OpenAICompatibleProvider
 
 
 def test_decision_engine_executes_model_action() -> None:
@@ -158,6 +158,131 @@ def test_decision_engine_does_not_execute_invalid_model_output(
         pytest.raises(ActionParseError),
     ):
         runtime.DecisionEngine(game, provider).step(_combat_state())
+
+
+class ReplyQueue:
+    """按顺序返回测试预设的模型回复。
+
+    Args:
+        replies (list[str]): 每次 ``chat`` 调用依次返回的文本。
+    """
+
+    def __init__(self, replies: list[str]) -> None:
+        """保存回复队列并初始化请求记录。
+
+        Args:
+            replies (list[str]): 每次 ``chat`` 调用依次返回的文本。
+
+        Returns:
+            None: 此方法只初始化测试替身。
+        """
+        self._replies = iter(replies)
+        self.requests: list[tuple[ChatMessage, ...]] = []
+
+    def chat(
+        self,
+        messages: tuple[ChatMessage, ...],
+        *,
+        max_tokens: int = 128,
+        temperature: float = 0.0,
+    ) -> ModelReply:
+        """记录完整消息并返回下一条预设回复。
+
+        Args:
+            messages (tuple[ChatMessage, ...]): Runtime 本次发送的完整消息。
+            max_tokens (int): 本次生成允许使用的最大输出 token 数。
+            temperature (float): 本次生成使用的采样温度。
+
+        Returns:
+            ModelReply: 队列中的下一条回复。
+        """
+        self.requests.append(tuple(messages))
+        return ModelReply(next(self._replies))
+
+
+class RecordingGame:
+    """记录 Runtime 实际提交的游戏动作。"""
+
+    def __init__(self) -> None:
+        """初始化空动作记录。
+
+        Returns:
+            None: 此方法只初始化测试替身。
+        """
+        self.actions: list[tuple[str, dict[str, int]]] = []
+
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        """记录一个动作并返回已完成结果。
+
+        Args:
+            action (str): Runtime 提交的动作名称。
+            parameters (int): Runtime 提交的动作参数。
+
+        Returns:
+            dict[str, Any]: 最小的 Mod 成功结果。
+        """
+        self.actions.append((action, parameters))
+        return {"status": "completed", "stable": True, "state": {}}
+
+
+def test_decision_engine_retries_invalid_model_output() -> None:
+    """非法输出携带错误说明重试，直到得到一个合法动作。
+
+    Raises:
+        AssertionError: 重试次数、消息历史或动作提交时机不符合约定。
+
+    Returns:
+        None: 此测试只验证单个决策内的有限重试。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(["应该结束回合", "ACTION: end_turn"])
+    game = RecordingGame()
+
+    step = runtime.DecisionEngine(game, provider).step(
+        _combat_state(),
+        max_retries=1,
+    )
+
+    assert game.actions == [("end_turn", {})]
+    assert tuple(reply.text for reply in step.replies) == (
+        "应该结束回合",
+        "ACTION: end_turn",
+    )
+    assert len(step.retry_errors) == 1
+    assert tuple(message.role for message in provider.requests[1]) == (
+        "system",
+        "user",
+        "user",
+    )
+    assert "上次动作无效" in provider.requests[1][-1].content
+    assert "模型输出必须以 ACTION: 开头" in provider.requests[1][-1].content
+
+
+def test_decision_engine_stops_after_retry_limit() -> None:
+    """模型持续返回非法文本时在有限次数后停止且不写入游戏。
+
+    Raises:
+        AssertionError: Runtime 多试、少试或执行了非法动作。
+
+    Returns:
+        None: 此测试只验证重试上限。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(["无效一", "无效二"])
+    game = RecordingGame()
+
+    with pytest.raises(runtime.DecisionRetriesExhausted) as raised:
+        runtime.DecisionEngine(game, provider).step(
+            _combat_state(),
+            max_retries=1,
+        )
+
+    assert tuple(reply.text for reply in raised.value.replies) == (
+        "无效一",
+        "无效二",
+    )
+    assert len(provider.requests) == 2
+    assert game.actions == []
 
 
 def _combat_state() -> dict[str, Any]:

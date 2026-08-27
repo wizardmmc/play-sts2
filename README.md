@@ -67,7 +67,24 @@ LoRA adapter 是训练权重，不是另一套 Provider 实现。
 
 `src/play_sts2/runtime/DecisionEngine` 接收一个稳定游戏状态，依次构建 Harness
 观测与系统提示词、调用 `DecisionProvider`、校验 `ACTION:` 并通过 `GameClient`
-执行动作。它会返回本次完整决策产物，但不负责对话历史、重试和整局调度。
+执行动作。它会返回本次完整决策产物，并允许上层传入同一场战斗的消息历史。
+
+## Qwen 战斗闭环
+
+`play-sts2-battle` 只连接模型服务，不直接加载模型。先在 `8900` 端口启动一个
+已经加载 Qwen 或 SFT 模型的 OpenAI-compatible 服务；`models/merged/` 中的
+Transformers BF16 模型需要先转换为对应推理后端的服务格式。
+
+让已经加载 Agent Mod 的 STS2 停在一个稳定战斗决策画面，再运行：
+
+```bash
+uv run play-sts2-battle
+```
+
+模型服务需要名称时可加 `--model Qwen/Qwen3.5-4B`；游戏或模型使用其他端口时，
+分别传入 `--game-url` 和 `--model-url`。`BattleRunner` 会在一场战斗内保留对话
+历史，非法模型输出最多重试三次，等待异步动作重新进入可决策状态，并在胜利或
+角色死亡时返回。本阶段只负责当前战斗，不会自动选择地图、事件或奖励。
 
 ## 目录边界
 

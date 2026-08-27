@@ -7,6 +7,7 @@ dependencies = [
 ]
 
 [project.scripts]
+play-sts2-battle = "play_sts2.runtime.cli:main"
 play-sts2-record = "play_sts2.recording.cli:main"
 play-sts2-transcribe = "play_sts2.transcription.cli:main"
 
