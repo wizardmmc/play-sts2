@@ -9,9 +9,11 @@ dependencies = [
 [project.scripts]
 play-sts2-battle = "play_sts2.runtime.cli:main"
 play-sts2-game = "play_sts2.game_cli:main"
+play-sts2-knowledge = "play_sts2.game_knowledge.cli:main"
 play-sts2-model = "play_sts2.inference.cli:main"
 play-sts2-record = "play_sts2.recording.cli:main"
 play-sts2-run = "play_sts2.runtime.run_cli:main"
+play-sts2-train = "play_sts2.training.cli:main"
 play-sts2-transcribe = "play_sts2.transcription.cli:main"
 
 [build-system]

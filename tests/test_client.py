@@ -155,6 +155,80 @@ def test_state_returns_complete_mod_payload() -> None:
     assert state == state_data
 
 
+def test_data_collection_returns_complete_entities() -> None:
+    """读取 Mod 导出的真实游戏实体集合。
+
+    Raises:
+        AssertionError: 客户端没有请求正确端点或改写了实体字段。
+
+    Returns:
+        None: 此测试只验证只读游戏数据协议。
+    """
+    cards = [
+        {
+            "id": "ZAP",
+            "name": "电击",
+            "description": "生成1个闪电充能球。",
+            "cost": 1,
+        }
+    ]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """返回与 Mod ``/data/cards`` 同形状的响应。
+
+        Args:
+            request (httpx.Request): 游戏客户端发出的请求。
+
+        Raises:
+            AssertionError: 请求方法或路径不符合数据端点契约。
+
+        Returns:
+            httpx.Response: 包含卡牌实体数组的成功响应。
+        """
+        assert request.method == "GET"
+        assert request.url.path == "/data/cards"
+        return httpx.Response(200, json={"ok": True, "data": cards})
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        result = client.data_collection("cards")
+
+    assert result == cards
+
+
+def test_data_collection_rejects_non_entity_rows() -> None:
+    """拒绝包含非对象元素的游戏数据集合。
+
+    Raises:
+        AssertionError: 非法集合没有触发 ``ProtocolError``。
+
+    Returns:
+        None: 此测试只验证游戏数据的最小结构边界。
+    """
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        """返回包含非法标量元素的数据集合。
+
+        Args:
+            _request (httpx.Request): 游戏客户端发出的请求。
+
+        Returns:
+            httpx.Response: 包含非法集合的成功响应。
+        """
+        return httpx.Response(200, json={"ok": True, "data": ["ZAP"]})
+
+    with (
+        GameClient(
+            "http://127.0.0.1:8080",
+            transport=httpx.MockTransport(respond),
+        ) as client,
+        pytest.raises(ProtocolError, match="invalid /data/cards response"),
+    ):
+        client.data_collection("cards")
+
+
 def test_iter_events_parses_multiline_sse_payload() -> None:
     """忽略 SSE 注释，并把多行 data 解析成一个 Mod 事件。
 

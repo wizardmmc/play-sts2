@@ -61,6 +61,32 @@ uv run play-sts2-transcribe data/raw/human/<run_id>
 原生 UI 动作和非空参数；面向模型的状态文本与 SFT messages 将由后续 Harness
 共享组件生成。
 
+## 游戏知识与 SFT 数据集
+
+结构化 Wiki 可以迁移为带来源字段的单实体 Markdown：
+
+```bash
+uv run play-sts2-knowledge import-wiki /path/to/wiki
+```
+
+当游戏和 Agent Mod 已启动时，也可以直接从当前版本的 `/data/*` 端点实测
+导出。命令会同时保存原始 JSON 快照和可读 Markdown：
+
+```bash
+uv run play-sts2-knowledge export
+```
+
+Web Wiki 条目标记为 `source: web_wiki`，Mod 实测条目标记为
+`source: mod_export`；两类数据不会互相冒充。默认用 Web Wiki 和当前精确人类
+转录构建可读的 chat messages 数据集：
+
+```bash
+uv run play-sts2-train build-sft
+```
+
+产物写入 `data/datasets/sft/baseline-v1/`。知识行保留实体来源，行为行通过
+当前 Harness 重新生成观测和规范 `ACTION:`，不会复用旧版本的 token ID。
+
 ## Harness 契约
 
 Harness 使用严格的单行 `ACTION:` 协议，并根据完整状态区分战斗、战略与过渡

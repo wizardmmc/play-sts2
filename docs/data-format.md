@@ -53,3 +53,37 @@ data/raw/<human|agent>/<run_id>/
 `recorded_layer` 是 Mod 捕获的原始层提示。后续构建 SFT 数据时，Harness 的
 屏幕归属逻辑仍需根据 `before_state` 重新判断并校验层级。转录结果本身不包含
 系统提示、可读状态文本或模型消息。
+
+## 游戏知识格式
+
+每项知识使用一个 Markdown 文件，以扁平 frontmatter 保存实体与来源，正文只
+保存可读事实：
+
+```markdown
+---
+id: ZAP
+name: 电击
+type: card
+source: mod_export
+game_version: 0.107.1
+cost: 1
+---
+## 效果
+生成1个闪电充能球。
+```
+
+当前来源有：
+
+- `web_wiki`：真实采样的结构化站点资料，保留原站点信息于
+  `source_detail`，不视为实机核验。
+- `mod_export`：运行中游戏通过 Mod `/data/*` 导出的当前版本事实。
+
+Mod 导出位于 `data/game_knowledge/mod_export/<game-version>/`，其中 `raw/`
+保存原始 JSON，其余类别目录保存单实体 Markdown。
+
+## 可读 SFT 数据集
+
+`data/datasets/sft/<name>/{train,dev,test}.jsonl` 每行保存来源、实体或局信息，
+以及尚未 token 化的 `messages`。知识条目形成单轮问答；人工行为通过当前
+Harness 重新渲染为 system、观测和规范动作三条消息。dev/test 只按完整 run ID
+分卷，防止同一局相邻决策泄漏。

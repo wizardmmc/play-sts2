@@ -175,6 +175,27 @@ class GameClient:
             raise ProtocolError("invalid /state response")
         return dict(data)
 
+    def data_collection(self, collection: str) -> list[dict[str, Any]]:
+        """读取 Mod 从当前游戏实例导出的实体集合。
+
+        Args:
+            collection (str): ``cards``、``relics`` 等游戏数据集合名称。
+
+        Raises:
+            httpx.HTTPStatusError: Mod 不支持该集合或返回其他非成功状态码。
+            ProtocolError: 响应体不是只包含 JSON 对象的数组。
+
+        Returns:
+            list[dict[str, Any]]: 保留 Mod 原始字段的游戏实体列表。
+        """
+        path = f"/data/{collection}"
+        data = self._request_data(path)
+        if not isinstance(data, list) or any(
+            not isinstance(entity, Mapping) for entity in data
+        ):
+            raise ProtocolError(f"invalid {path} response")
+        return [dict(entity) for entity in data]
+
     def available_actions(self) -> AvailableActions:
         """读取当前屏幕允许执行的动作。
 
