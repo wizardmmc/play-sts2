@@ -11,12 +11,20 @@ class RunStartError(RuntimeError):
     """表示当前游戏状态无法完成可验证的开局流程。"""
 
 
-def start_run(client: GameClient, character_id: str) -> dict[str, Any]:
+def start_run(
+    client: GameClient,
+    character_id: str,
+    *,
+    seed: str | None = None,
+    ascension: int | None = None,
+) -> dict[str, Any]:
     """从干净主菜单选择指定角色并开始新局。
 
     Args:
         client (GameClient): 已连接到可操作主菜单的游戏客户端。
         character_id (str): Mod 暴露的角色稳定 ID，例如 ``DEFECT``。
+        seed (str | None): 可选的游戏种子；提供时在开局前写入角色选择页。
+        ascension (int | None): 可选的目标进阶等级；提供时在开局前逐级调整。
 
     Raises:
         RunStartError: 必需动作、角色信息或动作后的身份校验不成立。
@@ -72,6 +80,15 @@ def start_run(client: GameClient, character_id: str) -> dict[str, Any]:
     ):
         raise RunStartError(f"角色选择结果不匹配: {character_id}")
 
+    if ascension is not None:
+        state = _adjust_ascension(client, state, ascension)
+    if seed is not None:
+        _require_action(state, "set_seed")
+        state = _action_state(
+            client.execute_action("set_seed", game_seed=seed),
+            "set_seed",
+        )
+
     _require_action(state, "embark")
     deadline = time.monotonic() + client.action_timeout
     state = _await_embark_state(
@@ -82,7 +99,59 @@ def start_run(client: GameClient, character_id: str) -> dict[str, Any]:
     run = state.get("run")
     if not isinstance(run, Mapping) or run.get("character_id") != character_id:
         raise RunStartError(f"新局角色身份不匹配: {character_id}")
+    if ascension is not None and run.get("ascension") != ascension:
+        raise RunStartError(f"新局进阶等级不匹配: {ascension}")
     return state
+
+
+def _adjust_ascension(
+    client: GameClient,
+    state: Mapping[str, Any],
+    target: int,
+) -> dict[str, Any]:
+    """把角色选择页的进阶等级逐级调整到目标值。
+
+    Args:
+        client (GameClient): 已连接到角色选择页的游戏客户端。
+        state (Mapping[str, Any]): 当前角色选择状态。
+        target (int): 期望在新局中使用的进阶等级。
+
+    Raises:
+        RunStartError: 进阶字段缺失、目标越界或所需调整动作不可用。
+
+    Returns:
+        dict[str, Any]: 已到达目标进阶等级的角色选择状态。
+    """
+    current_state = dict(state)
+    character_select = current_state.get("character_select")
+    if not isinstance(character_select, Mapping):
+        raise RunStartError("角色选择状态不可用")
+    current = character_select.get("ascension")
+    maximum = character_select.get("max_ascension")
+    if (
+        isinstance(current, bool)
+        or not isinstance(current, int)
+        or isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+    ):
+        raise RunStartError("进阶状态不可用")
+    if target < 0 or target > maximum:
+        raise RunStartError(f"目标进阶等级不可用: {target}")
+
+    while current != target:
+        action = "increase_ascension" if current < target else "decrease_ascension"
+        _require_action(current_state, action)
+        current_state = _action_state(client.execute_action(action), action)
+        character_select = current_state.get("character_select")
+        if not isinstance(character_select, Mapping):
+            raise RunStartError("角色选择状态不可用")
+        next_level = character_select.get("ascension")
+        if isinstance(next_level, bool) or not isinstance(next_level, int):
+            raise RunStartError("进阶状态不可用")
+        if abs(next_level - current) != 1:
+            raise RunStartError("进阶调整结果无效")
+        current = next_level
+    return current_state
 
 
 def _require_action(state: Mapping[str, Any], action: str) -> None:

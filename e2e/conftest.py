@@ -63,16 +63,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def running_game(
     request: pytest.FixtureRequest,
-    tmp_path_factory: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> Iterator[RunningGame]:
-    """为当前测试会话提供使用专用存档的游戏实例。
+    """为当前测试提供使用专用存档的独立游戏实例。
 
     Args:
         request (pytest.FixtureRequest): 当前 Pytest 测试请求。
-        tmp_path_factory (pytest.TempPathFactory): 会话级临时目录工厂。
+        tmp_path (Path): 当前测试独占的临时目录。
 
     Raises:
         ValueError: ``STS2_E2E_PORT`` 不是有效整数。
@@ -92,7 +92,8 @@ def running_game(
     executable = app_path / "Contents/MacOS/Slay the Spire 2"
     port = int(os.environ.get("STS2_E2E_PORT", _DEFAULT_PORT))
     mode = request.config.getoption("--sts2-mode")
-    isolated_home = tmp_path_factory.mktemp("sts2-e2e-home")
+    isolated_home = tmp_path / "home"
+    isolated_home.mkdir()
 
     with _game(executable, port, isolated_home, _DEFAULT_PROFILE, mode) as game:
         yield game
@@ -140,7 +141,7 @@ def _game(
     environment = os.environ.copy()
     environment["HOME"] = str(isolated_home)
     environment["STS2_API_PORT"] = str(port)
-    environment["STS2_ENABLE_DEBUG_ACTIONS"] = "0"
+    environment["STS2_ENABLE_DEBUG_ACTIONS"] = "1"
 
     with log_path.open("ab", buffering=0) as log_file:
         process = subprocess.Popen(

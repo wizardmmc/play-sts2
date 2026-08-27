@@ -4470,6 +4470,7 @@ internal static class GameStateService
             card_id = card.Id.Entry,
             name = card.Title,
             upgraded = card.IsUpgraded,
+            upgrade_level = card.CurrentUpgradeLevel,
             target_type = card.TargetType.ToString(),
             requires_target = CardRequiresTarget(card),
             target_index_space = targetIndexSpace,
@@ -5231,6 +5232,7 @@ internal static class GameStateService
             card_id = card.Id.Entry,
             name = card.Title,
             upgraded = card.IsUpgraded,
+            upgrade_level = card.CurrentUpgradeLevel,
             card_type = card.Type.ToString(),
             rarity = card.Rarity.ToString(),
             costs_x = card.EnergyCost.CostsX,
@@ -6593,6 +6595,8 @@ internal sealed class CombatHandCardPayload
 
     public bool upgraded { get; init; }
 
+    public int upgrade_level { get; init; }
+
     public string target_type { get; init; } = string.Empty;
 
     public bool requires_target { get; init; }
@@ -6808,6 +6812,8 @@ internal sealed class DeckCardPayload
     public string name { get; init; } = string.Empty;
 
     public bool upgraded { get; init; }
+
+    public int upgrade_level { get; init; }
 
     public string card_type { get; init; } = string.Empty;
 
