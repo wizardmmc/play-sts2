@@ -99,9 +99,8 @@ internal sealed class GameEventService
 
     public GameEventSubscription Subscribe()
     {
-        var channel = Channel.CreateBounded<GameEventEnvelope>(new BoundedChannelOptions(SubscriberQueueCapacity)
+        var channel = Channel.CreateUnbounded<GameEventEnvelope>(new UnboundedChannelOptions
         {
-            FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = false
         });
@@ -280,6 +279,38 @@ internal sealed class GameEventService
         }
 
         _lastState = current;
+    }
+
+    public void PublishActionExecuted(
+        ActionRequest request,
+        GameStatePayload beforeState,
+        ActionResponsePayload response)
+    {
+        Publish("action_executed", new
+        {
+            request = new
+            {
+                action = request.action,
+                card_index = request.card_index,
+                target_index = request.target_index,
+                option_index = request.option_index,
+                command = request.command,
+                client_context = request.client_context
+            },
+            before_state = beforeState,
+            after_state = response.state,
+            status = response.status,
+            stable = response.stable
+        });
+    }
+
+    public void PublishNativeUiCaptureGap(string action, string reason)
+    {
+        Publish("native_ui_capture_gap", new
+        {
+            action,
+            reason
+        });
     }
 
     private void Publish(string eventType, object data)

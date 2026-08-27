@@ -12,7 +12,7 @@ internal static class Router
 {
     private const string ServiceName = "sts2-ai-agent";
     private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.8.0";
+    private const string ModVersion = "0.8.0-rlsts2.38";
     private const string LogPrefix = "[STS2AIAgent.Router]";
 
     private static long _requestCounter;
@@ -126,7 +126,15 @@ internal static class Router
                     throw new ApiException(400, "invalid_request", "Request body must contain an action field.");
                 }
 
-                var actionResponse = await GameThread.InvokeAsync(() => GameActionService.ExecuteAsync(actionRequest));
+                var actionResponse = await GameThread.InvokeAsync(async () =>
+                {
+                    using var suppression = NativeUiActionRecorder.Suppress();
+                    var beforeState = GameStateService.BuildStatePayload();
+                    var result = await GameActionService.ExecuteAsync(actionRequest);
+                    GameEventService.Instance.PublishActionExecuted(
+                        actionRequest, beforeState, result);
+                    return result;
+                });
                 await WriteJsonAsync(response, 200, new
                 {
                     ok = true,
@@ -241,17 +249,17 @@ internal static class Router
         }
         catch (HttpListenerException)
         {
-            // Client disconnected.
+            // 客户端已断开连接。
             return 200;
         }
         catch (IOException)
         {
-            // Client disconnected.
+            // 客户端已断开连接。
             return 200;
         }
         catch (ObjectDisposedException)
         {
-            // Response stream is already closed.
+            // 响应流已经关闭。
             return 200;
         }
     }

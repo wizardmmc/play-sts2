@@ -18,6 +18,7 @@ public static class ModEntry
         Log.Info($"{LogPrefix} Initializing");
         RegisterShutdownHooks();
         GameThread.Initialize();
+        NativeUiActionRecorder.Start();
         GameEventService.Instance.Start();
         HttpServer.Instance.Start();
         Log.Info($"{LogPrefix} Ready");

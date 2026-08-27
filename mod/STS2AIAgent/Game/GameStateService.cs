@@ -5,6 +5,7 @@ using Godot;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -12,6 +13,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Map;
@@ -28,6 +30,7 @@ using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Debug.Multiplayer;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
@@ -52,13 +55,17 @@ namespace STS2AIAgent.Game;
 
 internal static class GameStateService
 {
-    private const int StateVersion = 10;
+    private const int StateVersion = 11;
     private const int AgentViewVersion = 4;
     private static readonly TimeSpan CombatActionSnapshotStableDelay = TimeSpan.FromMilliseconds(200);
     private static string? _lastCombatActionReadinessSignature;
     private static DateTime _lastCombatActionReadinessSinceUtc = DateTime.MinValue;
 
-    public static GameStatePayload BuildStatePayload()
+    public static GameStatePayload BuildStatePayload() =>
+        BuildStatePayload(null);
+
+    internal static GameStatePayload BuildStatePayload(
+        string? trustedNativeUiAction)
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
         var combatState = CombatManager.Instance.DebugOnlyGetState();
@@ -66,12 +73,21 @@ internal static class GameStateService
         var screen = ResolveScreen(currentScreen);
         var session = BuildSessionPayload(currentScreen, runState);
         var availableActions = BuildAvailableActionNames(currentScreen, combatState, runState);
+        if (!string.IsNullOrEmpty(trustedNativeUiAction) &&
+            !availableActions.Contains(trustedNativeUiAction,
+                StringComparer.Ordinal))
+        {
+            availableActions = availableActions
+                .Append(trustedNativeUiAction)
+                .ToArray();
+        }
         var combat = BuildCombatPayload(combatState);
         var run = BuildRunPayload(currentScreen, combatState, runState);
         var multiplayer = BuildMultiplayerPayload(currentScreen, runState);
         var multiplayerLobby = BuildMultiplayerLobbyPayload(currentScreen);
         var map = BuildMapPayload(currentScreen, runState);
         var selection = BuildSelectionPayload(currentScreen);
+        var cardsView = BuildCardsViewPayload(currentScreen);
         var characterSelect = BuildCharacterSelectPayload(currentScreen);
         var timeline = BuildTimelinePayload(currentScreen);
         var chest = BuildChestPayload(currentScreen);
@@ -80,6 +96,7 @@ internal static class GameStateService
         var rest = BuildRestPayload(currentScreen, runState);
         var reward = BuildRewardPayload(currentScreen);
         var bundles = BuildBundlePayload(currentScreen);
+        var crystalSphere = BuildCrystalSpherePayload(currentScreen);
         var modal = BuildModalPayload(currentScreen);
         var gameOver = BuildGameOverPayload(currentScreen, runState);
 
@@ -98,6 +115,7 @@ internal static class GameStateService
             multiplayer_lobby = multiplayerLobby,
             map = map,
             selection = selection,
+            cards_view = cardsView,
             character_select = characterSelect,
             timeline = timeline,
             chest = chest,
@@ -106,6 +124,7 @@ internal static class GameStateService
             rest = rest,
             reward = reward,
             bundles = bundles,
+            crystal_sphere = crystalSphere,
             modal = modal,
             game_over = gameOver,
             agent_view = BuildAgentViewPayload(
@@ -120,6 +139,7 @@ internal static class GameStateService
                 run,
                 map,
                 selection,
+                cardsView,
                 characterSelect,
                 timeline,
                 chest,
@@ -320,23 +340,6 @@ internal static class GameStateService
             });
         }
 
-        if (CanCollectRewardsAndProceed(currentScreen))
-        {
-            descriptors.Add(new ActionDescriptor
-            {
-                name = "resolve_rewards",
-                requires_target = false,
-                requires_index = true
-            });
-
-            descriptors.Add(new ActionDescriptor
-            {
-                name = "collect_rewards_and_proceed",
-                requires_target = false,
-                requires_index = false
-            });
-        }
-
         if (CanClaimReward(currentScreen))
         {
             descriptors.Add(new ActionDescriptor
@@ -367,6 +370,16 @@ internal static class GameStateService
             });
         }
 
+        if (CanChooseRewardAlternative(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "choose_reward_alternative",
+                requires_target = false,
+                requires_index = true
+            });
+        }
+
         if (CanSelectDeckCard(currentScreen))
         {
             descriptors.Add(new ActionDescriptor
@@ -374,6 +387,16 @@ internal static class GameStateService
                 name = "select_deck_card",
                 requires_target = false,
                 requires_index = true
+            });
+        }
+
+        if (CanSkipCardSelection(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "skip_card_selection",
+                requires_target = false,
+                requires_index = false
             });
         }
 
@@ -437,11 +460,11 @@ internal static class GameStateService
             });
         }
 
-        if (CanChooseCapstoneOption(currentScreen))
+        if (CanChooseCrystalSphereCell(currentScreen))
         {
             descriptors.Add(new ActionDescriptor
             {
-                name = "choose_capstone_option",
+                name = "choose_crystal_sphere_cell",
                 requires_target = false,
                 requires_index = true
             });
@@ -544,6 +567,16 @@ internal static class GameStateService
                 name = "select_character",
                 requires_target = false,
                 requires_index = true
+            });
+        }
+
+        if (CanSetSeed(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "set_seed",
+                requires_target = false,
+                requires_index = false
             });
         }
 
@@ -755,12 +788,39 @@ internal static class GameStateService
 
     public static bool CanSkipRewardCards(IScreenContext? currentScreen)
     {
-        return GetCardRewardAlternativeButtons(currentScreen).Count > 0;
+        return GetCardRewardAlternatives(currentScreen).Any(
+            option => option.OptionId.Equals("Skip", StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static bool CanChooseRewardAlternative(IScreenContext? currentScreen)
+    {
+        return GetCardRewardAlternatives(currentScreen).Any(
+            option => !option.OptionId.Equals("Skip", StringComparison.OrdinalIgnoreCase));
     }
 
     public static bool CanSelectDeckCard(IScreenContext? currentScreen)
     {
-        return GetDeckSelectionOptions(currentScreen).Count > 0;
+        return currentScreen is not NCardRewardSelectionScreen &&
+            GetDeckSelectionOptions(currentScreen).Count > 0;
+    }
+
+    public static NButton? GetCardSelectionSkipButton(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NChooseACardSelectionScreen screen)
+        {
+            return null;
+        }
+
+        var button = screen.GetNodeOrNull<NButton>("SkipButton");
+        return button != null && GodotObject.IsInstanceValid(button) &&
+            button.IsEnabled && button.IsVisibleInTree()
+            ? button
+            : null;
+    }
+
+    public static bool CanSkipCardSelection(IScreenContext? currentScreen)
+    {
+        return GetCardSelectionSkipButton(currentScreen) != null;
     }
 
     public static bool CanCloseCardsView(IScreenContext? currentScreen)
@@ -770,14 +830,17 @@ internal static class GameStateService
 
     public static bool CanConfirmSelection(IScreenContext? currentScreen)
     {
-        return TryGetCombatHandSelectionMetadata(currentScreen, out _, out var metadata) &&
-            metadata.RequiresConfirmation &&
-            metadata.CanConfirm;
+        if (TryGetCombatHandSelectionMetadata(currentScreen, out _, out var metadata))
+        {
+            return metadata.RequiresConfirmation && metadata.CanConfirm;
+        }
+
+        return GetGridSelectionConfirmButton(currentScreen) != null;
     }
 
     public static bool CanProceed(IScreenContext? currentScreen)
     {
-        if (currentScreen is NRewardsScreen or NCardRewardSelectionScreen)
+        if (currentScreen is NCardRewardSelectionScreen)
         {
             return false;
         }
@@ -843,13 +906,13 @@ internal static class GameStateService
                 return false;
             }
 
-            // Finished events have a synthetic proceed option
+            // 已结束事件提供一个合成的继续选项。
             if (eventModel.IsFinished)
             {
                 return true;
             }
 
-            // Non-finished events need at least one non-locked option
+            // 未结束事件至少需要一个未锁定选项。
             return eventModel.CurrentOptions.Any(o => !o.IsLocked);
         }
         catch
@@ -875,14 +938,179 @@ internal static class GameStateService
             .ToArray();
     }
 
+    public static bool CanChooseCrystalSphereCell(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCrystalSphereScreen sphereScreen ||
+            !GodotObject.IsInstanceValid(sphereScreen))
+        {
+            return false;
+        }
+
+        var minigame = GetCrystalSphereMinigame(sphereScreen);
+        return minigame != null && minigame.DivinationCount > 0 &&
+            GetClickableCrystalSphereCells(sphereScreen).Count > 0;
+    }
+
+    /// <summary>
+    /// 按确定的行优先顺序返回水晶球网格中仍隐藏但可见的格子。筛选条件与游戏
+    /// CrystalSphereScreenHandler 的点击逻辑一致，使 API 点击等同于原生 UI 点击。
+    /// </summary>
+    public static IReadOnlyList<NCrystalSphereCell> GetClickableCrystalSphereCells(
+        IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCrystalSphereScreen sphereScreen ||
+            !GodotObject.IsInstanceValid(sphereScreen))
+        {
+            return Array.Empty<NCrystalSphereCell>();
+        }
+
+        var cellContainer = sphereScreen.GetNodeOrNull<Control>("%Cells");
+        if (cellContainer == null || !GodotObject.IsInstanceValid(cellContainer))
+        {
+            return Array.Empty<NCrystalSphereCell>();
+        }
+
+        return FindDescendants<NCrystalSphereCell>(cellContainer)
+            .Where(c => GodotObject.IsInstanceValid(c) && c.Visible && c.Entity.IsHidden)
+            .OrderBy(c => c.Entity.Y)
+            .ThenBy(c => c.Entity.X)
+            .ToArray();
+    }
+
+    private static readonly FieldInfo? CrystalSphereEntityField = typeof(NCrystalSphereScreen)
+        .GetField("_entity", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    public static CrystalSphereMinigame? GetCrystalSphereMinigame(NCrystalSphereScreen screen)
+    {
+        if (CrystalSphereEntityField == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return CrystalSphereEntityField.GetValue(screen) as CrystalSphereMinigame;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 序列化水晶球占卜小游戏，只公开不受迷雾遮挡的信息：剩余占卜次数、工具、
+    /// 可点击的隐藏格和已经揭示的物品。迷雾下的物品种类与位置会被有意省略，
+    /// 防止 API 玩家获得额外视野。
+    /// </summary>
+    private static CrystalSpherePayload? BuildCrystalSpherePayload(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCrystalSphereScreen sphereScreen ||
+            !GodotObject.IsInstanceValid(sphereScreen))
+        {
+            return null;
+        }
+
+        var minigame = GetCrystalSphereMinigame(sphereScreen);
+        if (minigame == null)
+        {
+            return null;
+        }
+
+        var clickable = GetClickableCrystalSphereCells(sphereScreen)
+            .Select((cell, index) => new CrystalSphereCellPayload
+            {
+                index = index,
+                x = cell.Entity.X,
+                y = cell.Entity.Y
+            })
+            .ToArray();
+
+        var revealed = EnumerateRevealedCrystalSphereItems(minigame)
+            .Select(item => new CrystalSphereItemPayload
+            {
+                kind = DescribeCrystalSphereItem(item),
+                x = item.Position.X,
+                y = item.Position.Y
+            })
+            .ToArray();
+
+        var gridSize = minigame.GridSize;
+        return new CrystalSpherePayload
+        {
+            divinations_remaining = minigame.DivinationCount,
+            tool = minigame.CrystalSphereTool.ToString().ToLowerInvariant(),
+            grid_width = gridSize.X,
+            grid_height = gridSize.Y,
+            clickable_cells = clickable,
+            revealed_items = revealed
+        };
+    }
+
+    /// <summary>
+    /// 物品占据的所有格子都脱离迷雾后，才视为已经揭示；该时机与游戏触发物品
+    /// Revealed 事件的时机一致。
+    /// </summary>
+    private static IEnumerable<CrystalSphereItem> EnumerateRevealedCrystalSphereItems(
+        CrystalSphereMinigame minigame)
+    {
+        var grid = minigame.cells;
+        var seen = new HashSet<CrystalSphereItem>();
+        for (var x = 0; x < grid.GetLength(0); x++)
+        {
+            for (var y = 0; y < grid.GetLength(1); y++)
+            {
+                var item = grid[x, y].Item;
+                if (item == null || !seen.Add(item))
+                {
+                    continue;
+                }
+
+                var fullyRevealed = true;
+                for (var i = 0; i < item.Size.X && fullyRevealed; i++)
+                {
+                    for (var j = 0; j < item.Size.Y; j++)
+                    {
+                        if (grid[item.Position.X + i, item.Position.Y + j].IsHidden)
+                        {
+                            fullyRevealed = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (fullyRevealed)
+                {
+                    yield return item;
+                }
+            }
+        }
+    }
+
+    private static string DescribeCrystalSphereItem(CrystalSphereItem item)
+    {
+        var name = item.GetType().Name;
+        if (name.StartsWith("CrystalSphere", StringComparison.Ordinal))
+        {
+            name = name["CrystalSphere".Length..];
+        }
+
+        return name.ToLowerInvariant() switch
+        {
+            "cardreward" => "card_reward",
+            var other => other
+        };
+    }
+
     public static bool CanChooseBundle(IScreenContext? currentScreen)
     {
-        return GetBundleOptions(currentScreen).Count > 0;
+        return GetSelectedBundle(currentScreen) == null &&
+            GetBundleOptions(currentScreen).Count > 0;
     }
 
     public static bool CanConfirmBundle(IScreenContext? currentScreen)
     {
-        return GetBundleConfirmButtons(currentScreen).Count > 0;
+        return GetSelectedBundle(currentScreen) != null &&
+            GetBundleConfirmButtons(currentScreen).Count > 0;
     }
 
     public static IReadOnlyList<NButton> GetBundleConfirmButtons(IScreenContext? currentScreen)
@@ -892,11 +1120,24 @@ internal static class GameStateService
             return Array.Empty<NButton>();
         }
 
-        // Look specifically for NConfirmButton or button named "Confirm"
-        return FindDescendants<NButton>((Node)bundleScreen)
-            .Where(b => GodotObject.IsInstanceValid(b) && b.IsVisibleInTree() && b.IsEnabled
-                && (b.GetType().Name == "NConfirmButton" || b.Name == "Confirm"))
-            .ToArray();
+        var confirmButton = typeof(NChooseABundleSelectionScreen)
+            .GetField("_previewConfirmButton", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(bundleScreen) as NButton;
+        return confirmButton != null && GodotObject.IsInstanceValid(confirmButton)
+            ? new[] { confirmButton }
+            : Array.Empty<NButton>();
+    }
+
+    public static Control? GetSelectedBundle(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NChooseABundleSelectionScreen bundleScreen)
+        {
+            return null;
+        }
+
+        return typeof(NChooseABundleSelectionScreen)
+            .GetField("_selectedBundle", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(bundleScreen) as Control;
     }
 
     public static IReadOnlyList<Control> GetBundleOptions(IScreenContext? currentScreen)
@@ -906,9 +1147,12 @@ internal static class GameStateService
             return Array.Empty<Control>();
         }
 
-        // NCardBundle nodes represent the selectable card packs
-        return FindDescendants<Control>((Node)bundleScreen)
-            .Where(n => GodotObject.IsInstanceValid(n) && n.IsVisibleInTree() && n.GetType().Name == "NCardBundle")
+        var bundleRow = typeof(NChooseABundleSelectionScreen)
+            .GetField("_bundleRow", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(bundleScreen) as Node
+            ?? (Node)bundleScreen;
+        return FindDescendants<Control>(bundleRow)
+            .Where(n => GodotObject.IsInstanceValid(n) && n.GetType().Name == "NCardBundle")
             .ToArray();
     }
 
@@ -1053,9 +1297,8 @@ internal static class GameStateService
             return true;
         }
 
-        // Some main-menu states still allow the singleplayer submenu to open even when the
-        // button has not become visible in the scene tree. If there is no active run flow to
-        // continue or abandon, prefer exposing character select instead of hard-blocking.
+        // 某些主菜单状态下，即使单人游戏按钮尚未在场景树中可见，子菜单仍可打开。
+        // 如果当前没有需要继续或放弃的局内流程，则优先开放角色选择，不要硬性阻塞。
         return !CanContinueRun(currentScreen) && !CanAbandonRun(currentScreen);
     }
 
@@ -1283,6 +1526,20 @@ internal static class GameStateService
             .ToArray();
     }
 
+    public static IReadOnlyList<CardRewardAlternative> GetCardRewardAlternatives(
+        IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCardRewardSelectionScreen cardRewardScreen)
+        {
+            return Array.Empty<CardRewardAlternative>();
+        }
+
+        return typeof(NCardRewardSelectionScreen)
+            .GetField("_extraOptions", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(cardRewardScreen) as IReadOnlyList<CardRewardAlternative>
+            ?? Array.Empty<CardRewardAlternative>();
+    }
+
     public static IReadOnlyList<NCardHolder> GetDeckSelectionOptions(IScreenContext? currentScreen)
     {
         if (currentScreen is NCardsViewScreen)
@@ -1498,7 +1755,7 @@ internal static class GameStateService
         {
         }
 
-        return GetCardRulesText(card);
+        return string.Empty;
     }
 
     private static CardDynamicValuePayload[] BuildCardDynamicValuePayloads(CardModel? card)
@@ -1535,7 +1792,18 @@ internal static class GameStateService
 
     private static string GetPreferredCardRulesText(string rulesText, string? resolvedRulesText)
     {
-        return string.IsNullOrWhiteSpace(resolvedRulesText) ? rulesText : resolvedRulesText;
+        if (!string.IsNullOrWhiteSpace(resolvedRulesText))
+        {
+            return resolvedRulesText;
+        }
+
+        if (string.IsNullOrWhiteSpace(rulesText)
+            || rulesText.Contains('{') || rulesText.Contains('}'))
+        {
+            return string.Empty;
+        }
+
+        return rulesText;
     }
 
     private static AscensionEffectPayload[] BuildAscensionEffectPayloads(int ascensionLevel)
@@ -1594,6 +1862,18 @@ internal static class GameStateService
 
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         var valueType = value.GetType();
+
+        try
+        {
+            var getRawText = valueType.GetMethod("GetRawText", flags, null, Type.EmptyTypes, null);
+            if (getRawText != null && getRawText.ReturnType == typeof(string))
+            {
+                return getRawText.Invoke(value, null) as string ?? string.Empty;
+            }
+        }
+        catch
+        {
+        }
 
         try
         {
@@ -1672,11 +1952,11 @@ internal static class GameStateService
             return null;
         }
 
-        var backButton = cardsViewScreen.GetNodeOrNull<NButton>("BackButton");
-        return backButton != null &&
-            GodotObject.IsInstanceValid(backButton) &&
-            backButton.IsVisibleInTree() &&
-            backButton.IsEnabled
+        var backButton = typeof(NCardsViewScreen)
+            .GetField("_backButton", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(cardsViewScreen) as NButton
+            ?? cardsViewScreen.GetNodeOrNull<NButton>("BackButton");
+        return backButton != null && GodotObject.IsInstanceValid(backButton)
             ? backButton
             : null;
     }
@@ -1708,6 +1988,19 @@ internal static class GameStateService
     public static bool CardRequiresTarget(CardModel card)
     {
         return RequiresIndexedCardTarget(card.TargetType);
+    }
+
+    public static bool CanSetSeed(IScreenContext? currentScreen)
+    {
+        if (!StandardModeSeedService.IsSupported ||
+            currentScreen is not NCharacterSelectScreen screen ||
+            !GodotObject.IsInstanceValid(screen))
+        {
+            return false;
+        }
+
+        var lobby = screen.Lobby;
+        return lobby.NetService.Type == NetGameType.Singleplayer && !lobby.LocalPlayer.isReady;
     }
 
     public static bool RestOptionRequiresTarget(RestSiteOption option, RunState? runState, Player? localPlayer)
@@ -1880,6 +2173,63 @@ internal static class GameStateService
         return true;
     }
 
+    private static CardSelectorPrefs? TryGetGridSelectionPrefs(
+        NCardGridSelectionScreen screen)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var field = screen.GetType().GetField("_prefs", flags);
+        return field?.GetValue(screen) is CardSelectorPrefs prefs
+            ? prefs
+            : null;
+    }
+
+    private static IReadOnlySet<CardModel> GetGridSelectedCards(
+        NCardGridSelectionScreen screen)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var field = screen.GetType().GetField("_selectedCards", flags);
+        return field?.GetValue(screen) is IEnumerable<CardModel> cards
+            ? cards.ToHashSet()
+            : new HashSet<CardModel>();
+    }
+
+    public static bool TryGetGridSelectionMetadata(
+        IScreenContext? currentScreen,
+        out NCardGridSelectionScreen? screen,
+        out GridSelectionMetadata metadata)
+    {
+        screen = currentScreen as NCardGridSelectionScreen;
+        metadata = default;
+        if (screen == null || !GodotObject.IsInstanceValid(screen))
+        {
+            return false;
+        }
+
+        var prefs = TryGetGridSelectionPrefs(screen);
+        var selectedCards = GetGridSelectedCards(screen);
+        var canConfirm = GetGridSelectionConfirmButton(screen) != null;
+        metadata = new GridSelectionMetadata(
+            prefs?.MinSelect ?? 1,
+            prefs?.MaxSelect ?? 1,
+            selectedCards,
+            (prefs?.RequireManualConfirmation ?? false) || canConfirm,
+            canConfirm);
+        return true;
+    }
+
+    public static NConfirmButton? GetGridSelectionConfirmButton(
+        IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCardGridSelectionScreen screen)
+        {
+            return null;
+        }
+
+        return FindDescendants<NConfirmButton>(screen)
+            .FirstOrDefault(button => GodotObject.IsInstanceValid(button) &&
+                button.IsEnabled && button.IsVisibleInTree());
+    }
+
     private static bool IsLocalCombatTurnReady(Player me)
     {
         var playerCombatState = me.PlayerCombatState;
@@ -2039,12 +2389,6 @@ internal static class GameStateService
             names.Add("choose_map_node");
         }
 
-        if (CanCollectRewardsAndProceed(currentScreen))
-        {
-            names.Add("resolve_rewards");
-            names.Add("collect_rewards_and_proceed");
-        }
-
         if (CanClaimReward(currentScreen))
         {
             names.Add("claim_reward");
@@ -2060,9 +2404,19 @@ internal static class GameStateService
             names.Add("skip_reward_cards");
         }
 
+        if (CanChooseRewardAlternative(currentScreen))
+        {
+            names.Add("choose_reward_alternative");
+        }
+
         if (CanSelectDeckCard(currentScreen))
         {
             names.Add("select_deck_card");
+        }
+
+        if (CanSkipCardSelection(currentScreen))
+        {
+            names.Add("skip_card_selection");
         }
 
         if (CanCloseCardsView(currentScreen))
@@ -2095,9 +2449,9 @@ internal static class GameStateService
             names.Add("choose_event_option");
         }
 
-        if (CanChooseCapstoneOption(currentScreen))
+        if (CanChooseCrystalSphereCell(currentScreen))
         {
-            names.Add("choose_capstone_option");
+            names.Add("choose_crystal_sphere_cell");
         }
 
         if (CanChooseBundle(currentScreen))
@@ -2148,6 +2502,11 @@ internal static class GameStateService
         if (CanSelectCharacter(currentScreen))
         {
             names.Add("select_character");
+        }
+
+        if (CanSetSeed(currentScreen))
+        {
+            names.Add("set_seed");
         }
 
         if (CanEmbark(currentScreen))
@@ -2232,6 +2591,7 @@ internal static class GameStateService
             stars = me.PlayerCombatState.Stars,
             focus = me.Creature.GetPowerAmount<FocusPower>(),
             powers = BuildCreaturePowerPayloads(me.Creature),
+            osty = BuildOstyPayload(me),
             base_orb_slots = me.BaseOrbSlotCount,
             orb_capacity = orbQueue.Capacity,
             empty_orb_slots = Math.Max(0, orbQueue.Capacity - orbs.Count),
@@ -2240,6 +2600,10 @@ internal static class GameStateService
             attacks_played_this_turn = GameActionService.AttacksPlayedThisTurn,
             skills_played_this_turn = GameActionService.SkillsPlayedThisTurn
         };
+        // 为紧凑版 /state 战斗载荷补充牌堆数量。这里复用智能体视图已经验证过的
+        // 反射读取器，让 Harness 能显示实际数量而不是固定的“?”。
+        var drawCount = ReadCombatPileCards(me.PlayerCombatState, "DrawPile", "DrawDeck").Length;
+        var discardCount = ReadCombatPileCards(me.PlayerCombatState, "DiscardPile").Length;
         var enemyPayloads = enemies.Select((enemy, index) => BuildEnemyPayload(enemy, index)).ToArray();
         var lethalRisks = BuildCombatLethalRiskPayloads(playerPayload, enemyPayloads);
 
@@ -2250,9 +2614,39 @@ internal static class GameStateService
                 .Select(player => BuildCombatPlayerSummaryPayload(player, combatState, connectedPlayerIds, me.NetId))
                 .ToArray(),
             hand = hand.Select((card, index) => BuildHandCardPayload(combatState, card, index)).ToArray(),
+            draw_count = drawCount,
+            discard_count = discardCount,
             enemies = enemyPayloads,
             end_turn_will_kill_player = lethalRisks.Any(risk => risk.will_kill_player),
             lethal_risks = lethalRisks
+        };
+    }
+
+    private static CombatCompanionPayload? BuildOstyPayload(Player player)
+    {
+        if (player.Character is not Necrobinder)
+        {
+            return null;
+        }
+
+        var osty = player.Osty;
+        if (player.IsOstyMissing || osty is null)
+        {
+            return new CombatCompanionPayload
+            {
+                is_missing = true,
+                is_alive = false
+            };
+        }
+
+        return new CombatCompanionPayload
+        {
+            current_hp = osty.CurrentHp,
+            max_hp = osty.MaxHp,
+            block = osty.Block,
+            is_missing = false,
+            is_alive = osty.IsAlive,
+            powers = BuildCreaturePowerPayloads(osty)
         };
     }
 
@@ -2378,6 +2772,7 @@ internal static class GameStateService
         RunPayload? run,
         MapPayload? map,
         SelectionPayload? selection,
+        CardsViewPayload? cardsView,
         CharacterSelectPayload? characterSelect,
         TimelinePayload? timeline,
         ChestPayload? chest,
@@ -2404,6 +2799,7 @@ internal static class GameStateService
             run = BuildAgentRunPayload(combatState, runState, run, glossaryTerms),
             map = BuildAgentMapPayload(map),
             selection = BuildAgentSelectionPayload(selection, glossaryTerms),
+            cards_view = BuildAgentCardsViewPayload(cardsView, glossaryTerms),
             character_select = BuildAgentCharacterSelectPayload(characterSelect),
             timeline = BuildAgentTimelinePayload(timeline),
             chest = BuildAgentChestPayload(chest),
@@ -2441,6 +2837,14 @@ internal static class GameStateService
                 energy = combat.player.energy,
                 stars = combat.player.stars,
                 focus = combat.player.focus,
+                osty = combat.player.osty == null ? null : new
+                {
+                    hp = $"{combat.player.osty.current_hp}/{combat.player.osty.max_hp}",
+                    block = combat.player.osty.block,
+                    is_missing = combat.player.osty.is_missing,
+                    is_alive = combat.player.osty.is_alive,
+                    powers = combat.player.osty.powers
+                },
                 orbs = combat.player.orbs.Select(orb => FormatOrbLine(orb)).ToArray(),
                 cards_played_this_turn = combat.player.cards_played_this_turn,
                 attacks_played_this_turn = combat.player.attacks_played_this_turn,
@@ -2476,7 +2880,9 @@ internal static class GameStateService
                 i = enemy.index,
                 enemy_id = enemy.enemy_id,
                 name = enemy.name,
-                hp = $"{enemy.current_hp}/{enemy.max_hp}",
+                hp = enemy.hp_display == "InfiniteWithoutNumbers"
+                    ? "∞"
+                    : $"{enemy.current_hp}/{enemy.max_hp}",
                 block = enemy.block,
                 intent = enemy.intent,
                 move_id = enemy.move_id,
@@ -2578,6 +2984,7 @@ internal static class GameStateService
         foreach (var option in reward.rewards)
         {
             CollectGlossaryTerms(glossaryTerms, option.description);
+            CollectGlossaryTerms(glossaryTerms, option.effect_description);
         }
 
         return new
@@ -2587,13 +2994,24 @@ internal static class GameStateService
             rewards = reward.rewards.Select(option => new
             {
                 i = option.index,
-                line = $"{option.reward_type}: {option.description}",
+                reward_type = option.reward_type == "SpecialCard"
+                    ? string.Empty
+                    : option.reward_type,
+                name = option.name,
+                description = option.description,
+                effect_description = option.effect_description,
+                line = option.reward_type == "SpecialCard"
+                    ? option.description
+                    : string.IsNullOrEmpty(option.effect_description)
+                    ? $"{option.reward_type}: {option.description}"
+                    : $"{option.reward_type}: {option.name} — {option.effect_description}",
                 claimable = option.claimable
             }).ToArray(),
             cards = reward.card_options.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, null, null, false, false, GetPreferredCardRulesText(card.rules_text, card.resolved_rules_text), glossaryTerms)).ToArray(),
             alternatives = reward.alternatives.Select(option => new
             {
                 i = option.index,
+                option_id = option.option_id,
                 line = option.label
             }).ToArray()
         };
@@ -2717,6 +3135,23 @@ internal static class GameStateService
         };
     }
 
+    private static object? BuildAgentCardsViewPayload(
+        CardsViewPayload? cardsView,
+        HashSet<string> glossaryTerms)
+    {
+        if (cardsView == null)
+        {
+            return null;
+        }
+
+        CollectGlossaryTerms(glossaryTerms, cardsView.prompt);
+        return new
+        {
+            prompt = cardsView.prompt,
+            cards = BuildAgentCardStacks(cardsView.cards, glossaryTerms)
+        };
+    }
+
     private static object? BuildAgentMapPayload(MapPayload? map)
     {
         if (map == null)
@@ -2805,7 +3240,7 @@ internal static class GameStateService
             relics = chest.relic_options.Select(relic => new
             {
                 i = relic.index,
-                line = $"{relic.name} [{relic.rarity}]"
+                line = $"{relic.name} [{relic.rarity}] — {relic.description}"
             }).ToArray()
         };
     }
@@ -3539,9 +3974,21 @@ internal static class GameStateService
             return null;
         }
 
-        var combatHandSelection = TryGetCombatHandSelectionMetadata(currentScreen, out _, out var metadata)
-            ? metadata
-            : default;
+        var hasCombatHandSelection = TryGetCombatHandSelectionMetadata(
+            currentScreen, out _, out var combatHandSelection);
+        var hasGridSelection = TryGetGridSelectionMetadata(
+            currentScreen, out _, out var gridSelection);
+        var minSelect = hasGridSelection ? gridSelection.MinSelect
+            : hasCombatHandSelection ? combatHandSelection.MinSelect : 1;
+        var maxSelect = hasGridSelection ? gridSelection.MaxSelect
+            : hasCombatHandSelection ? combatHandSelection.MaxSelect : 1;
+        var selectedCount = hasGridSelection ? gridSelection.SelectedCards.Count
+            : hasCombatHandSelection ? combatHandSelection.SelectedCount : 0;
+        var requiresConfirmation = hasGridSelection
+            ? gridSelection.RequiresConfirmation
+            : hasCombatHandSelection && combatHandSelection.RequiresConfirmation;
+        var canConfirm = hasGridSelection ? gridSelection.CanConfirm
+            : hasCombatHandSelection && combatHandSelection.CanConfirm;
 
         return new SelectionPayload
         {
@@ -3557,12 +4004,15 @@ internal static class GameStateService
                 _ => "deck_card_select"
             },
             prompt = GetDeckSelectionPrompt(currentScreen) ?? string.Empty,
-            min_select = combatHandSelection.MinSelect,
-            max_select = combatHandSelection.MaxSelect,
-            selected_count = combatHandSelection.SelectedCount,
-            requires_confirmation = combatHandSelection.RequiresConfirmation,
-            can_confirm = combatHandSelection.CanConfirm,
-            cards = cards.Select((holder, index) => BuildSelectionCardPayload(holder.CardModel!, index)).ToArray()
+            min_select = minSelect,
+            max_select = maxSelect,
+            selected_count = selectedCount,
+            requires_confirmation = requiresConfirmation,
+            can_confirm = canConfirm,
+            cards = cards.Select((holder, index) => BuildSelectionCardPayload(
+                holder.CardModel!, index,
+                hasGridSelection && gridSelection.SelectedCards.Contains(
+                    holder.CardModel!))).ToArray()
         };
     }
 
@@ -3653,7 +4103,7 @@ internal static class GameStateService
 
             if (eventModel.IsFinished)
             {
-                // Mirror NEventRoom.SetOptions(): synthesize a Proceed option
+                // 对齐 NEventRoom.SetOptions()：合成一个继续选项。
                 options.Add(new EventOptionPayload
                 {
                     index = 0,
@@ -3670,6 +4120,11 @@ internal static class GameStateService
                 for (int i = 0; i < currentOptions.Count; i++)
                 {
                     var opt = currentOptions[i];
+                    // 对齐 NEventOptionButton._Ready()：事件选项经常在 DynamicVars
+                    // 中携带实时成本，例如 Gold 和 HpLoss。若在注入前格式化，
+                    // 就会泄漏占位符，而不是游戏 UI 显示的具体文本。
+                    eventModel.DynamicVars.AddTo(opt.Title);
+                    eventModel.DynamicVars.AddTo(opt.Description);
                     options.Add(new EventOptionPayload
                     {
                         index = i,
@@ -3684,11 +4139,21 @@ internal static class GameStateService
                 }
             }
 
+            var eventDescription = eventModel.Description;
+            if (eventDescription != null)
+            {
+                eventModel.Owner?.Character.AddDetailsTo(eventDescription);
+                eventDescription.Add(
+                    "IsMultiplayer",
+                    eventModel.Owner?.RunState.Players.Count > 1);
+                eventModel.DynamicVars.AddTo(eventDescription);
+            }
+
             return new EventPayload
             {
                 event_id = SafeReadString(() => eventModel.Id?.Entry, "unknown"),
                 title = SafeReadString(() => eventModel.Title?.GetFormattedText()),
-                description = SafeReadString(() => eventModel.Description?.GetFormattedText()),
+                description = SafeReadString(() => eventDescription?.GetFormattedText()),
                 is_finished = SafeReadBool(() => eventModel.IsFinished),
                 options = options.ToArray()
             };
@@ -3874,7 +4339,8 @@ internal static class GameStateService
             index = index,
             relic_id = relic.Id.Entry,
             name = relic.Title.GetFormattedText(),
-            rarity = relic.Rarity.ToString()
+            rarity = relic.Rarity.ToString(),
+            description = GetDynamicFormattedTextProperty(relic, "DynamicDescription", "Description") ?? string.Empty
         }).ToArray();
     }
 
@@ -3897,7 +4363,7 @@ internal static class GameStateService
         if (currentScreen is NCardRewardSelectionScreen)
         {
             var cardOptions = GetCardRewardOptions(currentScreen);
-            var alternatives = GetCardRewardAlternativeButtons(currentScreen);
+            var alternatives = GetCardRewardAlternatives(currentScreen);
 
             return new RewardPayload
             {
@@ -3905,7 +4371,8 @@ internal static class GameStateService
                 can_proceed = false,
                 rewards = Array.Empty<RewardOptionPayload>(),
                 card_options = cardOptions.Select((holder, index) => BuildRewardCardOptionPayload(holder, index)).ToArray(),
-                alternatives = alternatives.Select((button, index) => BuildRewardAlternativePayload(button, index)).ToArray()
+                alternatives = alternatives.Select((option, index) =>
+                    BuildRewardAlternativePayload(option, index)).ToArray()
             };
         }
 
@@ -3919,27 +4386,24 @@ internal static class GameStateService
             return null;
         }
 
-        var bundleNodes = GetBundleOptions(currentScreen);
-        if (bundleNodes.Count == 0)
+        var bundleModels = typeof(NChooseABundleSelectionScreen)
+            .GetField("_bundles", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(bundleScreen) as IReadOnlyList<IReadOnlyList<CardModel>>;
+        if (bundleModels == null || bundleModels.Count == 0)
         {
             return null;
         }
 
-        return bundleNodes.Select((bundleNode, bundleIndex) =>
+        return bundleModels.Select((cards, bundleIndex) =>
         {
-            // NCardBundle contains NCard children (not NCardHolder).
-            // NCard exposes CardModel via the .Model property.
-            var cards = FindDescendants<Node>((Node)bundleNode)
-                .Where(n => GodotObject.IsInstanceValid(n) && n.GetType().Name == "NCard")
-                .Select(n => n.GetType().GetProperty("Model")?.GetValue(n) as CardModel)
-                .Where(cm => cm != null)
-                .Select((card, cardIndex) => BuildBundleCardPayload(card!, cardIndex))
+            var cardPayloads = cards
+                .Select((card, cardIndex) => BuildBundleCardPayload(card, cardIndex))
                 .ToArray();
 
             return new BundlePayload
             {
                 index = bundleIndex,
-                cards = cards
+                cards = cardPayloads
             };
         }).ToArray();
     }
@@ -4036,6 +4500,7 @@ internal static class GameStateService
             name = enemy.Name,
             current_hp = enemy.CurrentHp,
             max_hp = enemy.MaxHp,
+            hp_display = enemy.HpDisplay.ToString(),
             block = enemy.Block,
             is_alive = enemy.IsAlive,
             is_hittable = enemy.IsHittable,
@@ -4184,7 +4649,10 @@ internal static class GameStateService
             name = orb.Title.GetFormattedText(),
             passive_value = orb.PassiveVal,
             evoke_value = orb.EvokeVal,
-            is_front = slotIndex == 0
+            is_front = slotIndex == 0,
+            // 通过反射探测游戏自己的充能球提示描述。属性存在时返回按类型固定、
+            // 不含数值的文本；OrbModel 不携带描述时返回 null。
+            description = GetDynamicFormattedTextProperty(orb, "DynamicDescription", "Description")
         };
     }
 
@@ -4208,6 +4676,28 @@ internal static class GameStateService
             vote_count = voters.Length,
             has_local_vote = voters.Any(voter => voter.is_local),
             voted_player_ids = voters.Select(voter => voter.player_id).ToArray()
+        };
+    }
+
+    private static CardsViewPayload? BuildCardsViewPayload(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCardsViewScreen cardsViewScreen)
+        {
+            return null;
+        }
+
+        var cards = typeof(NCardsViewScreen)
+            .GetField("_cards", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(cardsViewScreen) as IEnumerable<CardModel>
+            ?? Array.Empty<CardModel>();
+        var infoText = typeof(NCardsViewScreen)
+            .GetField("_infoText", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(cardsViewScreen) as MegaCrit.Sts2.Core.Localization.LocString;
+
+        return new CardsViewPayload
+        {
+            prompt = SafeReadString(() => infoText?.GetFormattedText()),
+            cards = cards.Select(BuildDeckCardPayload).ToArray()
         };
     }
 
@@ -4336,12 +4826,27 @@ internal static class GameStateService
     private static RewardOptionPayload BuildRewardOptionPayload(NRewardButton button, int index)
     {
         var reward = button.Reward;
+        var potion = (reward as PotionReward)?.Potion;
+        var relic = (reward as RelicReward)?.Relic;
+        var name = potion?.Title.GetFormattedText()
+            ?? relic?.Title.GetFormattedText()
+            ?? reward?.Description.GetFormattedText()
+            ?? string.Empty;
+        var effectDescription = potion != null
+            ? GetDynamicFormattedTextProperty(potion, "DynamicDescription", "Description")
+                ?? string.Empty
+            : relic != null
+                ? GetDynamicFormattedTextProperty(relic, "DynamicDescription", "Description")
+                    ?? string.Empty
+                : string.Empty;
 
         return new RewardOptionPayload
         {
             index = index,
             reward_type = GetRewardTypeName(reward),
+            name = name,
             description = reward?.Description.GetFormattedText() ?? string.Empty,
+            effect_description = effectDescription,
             claimable = button.IsEnabled
         };
     }
@@ -4372,12 +4877,14 @@ internal static class GameStateService
         };
     }
 
-    private static RewardAlternativePayload BuildRewardAlternativePayload(NCardRewardAlternativeButton button, int index)
+    private static RewardAlternativePayload BuildRewardAlternativePayload(
+        CardRewardAlternative option, int index)
     {
         return new RewardAlternativePayload
         {
             index = index,
-            label = button.GetNodeOrNull<MegaLabel>("Label")?.Text ?? button.Name
+            option_id = option.OptionId,
+            label = option.Title.GetFormattedText()
         };
     }
 
@@ -4661,6 +5168,10 @@ internal static class GameStateService
             index = index,
             relic_id = relic?.Id.Entry ?? string.Empty,
             name = relic?.Title.GetFormattedText() ?? string.Empty,
+            description = relic != null
+                ? GetDynamicFormattedTextProperty(relic, "DynamicDescription", "Description")
+                    ?? string.Empty
+                : string.Empty,
             rarity = relic?.Rarity.ToString() ?? string.Empty,
             price = entry.IsStocked ? entry.Cost : 0,
             is_stocked = entry.IsStocked,
@@ -4676,6 +5187,9 @@ internal static class GameStateService
             index = index,
             potion_id = potion?.Id.Entry,
             name = potion?.Title.GetFormattedText(),
+            description = potion != null
+                ? GetDynamicFormattedTextProperty(potion, "DynamicDescription", "Description")
+                : null,
             rarity = potion?.Rarity.ToString(),
             usage = potion?.Usage.ToString(),
             price = entry.IsStocked ? entry.Cost : 0,
@@ -4729,13 +5243,15 @@ internal static class GameStateService
         };
     }
 
-    private static SelectionCardPayload BuildSelectionCardPayload(CardModel card, int index)
+    private static SelectionCardPayload BuildSelectionCardPayload(
+        CardModel card, int index, bool selected)
     {
         var resolvedRulesText = GetResolvedCardRulesText(card);
         var dynamicValues = BuildCardDynamicValuePayloads(card);
         return new SelectionCardPayload
         {
             index = index,
+            selected = selected,
             card_id = card.Id.Entry,
             name = card.Title,
             upgraded = card.IsUpgraded,
@@ -4805,7 +5321,7 @@ internal static class GameStateService
         return potion != null &&
             !potion.IsQueued &&
             !potion.Owner.Creature.IsDead &&
-            player.CanUseOrRemovePotions;
+            player.CanRemovePotions;
     }
 
     public static bool PotionRequiresTarget(CombatState? combatState, PotionModel potion)
@@ -5204,6 +5720,7 @@ internal static class GameStateService
             NMapScreen or NMapRoom => "MAP",
             NCharacterSelectScreen => "CHARACTER_SELECT",
             NChooseABundleSelectionScreen => "BUNDLE_SELECTION",
+            NCrystalSphereScreen => "CRYSTAL_SPHERE",
             NCapstoneSubmenuStack => "CAPSTONE_SELECTION",
             NPatchNotesScreen => "MAIN_MENU",
             NSubmenu => "MAIN_MENU",
@@ -5341,6 +5858,8 @@ internal sealed class GameStatePayload
 
     public SelectionPayload? selection { get; init; }
 
+    public CardsViewPayload? cards_view { get; init; }
+
     public CharacterSelectPayload? character_select { get; init; }
 
     public TimelinePayload? timeline { get; init; }
@@ -5356,6 +5875,8 @@ internal sealed class GameStatePayload
     public RewardPayload? reward { get; init; }
 
     public BundlePayload[]? bundles { get; init; }
+
+    public CrystalSpherePayload? crystal_sphere { get; init; }
 
     public ModalPayload? modal { get; init; }
 
@@ -5387,6 +5908,10 @@ internal sealed class CombatPayload
     public CombatPlayerSummaryPayload[] players { get; init; } = Array.Empty<CombatPlayerSummaryPayload>();
 
     public CombatHandCardPayload[] hand { get; init; } = Array.Empty<CombatHandCardPayload>();
+
+    public int draw_count { get; init; }
+
+    public int discard_count { get; init; }
 
     public CombatEnemyPayload[] enemies { get; init; } = Array.Empty<CombatEnemyPayload>();
 
@@ -5546,6 +6071,13 @@ internal readonly record struct CombatHandSelectionMetadata(
     bool RequiresConfirmation,
     bool CanConfirm);
 
+internal readonly record struct GridSelectionMetadata(
+    int MinSelect,
+    int MaxSelect,
+    IReadOnlySet<CardModel> SelectedCards,
+    bool RequiresConfirmation,
+    bool CanConfirm);
+
 internal sealed class CharacterSelectPayload
 {
     public string? selected_character_id { get; init; }
@@ -5661,6 +6193,41 @@ internal sealed class ChestRelicOptionPayload
     public string name { get; init; } = string.Empty;
 
     public string rarity { get; init; } = string.Empty;
+
+    public string description { get; init; } = string.Empty;
+}
+
+internal sealed class CrystalSpherePayload
+{
+    public int divinations_remaining { get; init; }
+
+    public string tool { get; init; } = "big";
+
+    public int grid_width { get; init; }
+
+    public int grid_height { get; init; }
+
+    public CrystalSphereCellPayload[] clickable_cells { get; init; } = Array.Empty<CrystalSphereCellPayload>();
+
+    public CrystalSphereItemPayload[] revealed_items { get; init; } = Array.Empty<CrystalSphereItemPayload>();
+}
+
+internal sealed class CrystalSphereCellPayload
+{
+    public int index { get; init; }
+
+    public int x { get; init; }
+
+    public int y { get; init; }
+}
+
+internal sealed class CrystalSphereItemPayload
+{
+    public string kind { get; init; } = string.Empty;
+
+    public int x { get; init; }
+
+    public int y { get; init; }
 }
 
 internal sealed class EventPayload
@@ -5719,6 +6286,13 @@ internal sealed class RestOptionPayload
     public int[] valid_target_indices { get; init; } = Array.Empty<int>();
 
     public string[] valid_target_player_ids { get; init; } = Array.Empty<string>();
+}
+
+internal sealed class CardsViewPayload
+{
+    public string prompt { get; init; } = string.Empty;
+
+    public DeckCardPayload[] cards { get; init; } = Array.Empty<DeckCardPayload>();
 }
 
 internal sealed class ShopPayload
@@ -5785,6 +6359,8 @@ internal sealed class ShopRelicPayload
 
     public string name { get; init; } = string.Empty;
 
+    public string description { get; init; } = string.Empty;
+
     public string rarity { get; init; } = string.Empty;
 
     public int price { get; init; }
@@ -5801,6 +6377,8 @@ internal sealed class ShopPotionPayload
     public string? potion_id { get; init; }
 
     public string? name { get; init; }
+
+    public string? description { get; init; }
 
     public string? rarity { get; init; }
 
@@ -5904,6 +6482,8 @@ internal sealed class CombatPlayerPayload
 
     public CombatPowerPayload[] powers { get; init; } = Array.Empty<CombatPowerPayload>();
 
+    public CombatCompanionPayload? osty { get; init; }
+
     public int base_orb_slots { get; init; }
 
     public int orb_capacity { get; init; }
@@ -5917,6 +6497,21 @@ internal sealed class CombatPlayerPayload
     public int attacks_played_this_turn { get; init; }
 
     public int skills_played_this_turn { get; init; }
+}
+
+internal sealed class CombatCompanionPayload
+{
+    public int current_hp { get; init; }
+
+    public int max_hp { get; init; }
+
+    public int block { get; init; }
+
+    public bool is_missing { get; init; }
+
+    public bool is_alive { get; init; }
+
+    public CombatPowerPayload[] powers { get; init; } = Array.Empty<CombatPowerPayload>();
 }
 
 internal sealed class CombatPlayerSummaryPayload
@@ -5984,6 +6579,8 @@ internal sealed class CombatOrbPayload
     public decimal evoke_value { get; init; }
 
     public bool is_front { get; init; }
+
+    public string? description { get; init; }
 }
 
 internal sealed class CombatHandCardPayload
@@ -6034,6 +6631,8 @@ internal sealed class CombatEnemyPayload
     public int current_hp { get; init; }
 
     public int max_hp { get; init; }
+
+    public string hp_display { get; init; } = string.Empty;
 
     public int block { get; init; }
 
@@ -6152,7 +6751,11 @@ internal sealed class RewardOptionPayload
 
     public string reward_type { get; init; } = string.Empty;
 
+    public string name { get; init; } = string.Empty;
+
     public string description { get; init; } = string.Empty;
+
+    public string effect_description { get; init; } = string.Empty;
 
     public bool claimable { get; init; }
 }
@@ -6183,6 +6786,8 @@ internal sealed class RewardCardOptionPayload
 internal sealed class RewardAlternativePayload
 {
     public int index { get; init; }
+
+    public string option_id { get; init; } = string.Empty;
 
     public string label { get; init; } = string.Empty;
 }
@@ -6226,6 +6831,8 @@ internal sealed class DeckCardPayload
 internal sealed class SelectionCardPayload
 {
     public int index { get; init; }
+
+    public bool selected { get; init; }
 
     public string card_id { get; init; } = string.Empty;
 

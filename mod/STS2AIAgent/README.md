@@ -17,3 +17,17 @@ STS2_DATA_DIR="/path/to/game/data" dotnet build -c Release
 
 也可以复制 `local.props.example` 为 `local.props` 并填写本机路径。
 `local.props`、`bin/` 和 `obj/` 不进入 Git。
+
+## 代码检查
+
+使用 .NET SDK 自带的格式化器检查 C# 代码：
+
+```shell
+dotnet format STS2AIAgent.csproj --verify-no-changes
+```
+
+提交前以警告即错误的方式构建：
+
+```shell
+STS2_DATA_DIR="/path/to/game/data" dotnet build -c Release -warnaserror
+```

@@ -8,6 +8,7 @@ using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.RestSite;
+using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.DevConsole;
 using MegaCrit.Sts2.Core.GameActions;
@@ -18,6 +19,7 @@ using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Debug;
 using MegaCrit.Sts2.Core.Nodes.Debug.Multiplayer;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.Screens;
@@ -53,16 +55,14 @@ namespace STS2AIAgent.Game;
 internal static class GameActionService
 {
     /// <summary>
-    /// Tracks whether the agent explicitly skipped the card reward via skip_reward_cards.
-    /// When set, DrainRewardFlowAsync will not auto-claim card rewards.
-    /// Reset when leaving the reward screen.
+    /// 记录智能体是否通过 skip_reward_cards 显式跳过卡牌奖励。
+    /// 设置后，DrainRewardFlowAsync 不会自动领取卡牌；离开奖励页面时重置。
     /// </summary>
     private static bool _cardRewardSkipped;
 
     /// <summary>
-    /// Mid-turn card play counters. Maintained by the mod since the game's
-    /// internal counters are not accessible via reflection. Synchronized to
-    /// the current combat round when state is read and incremented by play_card.
+    /// 回合内出牌计数。游戏内部计数无法通过反射访问，因此由 Mod 自行维护；
+    /// 读取状态时与当前战斗回合同步，执行 play_card 时递增。
     /// </summary>
     internal static int CardsPlayedThisTurn { get; private set; }
     internal static int AttacksPlayedThisTurn { get; private set; }
@@ -70,9 +70,8 @@ internal static class GameActionService
     internal static int LastTurnNumber { get; private set; }
 
     /// <summary>
-    /// When set by resolve_rewards, TryResolveCardRewardAsync picks this
-    /// card index instead of the first option. -2 means skip.
-    /// -1 means no pending choice (use default behavior).
+    /// resolve_rewards 设置该值后，TryResolveCardRewardAsync 会选择指定卡牌，
+    /// 而不是默认第一项。-2 表示跳过，-1 表示没有待处理选择并使用默认行为。
     /// </summary>
     private static int _pendingCardRewardChoice = -1;
 
@@ -95,7 +94,6 @@ internal static class GameActionService
 
         return actionName switch
         {
-            "resolve_rewards" => ExecuteResolveRewardsAsync(request),
             "end_turn" => ExecuteEndTurnAsync(),
             "play_card" => ExecutePlayCardAsync(request),
             "continue_run" => ExecuteContinueRunAsync(),
@@ -107,18 +105,19 @@ internal static class GameActionService
             "choose_timeline_epoch" => ExecuteChooseTimelineEpochAsync(request),
             "confirm_timeline_overlay" => ExecuteConfirmTimelineOverlayAsync(),
             "choose_map_node" => ExecuteChooseMapNodeAsync(request),
-            "collect_rewards_and_proceed" => ExecuteCollectRewardsAndProceedAsync(),
             "claim_reward" => ExecuteClaimRewardAsync(request),
             "choose_reward_card" => ExecuteChooseRewardCardAsync(request),
             "skip_reward_cards" => ExecuteSkipRewardCardsAsync(),
+            "choose_reward_alternative" => ExecuteChooseRewardAlternativeAsync(request),
             "select_deck_card" => ExecuteSelectDeckCardAsync(request),
+            "skip_card_selection" => ExecuteSkipCardSelectionAsync(),
             "close_cards_view" => ExecuteCloseCardsViewAsync(),
             "confirm_selection" => ExecuteConfirmSelectionAsync(),
             "proceed" => ExecuteProceedAsync(),
             "open_chest" => ExecuteOpenChestAsync(),
             "choose_treasure_relic" => ExecuteChooseTreasureRelicAsync(request),
             "choose_event_option" => ExecuteChooseEventOptionAsync(request),
-            "choose_capstone_option" => ExecuteChooseCapstoneOptionAsync(request),
+            "choose_crystal_sphere_cell" => ExecuteChooseCrystalSphereCellAsync(request),
             "choose_bundle" => ExecuteChooseBundleAsync(request),
             "confirm_bundle" => ExecuteConfirmBundleAsync(),
             "choose_rest_option" => ExecuteChooseRestOptionAsync(request),
@@ -129,6 +128,7 @@ internal static class GameActionService
             "buy_potion" => ExecuteBuyPotionAsync(request),
             "remove_card_at_shop" => ExecuteRemoveCardAtShopAsync(),
             "select_character" => ExecuteSelectCharacterAsync(request),
+            "set_seed" => ExecuteSetSeedAsync(request),
             "embark" => ExecuteEmbarkAsync(),
             "unready" => ExecuteUnreadyAsync(),
             "host_multiplayer_lobby" => ExecuteHostMultiplayerLobbyAsync(),
@@ -1132,8 +1132,9 @@ internal static class GameActionService
             });
         }
 
-        // option_index: -1 = skip card, 0/1/2 = pick that card, absent = auto (first card)
-        // card_index is accepted as a backwards-compatible alias for picking a card.
+        // option_index：-1 表示跳过，0/1/2 表示选择对应卡牌。字段缺失时保留
+        // skip_reward_cards 的显式跳过状态，否则使用自动处理。card_index 作为
+        // 选择卡牌的向后兼容别名继续接受。
         if (request.option_index.HasValue)
         {
             if (request.option_index.Value == -1)
@@ -1155,7 +1156,6 @@ internal static class GameActionService
         else
         {
             _pendingCardRewardChoice = -1;
-            _cardRewardSkipped = false;
         }
 
         var stable = await DrainRewardFlowAsync(TimeSpan.FromSeconds(20));
@@ -1290,7 +1290,7 @@ internal static class GameActionService
         var selected = options[request.option_index.Value];
         var previousOptionCount = options.Count;
         selected.EmitSignal(NCardHolder.SignalName.Pressed, selected);
-        _cardRewardSkipped = false; // Card was taken, clear any prior skip
+        _cardRewardSkipped = false; // 已领取卡牌，清除先前的跳过状态。
         var stable = await WaitForRewardCardResolutionAsync(currentScreen, previousOptionCount, TimeSpan.FromSeconds(10));
 
         return new ActionResponsePayload
@@ -1317,9 +1317,13 @@ internal static class GameActionService
             });
         }
 
-        var alternatives = GameStateService.GetCardRewardAlternativeButtons(currentScreen);
-        var selected = alternatives.First();
-        selected.ForceClick();
+        var alternatives = GameStateService.GetCardRewardAlternatives(currentScreen);
+        var selectedIndex = alternatives
+            .Select((option, index) => (option, index))
+            .First(pair => pair.option.OptionId.Equals(
+                "Skip", StringComparison.OrdinalIgnoreCase)).index;
+        SelectCardRewardAlternative((NCardRewardSelectionScreen)currentScreen!,
+            selectedIndex);
         _cardRewardSkipped = true;
         var stable = await WaitForRewardCardResolutionAsync(currentScreen, GameStateService.GetCardRewardOptions(currentScreen).Count, TimeSpan.FromSeconds(10));
 
@@ -1367,7 +1371,23 @@ internal static class GameActionService
         }
 
         var isCombatHandSelection = GameStateService.TryGetCombatHandSelectionMetadata(currentScreen, out var combatHand, out var combatHandSelection);
+        var isGridSelection = GameStateService.TryGetGridSelectionMetadata(
+            currentScreen, out var gridSelectionScreen, out var gridSelection);
         var selected = options[request.option_index.Value];
+        if (isGridSelection &&
+            gridSelection.MaxSelect > 0 &&
+            gridSelection.SelectedCards.Count >= gridSelection.MaxSelect &&
+            selected.CardModel != null &&
+            !gridSelection.SelectedCards.Contains(selected.CardModel))
+        {
+            throw new ApiException(409, "invalid_action",
+                "The maximum number of cards is already selected.", new
+                {
+                    action = "select_deck_card",
+                    selected_count = gridSelection.SelectedCards.Count,
+                    max_select = gridSelection.MaxSelect
+                });
+        }
         if (isCombatHandSelection)
         {
             if (selected is not NHandCardHolder handHolder)
@@ -1393,7 +1413,11 @@ internal static class GameActionService
 
         var stable = currentScreen switch
         {
-            NCardGridSelectionScreen cardSelectScreen => await ConfirmDeckSelectionAsync(cardSelectScreen, TimeSpan.FromSeconds(10)),
+            NCardGridSelectionScreen when isGridSelection && gridSelectionScreen != null =>
+                gridSelection.MaxSelect <= 1
+                    ? await ConfirmDeckSelectionAsync(gridSelectionScreen, TimeSpan.FromSeconds(10))
+                    : await WaitForGridSelectionStepAsync(
+                        gridSelectionScreen, gridSelection, TimeSpan.FromSeconds(2)),
             NChooseACardSelectionScreen chooseCardScreen => await WaitForChooseCardSelectionResolutionAsync(chooseCardScreen, TimeSpan.FromSeconds(10)),
             _ when isCombatHandSelection => await WaitForCombatHandSelectionStepAsync(combatHandSelection, TimeSpan.FromSeconds(10)),
             _ => false
@@ -1409,16 +1433,145 @@ internal static class GameActionService
         };
     }
 
+    private static async Task<ActionResponsePayload> ExecuteSkipCardSelectionAsync()
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+        var button = GameStateService.GetCardSelectionSkipButton(currentScreen);
+        if (button == null)
+        {
+            throw new ApiException(409, "invalid_action",
+                "Action is not available in the current state.", new
+                {
+                    action = "skip_card_selection",
+                    screen
+                });
+        }
+
+        button.ForceClick();
+        var stable = currentScreen is NChooseACardSelectionScreen chooseCardScreen &&
+            await WaitForChooseCardSelectionResolutionAsync(
+                chooseCardScreen, TimeSpan.FromSeconds(10));
+        return new ActionResponsePayload
+        {
+            action = "skip_card_selection",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." :
+                "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static async Task<ActionResponsePayload> ExecuteChooseRewardAlternativeAsync(
+        ActionRequest request)
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (!GameStateService.CanChooseRewardAlternative(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action",
+                "Action is not available in the current state.", new
+                {
+                    action = "choose_reward_alternative",
+                    screen
+                });
+        }
+        if (request.option_index == null)
+        {
+            throw new ApiException(400, "invalid_request",
+                "choose_reward_alternative requires option_index.", new
+                {
+                    action = "choose_reward_alternative"
+                });
+        }
+
+        var alternatives = GameStateService.GetCardRewardAlternatives(currentScreen);
+        if (request.option_index < 0 || request.option_index >= alternatives.Count)
+        {
+            throw new ApiException(409, "invalid_target",
+                "option_index is out of range.", new
+                {
+                    action = "choose_reward_alternative",
+                    option_index = request.option_index,
+                    option_count = alternatives.Count
+                });
+        }
+        var selected = alternatives[request.option_index.Value];
+        if (selected.OptionId.Equals("Skip", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException(409, "invalid_target",
+                "Use skip_reward_cards for the Skip alternative.", new
+                {
+                    action = "choose_reward_alternative",
+                    option_index = request.option_index,
+                    option_id = selected.OptionId
+                });
+        }
+
+        var previousOptions = GameStateService.GetCardRewardOptions(currentScreen)
+            .ToArray();
+        SelectCardRewardAlternative((NCardRewardSelectionScreen)currentScreen!,
+            request.option_index.Value);
+        _cardRewardSkipped = false;
+        var stable = await WaitForRewardAlternativeResolutionAsync(
+            currentScreen, previousOptions, TimeSpan.FromSeconds(10));
+
+        return new ActionResponsePayload
+        {
+            action = "choose_reward_alternative",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." :
+                "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static void SelectCardRewardAlternative(
+        NCardRewardSelectionScreen screen, int index)
+    {
+        typeof(NCardRewardSelectionScreen)
+            .GetMethod("OnAlternateRewardSelected",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(screen, new object[] { index });
+    }
+
+    private static async Task<bool> WaitForRewardAlternativeResolutionAsync(
+        IScreenContext? previousScreen,
+        IReadOnlyList<NCardHolder> previousOptions,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+
+            var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+            if (!ReferenceEquals(currentScreen, previousScreen))
+            {
+                return true;
+            }
+
+            var currentOptions = GameStateService.GetCardRewardOptions(currentScreen);
+            if (currentOptions.Count != previousOptions.Count ||
+                currentOptions.Where((holder, index) =>
+                    !ReferenceEquals(holder, previousOptions[index])).Any())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static async Task<ActionResponsePayload> ExecuteConfirmSelectionAsync()
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
         var screen = GameStateService.ResolveScreen(currentScreen);
 
-        if (!GameStateService.CanConfirmSelection(currentScreen) ||
-            !GameStateService.TryGetCombatHandSelection(currentScreen, out var combatHand) ||
-            combatHand == null ||
-            !TryGetCombatHandConfirmButton(combatHand, out var confirmButton) ||
-            confirmButton == null)
+        if (!GameStateService.CanConfirmSelection(currentScreen))
         {
             throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
             {
@@ -1427,8 +1580,31 @@ internal static class GameActionService
             });
         }
 
-        confirmButton.ForceClick();
-        var stable = await WaitForCombatHandSelectionResolutionAsync(TimeSpan.FromSeconds(10));
+        bool stable;
+        if (currentScreen is NCardGridSelectionScreen gridSelection)
+        {
+            stable = await ConfirmDeckSelectionAsync(
+                gridSelection, TimeSpan.FromSeconds(10));
+        }
+        else if (GameStateService.TryGetCombatHandSelection(
+                     currentScreen, out var combatHand) &&
+                 combatHand != null &&
+                 TryGetCombatHandConfirmButton(combatHand, out var confirmButton) &&
+                 confirmButton != null)
+        {
+            confirmButton.ForceClick();
+            stable = await WaitForCombatHandSelectionResolutionAsync(
+                TimeSpan.FromSeconds(10));
+        }
+        else
+        {
+            throw new ApiException(409, "invalid_action",
+                "Selection confirmation control is unavailable.", new
+                {
+                    action = "confirm_selection",
+                    screen
+                });
+        }
 
         return new ActionResponsePayload
         {
@@ -1662,14 +1838,20 @@ internal static class GameActionService
             await WaitForNextFrameAsync();
         }
 
-        // If resolve_rewards requested a skip, click the skip alternative
+        // resolve_rewards 请求跳过时，点击跳过选项。
         if (_pendingCardRewardChoice == -2)
         {
             _pendingCardRewardChoice = -1;
-            var alternatives = GameStateService.GetCardRewardAlternativeButtons(cardRewardScreen);
-            if (alternatives.Count > 0)
+            var alternatives = GameStateService.GetCardRewardAlternatives(cardRewardScreen);
+            var skipIndex = alternatives
+                .Select((option, index) => (option, index))
+                .FirstOrDefault(pair => pair.option.OptionId.Equals(
+                    "Skip", StringComparison.OrdinalIgnoreCase)).index;
+            if (alternatives.Count > 0 &&
+                alternatives[skipIndex].OptionId.Equals(
+                    "Skip", StringComparison.OrdinalIgnoreCase))
             {
-                alternatives.First().ForceClick();
+                SelectCardRewardAlternative(cardRewardScreen, skipIndex);
                 _cardRewardSkipped = true;
             }
             while (DateTime.UtcNow < deadline)
@@ -1684,7 +1866,7 @@ internal static class GameActionService
 
         var options = GameStateService.GetCardRewardOptions(cardRewardScreen);
 
-        // If resolve_rewards specified a card index, use it
+        // resolve_rewards 指定卡牌索引时，按该索引选择。
         NCardHolder? selected;
         if (_pendingCardRewardChoice >= 0 && _pendingCardRewardChoice < options.Count)
         {
@@ -1846,6 +2028,33 @@ internal static class GameActionService
             if (confirmButton?.IsEnabled == true)
             {
                 confirmButton.ForceClick();
+            }
+        }
+
+        return false;
+    }
+
+    private static async Task<bool> WaitForGridSelectionStepAsync(
+        NCardGridSelectionScreen screen,
+        GridSelectionMetadata previousSelection,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+            var current = ActiveScreenContext.Instance.GetCurrentScreen();
+            if (!GodotObject.IsInstanceValid(screen) ||
+                !ReferenceEquals(current, screen))
+            {
+                return true;
+            }
+
+            if (GameStateService.TryGetGridSelectionMetadata(
+                    current, out _, out var selection) &&
+                !selection.SelectedCards.SetEquals(previousSelection.SelectedCards))
+            {
+                return true;
             }
         }
 
@@ -2055,7 +2264,7 @@ internal static class GameActionService
 
         if (eventModel.IsFinished)
         {
-            // Finished events only have the synthetic proceed option at index 0
+            // 已结束事件只提供索引为 0 的合成继续选项。
             if (request.option_index != 0)
             {
                 throw new ApiException(409, "invalid_target", "Event is finished. Only option_index 0 (proceed) is valid.", new
@@ -2079,7 +2288,7 @@ internal static class GameActionService
             };
         }
 
-        // Non-finished event: choose an option
+        // 未结束事件按索引选择选项。
         var options = eventModel.CurrentOptions;
         if (request.option_index < 0 || request.option_index >= options.Count)
         {
@@ -2118,7 +2327,7 @@ internal static class GameActionService
     }
 
     /// <summary>
-    /// Waits for screen to leave NEventRoom (used after proceed).
+    /// 等待页面离开 NEventRoom，用于事件结束后的继续操作。
     /// </summary>
     private static async Task<bool> WaitForEventScreenTransitionAsync(TimeSpan timeout)
     {
@@ -2138,8 +2347,7 @@ internal static class GameActionService
     }
 
     /// <summary>
-    /// Waits for event state to change after choosing an option.
-    /// Detects: screen change, IsFinished change, or options count change.
+    /// 选择事件选项后等待状态变化。页面、IsFinished 或选项数量任一变化即视为完成。
     /// </summary>
     private static async Task<bool> WaitForEventOptionTransitionAsync(
         string? previousEventId,
@@ -2154,7 +2362,7 @@ internal static class GameActionService
 
             var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
 
-            // Screen changed entirely (e.g. combat started from event)
+            // 页面已经完全切换，例如事件触发了战斗。
             if (currentScreen is not NEventRoom)
             {
                 return true;
@@ -2226,7 +2434,7 @@ internal static class GameActionService
         var button = buttons[request.option_index.Value];
         button.EmitSignal(BaseButton.SignalName.Pressed);
 
-        // Wait for screen transition
+        // 等待页面切换。
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         var stable = false;
         while (DateTime.UtcNow < deadline)
@@ -2243,6 +2451,79 @@ internal static class GameActionService
         return new ActionResponsePayload
         {
             action = "choose_capstone_option",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static async Task<ActionResponsePayload> ExecuteChooseCrystalSphereCellAsync(ActionRequest request)
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (!GameStateService.CanChooseCrystalSphereCell(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+            {
+                action = "choose_crystal_sphere_cell",
+                screen
+            });
+        }
+
+        if (request.option_index == null)
+        {
+            throw new ApiException(400, "invalid_request", "choose_crystal_sphere_cell requires option_index (clickable cell index).", new
+            {
+                action = "choose_crystal_sphere_cell"
+            });
+        }
+
+        var cells = GameStateService.GetClickableCrystalSphereCells(currentScreen);
+        if (request.option_index < 0 || request.option_index >= cells.Count)
+        {
+            throw new ApiException(409, "invalid_target", "option_index is out of range.", new
+            {
+                action = "choose_crystal_sphere_cell",
+                option_index = request.option_index,
+                clickable_cell_count = cells.Count
+            });
+        }
+
+        var sphereScreen = (NCrystalSphereScreen)currentScreen!;
+        var divinationsBefore = GameStateService.GetCrystalSphereMinigame(sphereScreen)?.DivinationCount ?? 0;
+
+        // 发出与游戏 CrystalSphereScreenHandler 相同的 Released 信号，让点击
+        // 以原生 UI 相同的方式消耗 RNG 并结算奖励。
+        var cell = cells[request.option_index.Value];
+        cell.EmitSignal(NClickableControl.SignalName.Released, cell);
+
+        // 小游戏会在点击时同步减少 DivinationCount；等待计数变化，或等待页面
+        // 移交到奖励/继续流程。
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        var stable = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+            var nextScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+            if (nextScreen is not NCrystalSphereScreen nextSphereScreen)
+            {
+                stable = true;
+                break;
+            }
+
+            var remaining = GameStateService.GetCrystalSphereMinigame(nextSphereScreen)?.DivinationCount ?? 0;
+            if (remaining < divinationsBefore)
+            {
+                stable = true;
+                break;
+            }
+        }
+
+        return new ActionResponsePayload
+        {
+            action = "choose_crystal_sphere_cell",
             status = stable ? "completed" : "pending",
             stable = stable,
             message = stable ? "Action completed." : "Action queued but state is still transitioning.",
@@ -2284,25 +2565,13 @@ internal static class GameActionService
         }
 
         var bundle = bundles[request.option_index.Value];
-        // Call the screen's OnBundleClicked method directly
+        // 直接调用页面的 OnBundleClicked 方法。
         if (currentScreen is NChooseABundleSelectionScreen bundleScreen)
         {
             ((Node)bundleScreen).Call("OnBundleClicked", bundle);
         }
 
-        // Wait for screen transition
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        var stable = false;
-        while (DateTime.UtcNow < deadline)
-        {
-            await WaitForNextFrameAsync();
-            var newScreen = ActiveScreenContext.Instance.GetCurrentScreen();
-            if (newScreen is not NChooseABundleSelectionScreen)
-            {
-                stable = true;
-                break;
-            }
-        }
+        var stable = await WaitForBundlePreviewAsync(TimeSpan.FromSeconds(10));
 
         GameStatePayload? bundleState = null;
         try { bundleState = GameStateService.BuildStatePayload(); } catch { }
@@ -2344,11 +2613,11 @@ internal static class GameActionService
         var confirmBtn = buttons[0];
         Log.Info($"[STS2AIAgent] confirm_bundle: clicking {confirmBtn.GetType().Name} '{confirmBtn.Name}'");
 
-        // Try ForceClick first
+        // 优先尝试 ForceClick。
         confirmBtn.ForceClick();
         await WaitForNextFrameAsync();
 
-        // If still on bundle screen, try calling OnConfirmPressed on the screen
+        // 如果仍停留在卡包页面，尝试调用页面的 OnConfirmPressed。
         var stable = false;
         if (ActiveScreenContext.Instance.GetCurrentScreen() is NChooseABundleSelectionScreen bundleScreen2)
         {
@@ -2359,7 +2628,7 @@ internal static class GameActionService
             }
             catch { }
 
-            // Also try emitting the button's signal with no args
+            // 同时尝试发送不带参数的按钮信号。
             try
             {
                 confirmBtn.EmitSignal("pressed");
@@ -2453,8 +2722,8 @@ internal static class GameActionService
         }
         else if (selectedOptionId.Equals("SMITH", StringComparison.OrdinalIgnoreCase))
         {
-            // SMITH keeps the task open until the follow-up card selection
-            // completes. Return as soon as the transition into that screen is visible.
+            // SMITH 会保持任务未完成，直至后续选牌结束；一旦能观察到进入选牌页，
+            // 就立即返回。
             ObserveBackgroundResult(chooseTask, "choose_rest_option");
             stable = await WaitForRestOptionTransitionAsync(TimeSpan.FromSeconds(10));
         }
@@ -2480,6 +2749,28 @@ internal static class GameActionService
             message = stable ? "Action completed." : "Action queued but state is still transitioning.",
             state = GameStateService.BuildStatePayload()
         };
+    }
+
+    private static async Task<bool> WaitForBundlePreviewAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+            var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+            if (currentScreen is not NChooseABundleSelectionScreen)
+            {
+                return true;
+            }
+
+            if (GameStateService.GetSelectedBundle(currentScreen) != null &&
+                GameStateService.CanConfirmBundle(currentScreen))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Player ResolveRestOptionTarget(
@@ -2608,9 +2899,8 @@ internal static class GameActionService
     }
 
     /// <summary>
-    /// Waits for rest site state to change after choosing an option.
-    /// Detects: screen change (SMITH 闂?card selection), ProceedButton appearance
-    /// (HEAL), or options list change.
+    /// 选择休息点选项后等待状态变化。进入选牌页（SMITH）、出现继续按钮（HEAL）
+    /// 或选项列表发生变化时，均视为状态已经推进。
     /// </summary>
     private static async Task<bool> WaitForRestOptionTransitionAsync(TimeSpan timeout)
     {
@@ -2621,13 +2911,13 @@ internal static class GameActionService
 
             var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
 
-            // Screen changed entirely (e.g. SMITH opened card selection)
+            // 页面已经完全切换，例如 SMITH 打开了选牌页。
             if (currentScreen is not NRestSiteRoom restSiteRoom)
             {
                 return true;
             }
 
-            // ProceedButton became available (e.g. after HEAL)
+            // 继续按钮已经可用，例如 HEAL 结算完成。
             var proceedButton = restSiteRoom.ProceedButton;
             if (proceedButton != null && GodotObject.IsInstanceValid(proceedButton) && proceedButton.IsEnabled)
             {
@@ -2957,8 +3247,8 @@ internal static class GameActionService
                 screen
             }, retryable: true);
 
-        // Fire-and-forget: merchant card removal opens deck selection and blocks
-        // until the player confirms a card. Do not await the full task here.
+        // 商店删牌会打开牌组选择并阻塞到玩家确认，因此这里触发后即返回，
+        // 不等待整个任务完成。
         ObserveBackgroundResult(entry.OnTryPurchaseWrapper(inventory), "remove_card_at_shop");
         var stable = await WaitForShopCardRemovalTransitionAsync(TimeSpan.FromSeconds(10));
 
@@ -3813,6 +4103,7 @@ internal static class GameActionService
     {
         return potion.TargetType switch
         {
+            TargetType.AllEnemies => null,
             TargetType.AnyEnemy => ResolvePotionEnemyTarget(request, combatState, potion),
             TargetType.AnyPlayer when GameStateService.PotionRequiresTarget(combatState, potion) => ResolvePotionPlayerTarget(request, combatState, potion),
             TargetType.TargetedNoCreature => null,
@@ -4502,6 +4793,35 @@ internal static class GameActionService
         return ActiveScreenContext.Instance.GetCurrentScreen() is not NGameOverScreen;
     }
 
+    private static Task<ActionResponsePayload> ExecuteSetSeedAsync(ActionRequest request)
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+        if (!GameStateService.CanSetSeed(currentScreen) || currentScreen is not NCharacterSelectScreen characterSelectScreen)
+        {
+            throw new ApiException(409, "invalid_action", "set_seed is not available in the current state.", new
+            {
+                action = "set_seed",
+                screen
+            });
+        }
+
+        var input = request.game_seed;
+        var requested = StandardModeSeedService.CanonicalizeAndValidate(input);
+        var resolved = StandardModeSeedService.SetAndReadBack(characterSelectScreen.Lobby, requested);
+        return Task.FromResult(new ActionResponsePayload
+        {
+            action = "set_seed",
+            status = "completed",
+            stable = true,
+            message = "Action completed.",
+            input_game_seed = input,
+            requested_game_seed = requested,
+            resolved_game_seed = resolved,
+            state = GameStateService.BuildStatePayload()
+        });
+    }
+
     private static async Task<NPauseMenu?> WaitForPauseMenuAsync(TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
@@ -4673,12 +4993,11 @@ internal static class GameActionService
     }
 
     /// <summary>
-    /// Waits for the next game frame via Godot's ProcessFrame signal.
-    /// When NGame or SceneTree is unavailable (e.g. during shutdown),
-    /// falls back to Task.Delay WITHOUT ConfigureAwait(false) to preserve
-    /// the game thread's SynchronizationContext. This is critical 闂?using
-    /// ConfigureAwait(false) would cause subsequent loop iterations to run
-    /// on a thread-pool thread, breaking Godot object access safety.
+    /// 通过 Godot 的 ProcessFrame 信号等待下一游戏帧。NGame 或 SceneTree
+    /// 不可用时（例如关闭期间），回退到不带 ConfigureAwait(false) 的
+    /// Task.Delay，以保留游戏线程的 SynchronizationContext。这里不能使用
+    /// ConfigureAwait(false)，否则后续循环会在线程池中执行，破坏 Godot
+    /// 对象的线程访问安全。
     /// </summary>
     private static async Task WaitForNextFrameAsync()
     {
@@ -4712,6 +5031,8 @@ internal sealed class ActionRequest
 
     public string? command { get; init; }
 
+    public string? game_seed { get; init; }
+
     public object? client_context { get; init; }
 }
 
@@ -4724,6 +5045,12 @@ internal sealed class ActionResponsePayload
     public bool stable { get; init; }
 
     public string message { get; init; } = string.Empty;
+
+    public string? input_game_seed { get; init; }
+
+    public string? requested_game_seed { get; init; }
+
+    public string? resolved_game_seed { get; init; }
 
     public GameStatePayload state { get; init; } = new();
 }

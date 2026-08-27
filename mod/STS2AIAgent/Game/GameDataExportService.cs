@@ -25,8 +25,28 @@ internal static class GameDataExportService
             "events" => ExportEvents(),
             "powers" => ExportPowers(),
             "characters" => ExportCharacters(),
+            "keywords" => ExportKeywords(),
             _ => throw new KeyNotFoundException($"Unknown data collection: {collection}")
         };
+    }
+
+    private static object ExportKeywords()
+    {
+        return Enum.GetValues<CardKeyword>()
+            .Where(keyword => keyword != CardKeyword.None)
+            .Select(keyword =>
+            {
+                var key = keyword.ToString().ToUpperInvariant();
+                return new
+                {
+                    id = keyword.ToString(),
+                    name = LocString.GetIfExists(
+                        "card_keywords", key + ".title")?.GetFormattedText(),
+                    description = LocString.GetIfExists(
+                        "card_keywords", key + ".description")?.GetFormattedText()
+                };
+            })
+            .ToArray();
     }
 
     private static object ExportCards()
@@ -112,7 +132,7 @@ internal static class GameDataExportService
                 name = eventModel.Title.GetFormattedText(),
                 type = eventModel is AncientEventModel ? "Ancient" : "Event",
                 act = ResolveEventAct(eventModel),
-                description = eventModel.InitialDescription.GetFormattedText(),
+                description = eventModel.InitialDescription.GetRawText(),
                 options = BuildEventOptions(eventModel)
             })
             .ToArray();
@@ -126,7 +146,7 @@ internal static class GameDataExportService
             {
                 id = power.Id.Entry,
                 name = power.Title.GetFormattedText(),
-                description = power.Description.GetFormattedText(),
+                description = power.Description.GetRawText(),
                 type = power.Type.ToString(),
                 stack_type = power.StackType.ToString(),
                 allow_negative = power.AllowNegative
@@ -263,8 +283,8 @@ internal static class GameDataExportService
                 .Select(key => new
                 {
                     id = ExtractKeySegment(key, prefix),
-                    title = eventModel.GetOptionTitle(key)?.GetFormattedText() ?? string.Empty,
-                    description = eventModel.GetOptionDescription(key)?.GetFormattedText() ?? string.Empty
+                    title = eventModel.GetOptionTitle(key)?.GetRawText() ?? string.Empty,
+                    description = eventModel.GetOptionDescription(key)?.GetRawText() ?? string.Empty
                 })
                 .ToArray<object>();
         }
@@ -297,6 +317,10 @@ internal static class GameDataExportService
     {
         try
         {
+            // 复用游戏自己的升级预览路径：先在 Upgrade 模式下刷新动态变量，
+            // 再解析描述。否则预览会代入基础数值，导致伤害、格挡、抽牌等
+            // 数值升级无法出现在 /data/cards 中。
+            card.UpdateDynamicVarPreview(CardPreviewMode.Upgrade, card.CurrentTarget, card.DynamicVars);
             var preview = NormalizeCardRulesText(card.GetDescriptionForUpgradePreview());
             if (!string.IsNullOrWhiteSpace(preview))
             {
@@ -308,6 +332,18 @@ internal static class GameDataExportService
         }
         catch
         {
+        }
+        finally
+        {
+            // ModelDb 中的卡牌是共享单例，导出后必须恢复 Normal 模式，避免污染
+            // 后续导出的基础描述和动态数值。
+            try
+            {
+                card.UpdateDynamicVarPreview(CardPreviewMode.Normal, card.CurrentTarget, card.DynamicVars);
+            }
+            catch
+            {
+            }
         }
 
         return null;
@@ -416,13 +452,13 @@ internal static class GameDataExportService
             var property = instance.GetType().GetProperty(memberName, flags);
             if (property != null)
             {
-                return TryCoerceText(property.GetValue(instance));
+                return TryCoerceRawText(property.GetValue(instance));
             }
 
             var field = instance.GetType().GetField(memberName, flags);
             if (field != null)
             {
-                return TryCoerceText(field.GetValue(instance));
+                return TryCoerceRawText(field.GetValue(instance));
             }
         }
         catch
@@ -472,6 +508,35 @@ internal static class GameDataExportService
         }
 
         return value.ToString() ?? string.Empty;
+    }
+
+    private static string TryCoerceRawText(object? value)
+    {
+        if (value == null)
+        {
+            return string.Empty;
+        }
+
+        if (value is string text)
+        {
+            return text;
+        }
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var valueType = value.GetType();
+        try
+        {
+            var getRawText = valueType.GetMethod("GetRawText", flags, null, Type.EmptyTypes, null);
+            if (getRawText != null && getRawText.ReturnType == typeof(string))
+            {
+                return getRawText.Invoke(value, null) as string ?? string.Empty;
+            }
+        }
+        catch
+        {
+        }
+
+        return TryCoerceText(value);
     }
 
     private static string NormalizeCardRulesText(string value)
