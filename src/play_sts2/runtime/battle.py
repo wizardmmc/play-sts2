@@ -16,12 +16,12 @@ from ..harness import (
 )
 from ..inference import ChatMessage, DecisionProvider
 from .decision import DecisionEngine, DecisionStep
+from .router import RunRoute, classify_run_state
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_MAX_STEPS = 300
 _DEFAULT_POLL_INTERVAL = 0.2
 _DEFAULT_STATE_TIMEOUT = 30.0
-_FINISHED_SCREENS = {"CARD_SELECTION", "GAME_OVER", "MAP", "REWARD"}
 
 
 class BattleRunError(RuntimeError):
@@ -215,15 +215,20 @@ def _decision_ready(state: Mapping[str, Any]) -> bool:
 
 
 def _battle_finished(state: Mapping[str, Any]) -> bool:
-    """判断状态是否明确表示已经离开当前战斗。
+    """判断状态是否已经进入可交还给整局调度的非战斗页面。
 
     Args:
         state (Mapping[str, Any]): 待判断的完整游戏状态。
 
     Returns:
-        bool: 已进入奖励、地图、战略选牌或游戏结束屏时为 ``True``。
+        bool: 状态可由战略、终局或未知页面路由处理时为 ``True``。
     """
-    return not _fight_ongoing(state) and state.get("screen") in _FINISHED_SCREENS
+    route = classify_run_state(state)
+    return not _fight_ongoing(state) and route in {
+        RunRoute.STRATEGIC,
+        RunRoute.TERMINAL,
+        RunRoute.UNKNOWN,
+    }
 
 
 def _outcome(state: Mapping[str, Any]) -> BattleOutcome:
@@ -239,6 +244,7 @@ def _outcome(state: Mapping[str, Any]) -> BattleOutcome:
     game_over = state.get("game_over") or {}
     if run.get("current_hp") == 0:
         return BattleOutcome.DIED
-    if state.get("screen") == "GAME_OVER" and game_over.get("victory") is not True:
+    victory = game_over.get("is_victory", game_over.get("victory"))
+    if state.get("screen") == "GAME_OVER" and victory is not True:
         return BattleOutcome.DIED
     return BattleOutcome.CLEARED

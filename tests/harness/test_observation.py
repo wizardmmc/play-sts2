@@ -6,6 +6,185 @@ from typing import Any
 import pytest
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_fragments"),
+    [
+        (
+            {
+                "screen": "REST",
+                "available_actions": ["choose_rest_option"],
+                "rest": {
+                    "options": [
+                        {
+                            "index": 0,
+                            "title": "休息",
+                            "description": "回复生命。",
+                            "is_enabled": True,
+                        }
+                    ]
+                },
+            },
+            ("=== 休息处 ===", "[0] 休息", "回复生命。"),
+        ),
+        (
+            {
+                "screen": "SHOP",
+                "available_actions": ["buy_card", "remove_card_at_shop", "proceed"],
+                "shop": {
+                    "is_open": True,
+                    "cards": [
+                        {
+                            "index": 0,
+                            "name": "眼部攻击",
+                            "energy_cost": 0,
+                            "price": 45,
+                            "is_stocked": True,
+                            "enough_gold": True,
+                        }
+                    ],
+                    "relics": [],
+                    "potions": [],
+                    "card_removal": {
+                        "price": 75,
+                        "available": True,
+                        "used": False,
+                        "enough_gold": True,
+                    },
+                },
+            },
+            ("=== 商店（库存已打开）===", "[0] 眼部攻击", "45 金币", "删牌: 75 金币"),
+        ),
+        (
+            {
+                "screen": "CHEST",
+                "available_actions": ["choose_treasure_relic"],
+                "chest": {
+                    "is_opened": True,
+                    "relic_options": [
+                        {
+                            "index": 0,
+                            "name": "锚",
+                            "rarity": "Common",
+                            "description": "战斗开始时获得格挡。",
+                        }
+                    ],
+                },
+            },
+            ("=== 宝箱（已打开）===", "[0] 锚", "战斗开始时获得格挡。"),
+        ),
+        (
+            {
+                "screen": "BUNDLE_SELECTION",
+                "available_actions": ["choose_bundle"],
+                "bundles": [
+                    {
+                        "index": 0,
+                        "cards": [{"index": 0, "name": "打击", "energy_cost": 1}],
+                    }
+                ],
+            },
+            ("=== 选择卡牌包 ===", "卡牌包 [0]", "打击"),
+        ),
+        (
+            {
+                "screen": "CRYSTAL_SPHERE",
+                "available_actions": ["choose_crystal_sphere_cell"],
+                "crystal_sphere": {
+                    "divinations_remaining": 2,
+                    "tool": "big",
+                    "clickable_cells": [{"index": 3, "x": 2, "y": 1}],
+                    "revealed_items": [{"kind": "gold", "x": 0, "y": 0}],
+                },
+            },
+            ("=== 水晶球 ===", "剩余占卜: 2", "[3] 坐标 (2, 1)", "gold @ (0, 0)"),
+        ),
+        (
+            {
+                "screen": "MODAL",
+                "available_actions": ["confirm_modal", "dismiss_modal"],
+                "modal": {
+                    "type_name": "NConfirmationModal",
+                    "underlying_screen": "SHOP",
+                    "confirm_label": "确认",
+                    "dismiss_label": "取消",
+                },
+            },
+            ("=== 确认弹窗 ===", "来源页面: SHOP", "确认: 确认", "取消: 取消"),
+        ),
+        (
+            {
+                "screen": "CARDS_VIEW",
+                "available_actions": ["close_cards_view"],
+                "cards_view": {
+                    "prompt": "查看牌组",
+                    "cards": [{"index": 0, "name": "防御", "energy_cost": 1}],
+                },
+            },
+            ("=== 查看牌组 ===", "查看牌组", "[0] 防御"),
+        ),
+        (
+            {
+                "screen": "TIMELINE",
+                "available_actions": ["choose_timeline_epoch"],
+                "timeline": {
+                    "slots": [
+                        {
+                            "index": 1,
+                            "title": "第一纪元",
+                            "state": "obtained",
+                            "is_actionable": True,
+                        }
+                    ]
+                },
+            },
+            ("=== 时间线 ===", "[1] 第一纪元", "obtained", "可选择"),
+        ),
+        (
+            {
+                "screen": "UNKNOWN",
+                "available_actions": ["proceed"],
+            },
+            ("=== 房间结算 ===", "继续进入下一状态"),
+        ),
+    ],
+)
+def test_build_observation_renders_supported_strategic_screen(
+    state: dict[str, Any],
+    expected_fragments: tuple[str, ...],
+) -> None:
+    """Mod 已支持的战略页面都展示作出选择所需的信息。
+
+    Args:
+        state (dict[str, Any]): 当前战略页面的特有状态。
+        expected_fragments (tuple[str, ...]): 手工确定的必要观测片段。
+
+    Raises:
+        AssertionError: 页面无法渲染、归属错误或缺少决策信息。
+
+    Returns:
+        None: 此测试只验证战略页面观测。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "in_combat": False,
+        "run": {
+            "character_name": "故障机器人",
+            "current_hp": 70,
+            "max_hp": 75,
+            "gold": 99,
+            "deck": [],
+            "relics": [],
+            "potions": [],
+        },
+        **state,
+    }
+
+    observation = harness.build_observation(state)
+
+    assert observation.layer is harness.HarnessLayer.STRATEGIC
+    assert all(fragment in observation.text for fragment in expected_fragments)
+
+
 def test_build_observation_renders_combat_decision() -> None:
     """战斗观测展示资源、敌人意图、手牌索引和合法动作。
 

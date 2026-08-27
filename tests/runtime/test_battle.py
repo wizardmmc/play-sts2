@@ -235,6 +235,27 @@ def test_battle_runner_reports_player_death() -> None:
     assert result.final_state == _game_over_state()
 
 
+def test_battle_runner_reports_final_boss_victory() -> None:
+    """最终 Boss 战直接进入胜利终局时仍返回战斗通关。
+
+    Raises:
+        AssertionError: Runtime 未按 Mod 的 ``is_victory`` 字段识别胜利。
+
+    Returns:
+        None: 此测试只验证最终 Boss 战的终局分类。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    final_state = _victory_game_over_state()
+
+    result = runtime.BattleRunner(
+        FinishingBattleGame(final_state),
+        BattleProvider(["ACTION: end_turn"]),
+    ).run(_combat_state())
+
+    assert result.outcome is runtime.BattleOutcome.CLEARED
+    assert result.final_state == final_state
+
+
 def test_battle_runner_leaves_combat_for_strategic_card_reward() -> None:
     """战后卡牌奖励即使仍带战斗标记，也应交还战略层。
 
@@ -246,6 +267,38 @@ def test_battle_runner_leaves_combat_for_strategic_card_reward() -> None:
     """
     runtime = importlib.import_module("play_sts2.runtime")
     final_state = _card_reward_state()
+
+    result = runtime.BattleRunner(
+        FinishingBattleGame(final_state),
+        BattleProvider(["ACTION: end_turn"]),
+        poll_interval=0,
+        state_timeout=0,
+    ).run(_combat_state())
+
+    assert result.outcome is runtime.BattleOutcome.CLEARED
+    assert result.final_state == final_state
+
+
+def test_battle_runner_leaves_combat_for_any_strategic_screen() -> None:
+    """战斗结束后进入事件页面时应立即交还整局调度。
+
+    Raises:
+        AssertionError: BattleRunner 只承认固定的少数战斗出口。
+
+    Returns:
+        None: 此测试验证战斗层与战略层的通用交接。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    final_state = {
+        "screen": "EVENT",
+        "in_combat": False,
+        "available_actions": ["choose_event_option"],
+        "run": {"current_hp": 65, "max_hp": 75},
+        "event": {
+            "title": "战后事件",
+            "options": [{"index": 0, "title": "继续"}],
+        },
+    }
 
     result = runtime.BattleRunner(
         FinishingBattleGame(final_state),
@@ -394,7 +447,22 @@ def _game_over_state() -> dict[str, Any]:
         "in_combat": False,
         "available_actions": ["return_to_main_menu"],
         "run": {"current_hp": 0, "max_hp": 75},
-        "game_over": {"victory": False},
+        "game_over": {"is_victory": False},
+    }
+
+
+def _victory_game_over_state() -> dict[str, Any]:
+    """构造最终 Boss 战胜利后的游戏结束状态。
+
+    Returns:
+        dict[str, Any]: 使用 Mod 真实字段表示胜利的终局状态。
+    """
+    return {
+        "screen": "GAME_OVER",
+        "in_combat": False,
+        "available_actions": ["return_to_main_menu"],
+        "run": {"current_hp": 18, "max_hp": 75},
+        "game_over": {"is_victory": True},
     }
 
 

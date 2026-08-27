@@ -91,16 +91,50 @@ def start_run(
 
     _require_action(state, "embark")
     deadline = time.monotonic() + client.action_timeout
-    state = _await_embark_state(
+    state = _await_run_state(
         client,
         client.execute_action("embark"),
         deadline,
+        "embark",
     )
     run = state.get("run")
     if not isinstance(run, Mapping) or run.get("character_id") != character_id:
         raise RunStartError(f"新局角色身份不匹配: {character_id}")
     if ascension is not None and run.get("ascension") != ascension:
         raise RunStartError(f"新局进阶等级不匹配: {ascension}")
+    return state
+
+
+def resume_run(client: GameClient) -> dict[str, Any]:
+    """续玩当前进行中的一局，或从主菜单恢复保存局。
+
+    Args:
+        client (GameClient): 已连接到当前游戏实例的客户端。
+
+    Raises:
+        RunStartError: 当前既不在局中，也没有可执行的续局动作。
+        httpx.HTTPStatusError: Mod 拒绝续局或状态读取请求。
+        ProtocolError: Mod 返回不符合客户端协议的响应。
+
+    Returns:
+        dict[str, Any]: 已经进入当前局的稳定游戏状态。
+    """
+    state = client.state()
+    if isinstance(state.get("run"), Mapping):
+        return state
+    if state.get("screen") != "MAIN_MENU":
+        raise RunStartError("游戏既不在局中，也不在主菜单")
+
+    _require_action(state, "continue_run")
+    deadline = time.monotonic() + client.action_timeout
+    state = _await_run_state(
+        client,
+        client.execute_action("continue_run"),
+        deadline,
+        "continue_run",
+    )
+    if not isinstance(state.get("run"), Mapping):
+        raise RunStartError("续局后没有取得运行状态")
     return state
 
 
@@ -191,17 +225,19 @@ def _action_state(result: Mapping[str, Any], action: str) -> dict[str, Any]:
     return dict(state)
 
 
-def _await_embark_state(
+def _await_run_state(
     client: GameClient,
     result: Mapping[str, Any],
     deadline: float,
+    action: str,
 ) -> dict[str, Any]:
-    """等待已排队的开局动作产生可验证的新局状态。
+    """等待已排队的开局或续局动作产生运行状态。
 
     Args:
         client (GameClient): 已提交开局动作的游戏客户端。
-        result (Mapping[str, Any]): ``embark`` 动作的即时结果。
+        result (Mapping[str, Any]): 开局或续局动作的即时结果。
         deadline (float): 动作 HTTP 请求与状态等待共享的单调时钟截止点。
+        action (str): 当前等待的动作名称。
 
     Raises:
         RunStartError: 动作既未完成也未排队，或新局状态等待超时。
@@ -209,16 +245,16 @@ def _await_embark_state(
         ProtocolError: 轮询状态时 Mod 返回不符合客户端协议的响应。
 
     Returns:
-        dict[str, Any]: 已包含 ``run`` 对象的新局状态。
+        dict[str, Any]: 已包含 ``run`` 对象的游戏状态。
     """
     if result.get("stable") is True:
-        return _action_state(result, "embark")
+        return _action_state(result, action)
     if result.get("status") != "pending":
-        raise RunStartError("动作未返回稳定状态: embark")
+        raise RunStartError(f"动作未返回稳定状态: {action}")
 
     while time.monotonic() < deadline:
         state = client.state()
         if isinstance(state.get("run"), Mapping):
             return state
         time.sleep(0.2)
-    raise RunStartError("等待新局状态超时: embark")
+    raise RunStartError(f"等待运行状态超时: {action}")

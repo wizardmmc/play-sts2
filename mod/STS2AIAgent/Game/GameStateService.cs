@@ -5723,6 +5723,7 @@ internal static class GameStateService
             NCharacterSelectScreen => "CHARACTER_SELECT",
             NChooseABundleSelectionScreen => "BUNDLE_SELECTION",
             NCrystalSphereScreen => "CRYSTAL_SPHERE",
+            NTimelineScreen => "TIMELINE",
             NCapstoneSubmenuStack => "CAPSTONE_SELECTION",
             NPatchNotesScreen => "MAIN_MENU",
             NSubmenu => "MAIN_MENU",

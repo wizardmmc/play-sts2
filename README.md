@@ -53,8 +53,9 @@ uv run play-sts2-transcribe data/raw/human/<run_id>
 Harness 使用严格的单行 `ACTION:` 协议，并根据完整状态区分战斗、战略与过渡
 屏幕。模型系统提示词作为独立文本资源存放在
 `src/play_sts2/harness/prompts/`，在线推理和离线 SFT 数据构建将读取同一份内容。
-可读观测目前覆盖战斗、事件、地图、奖励和选牌屏幕，并统一过滤模型不应执行的
-存档、退出及底层重复动作。
+可读观测覆盖战斗、地图、事件、奖励、选牌、休息处、商店、宝箱、卡牌包、
+水晶球、弹窗及其他 Mod 已开放决策的页面，并统一过滤模型不应执行的存档、
+退出及底层重复动作。
 
 ## 推理适配
 
@@ -88,7 +89,7 @@ uv run --group inference play-sts2-model serve
 uv run play-sts2-model smoke
 ```
 
-`play-sts2-battle` 只连接这个模型服务，不直接加载模型。
+`play-sts2-battle` 和 `play-sts2-run` 只连接这个模型服务，不直接加载模型。
 
 让已经加载 Agent Mod 的 STS2 停在一个稳定战斗决策画面，再运行：
 
@@ -99,7 +100,26 @@ uv run play-sts2-battle
 模型服务需要名称时可加 `--model Qwen/Qwen3.5-4B`；游戏或模型使用其他端口时，
 分别传入 `--game-url` 和 `--model-url`。`BattleRunner` 会在一场战斗内保留对话
 历史，非法模型输出最多重试三次，等待异步动作重新进入可决策状态，并在胜利或
-角色死亡时返回。本阶段只负责当前战斗，不会自动选择地图、事件或奖励。
+角色死亡时返回。该命令只负责当前战斗，适合战斗调试和后续场景采样。
+
+## Qwen 整局闭环
+
+让已经加载 Agent Mod 的 STS2 停在主菜单，再运行：
+
+```bash
+uv run play-sts2-run --character DEFECT --ascension 0
+```
+
+需要固定新局时可增加 `--seed <seed>`。若游戏已经处于一局之中，或要从主菜单
+恢复保存局，则使用：
+
+```bash
+uv run play-sts2-run --resume
+```
+
+`RunRunner` 会在战略页面执行无跨页面历史的单步决策，在战斗开始后交给
+`BattleRunner` 保留当前战斗的短期历史，并在过渡动画结束后继续路由，直到
+`GAME_OVER`。遇到未枚举页面时会明确停止，不根据相似动作猜测游戏语义。
 
 ## 确定性战斗场景
 

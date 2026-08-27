@@ -72,11 +72,20 @@ def build_observation(state: Mapping[str, Any]) -> Observation:
 
     screen = str(state.get("screen") or "")
     renderers = {
+        "BUNDLE_SELECTION": _render_bundle_selection,
         "CARD_SELECTION": _render_card_selection,
+        "CARDS_VIEW": _render_cards_view,
+        "CHEST": _render_chest,
         "COMBAT": _render_combat,
+        "CRYSTAL_SPHERE": _render_crystal_sphere,
         "EVENT": _render_event,
         "MAP": _render_map,
+        "MODAL": _render_modal,
+        "REST": _render_rest,
         "REWARD": _render_reward,
+        "SHOP": _render_shop,
+        "TIMELINE": _render_timeline,
+        "UNKNOWN": _render_unknown_proceed,
     }
     renderer = renderers.get(screen)
     if renderer is None:
@@ -286,6 +295,223 @@ def _render_reward(state: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_rest(state: Mapping[str, Any]) -> str:
+    """渲染休息处的可用选项及其效果。
+
+    Args:
+        state (Mapping[str, Any]): 当前休息处状态。
+
+    Returns:
+        str: 带选项索引、可用性和目标的休息处观测。
+    """
+    rest = state.get("rest") or {}
+    lines = ["=== 休息处 ==="]
+    for option in rest.get("options") or []:
+        parts = [f"[{option.get('index')}] {_clean_text(option.get('title'))}"]
+        description = _clean_text(option.get("description"))
+        if description:
+            parts.append(description)
+        if option.get("is_enabled") is False:
+            parts.append("不可选择")
+        targets = option.get("valid_target_indices") or []
+        if targets:
+            parts.append(f"目标: {list(targets)}")
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def _render_shop(state: Mapping[str, Any]) -> str:
+    """渲染商店库存、价格、购买状态和删牌费用。
+
+    Args:
+        state (Mapping[str, Any]): 当前商店状态。
+
+    Returns:
+        str: 模型可以据此购买或离开商店的观测。
+    """
+    shop = state.get("shop") or {}
+    status = "库存已打开" if shop.get("is_open") else "库存未打开"
+    lines = [f"=== 商店（{status}）==="]
+
+    cards = shop.get("cards") or []
+    if cards:
+        lines.append("卡牌:")
+        lines.extend(_format_shop_card(card) for card in cards)
+    relics = shop.get("relics") or []
+    if relics:
+        lines.append("遗物:")
+        lines.extend(_format_shop_relic(relic) for relic in relics)
+    potions = shop.get("potions") or []
+    if potions:
+        lines.append("药水:")
+        lines.extend(_format_shop_potion(potion) for potion in potions)
+
+    removal = shop.get("card_removal")
+    if isinstance(removal, Mapping):
+        parts = [f"删牌: {removal.get('price', 0)} 金币"]
+        if removal.get("used"):
+            parts.append("已使用")
+        elif removal.get("available") is False:
+            parts.append("不可用")
+        elif removal.get("enough_gold") is False:
+            parts.append("金币不足")
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def _render_chest(state: Mapping[str, Any]) -> str:
+    """渲染宝箱开关状态和可选择的遗物。
+
+    Args:
+        state (Mapping[str, Any]): 当前宝箱状态。
+
+    Returns:
+        str: 带遗物索引、稀有度和描述的宝箱观测。
+    """
+    chest = state.get("chest") or {}
+    status = "已打开" if chest.get("is_opened") else "未打开"
+    lines = [f"=== 宝箱（{status}）==="]
+    for relic in chest.get("relic_options") or []:
+        parts = [f"[{relic.get('index')}] {_clean_text(relic.get('name'))}"]
+        rarity = _clean_text(relic.get("rarity"))
+        if rarity:
+            parts.append(rarity)
+        description = _clean_text(relic.get("description"))
+        if description:
+            parts.append(description)
+        lines.append(" | ".join(parts))
+    if chest.get("has_relic_been_claimed"):
+        lines.append("遗物已领取")
+    return "\n".join(lines)
+
+
+def _render_bundle_selection(state: Mapping[str, Any]) -> str:
+    """渲染开局或事件中的卡牌包候选。
+
+    Args:
+        state (Mapping[str, Any]): 当前卡牌包选择状态。
+
+    Returns:
+        str: 每个卡牌包及其卡牌内容。
+    """
+    lines = ["=== 选择卡牌包 ==="]
+    for bundle in state.get("bundles") or []:
+        lines.append(f"卡牌包 [{bundle.get('index')}]:")
+        lines.extend(_format_card(card) for card in bundle.get("cards") or [])
+    return "\n".join(lines)
+
+
+def _render_crystal_sphere(state: Mapping[str, Any]) -> str:
+    """渲染水晶球剩余次数、可点击格和已揭示物品。
+
+    Args:
+        state (Mapping[str, Any]): 当前水晶球小游戏状态。
+
+    Returns:
+        str: 不泄漏迷雾内容的水晶球观测。
+    """
+    sphere = state.get("crystal_sphere") or {}
+    lines = [
+        "=== 水晶球 ===",
+        (
+            f"剩余占卜: {sphere.get('divinations_remaining', 0)} | "
+            f"工具: {_clean_text(sphere.get('tool'))}"
+        ),
+    ]
+    cells = sphere.get("clickable_cells") or []
+    if cells:
+        lines.append("可点击格:")
+        lines.extend(
+            f"[{cell.get('index')}] 坐标 ({cell.get('x')}, {cell.get('y')})"
+            for cell in cells
+        )
+    items = sphere.get("revealed_items") or []
+    if items:
+        lines.append("已揭示物品:")
+        lines.extend(
+            f"{_clean_text(item.get('kind'))} @ ({item.get('x')}, {item.get('y')})"
+            for item in items
+        )
+    return "\n".join(lines)
+
+
+def _render_modal(state: Mapping[str, Any]) -> str:
+    """渲染覆盖当前页面的确认或取消弹窗。
+
+    Args:
+        state (Mapping[str, Any]): 当前弹窗状态。
+
+    Returns:
+        str: 弹窗类型、来源页和按钮标签。
+    """
+    modal = state.get("modal") or {}
+    lines = ["=== 确认弹窗 ==="]
+    type_name = _clean_text(modal.get("type_name"))
+    if type_name:
+        lines.append(f"类型: {type_name}")
+    underlying = _clean_text(modal.get("underlying_screen"))
+    if underlying:
+        lines.append(f"来源页面: {underlying}")
+    confirm = _clean_text(modal.get("confirm_label"))
+    if confirm:
+        lines.append(f"确认: {confirm}")
+    dismiss = _clean_text(modal.get("dismiss_label"))
+    if dismiss:
+        lines.append(f"取消: {dismiss}")
+    return "\n".join(lines)
+
+
+def _render_cards_view(state: Mapping[str, Any]) -> str:
+    """渲染只读的牌组查看覆盖层。
+
+    Args:
+        state (Mapping[str, Any]): 当前牌组查看状态。
+
+    Returns:
+        str: 覆盖层提示和全部可见卡牌。
+    """
+    cards_view = state.get("cards_view") or {}
+    lines = ["=== 查看牌组 ==="]
+    prompt = _clean_text(cards_view.get("prompt"))
+    if prompt:
+        lines.append(prompt)
+    lines.extend(_format_card(card) for card in cards_view.get("cards") or [])
+    return "\n".join(lines)
+
+
+def _render_timeline(state: Mapping[str, Any]) -> str:
+    """渲染时间线槽位及其是否可以选择。
+
+    Args:
+        state (Mapping[str, Any]): 当前时间线状态。
+
+    Returns:
+        str: 带槽位索引、名称、状态和可用性的时间线观测。
+    """
+    timeline = state.get("timeline") or {}
+    lines = ["=== 时间线 ==="]
+    for slot in timeline.get("slots") or []:
+        parts = [
+            f"[{slot.get('index')}] {_clean_text(slot.get('title'))}",
+            _clean_text(slot.get("state")),
+            "可选择" if slot.get("is_actionable") else "不可选择",
+        ]
+        lines.append(" | ".join(part for part in parts if part))
+    return "\n".join(lines)
+
+
+def _render_unknown_proceed(_state: Mapping[str, Any]) -> str:
+    """渲染真实房间结算中只有 ``proceed`` 的匿名页面。
+
+    Args:
+        _state (Mapping[str, Any]): 当前匿名结算状态。
+
+    Returns:
+        str: 不猜测页面类型的继续提示。
+    """
+    return "=== 房间结算 ===\n当前只需继续进入下一状态。"
+
+
 def _render_card_selection(state: Mapping[str, Any]) -> str:
     """渲染奖励、事件或战斗机制要求的选牌状态。
 
@@ -473,6 +699,82 @@ def _format_potion(potion: Mapping[str, Any]) -> str:
     if targets:
         parts.append(f"目标: {list(targets)}")
     return " | ".join(parts)
+
+
+def _format_shop_card(card: Mapping[str, Any]) -> str:
+    """把商店卡牌格式化为含价格和购买状态的单行文本。
+
+    Args:
+        card (Mapping[str, Any]): Mod 返回的商店卡牌描述。
+
+    Returns:
+        str: 可用于 ``buy_card`` 选择的卡牌文本。
+    """
+    parts = [_format_card(card), f"{card.get('price', 0)} 金币"]
+    status = _purchase_status(card)
+    if status:
+        parts.append(status)
+    return " | ".join(parts)
+
+
+def _format_shop_relic(relic: Mapping[str, Any]) -> str:
+    """把商店遗物格式化为含索引、说明、价格和状态的文本。
+
+    Args:
+        relic (Mapping[str, Any]): Mod 返回的商店遗物描述。
+
+    Returns:
+        str: 可用于 ``buy_relic`` 选择的遗物文本。
+    """
+    parts = [
+        f"[{relic.get('index')}] {_clean_text(relic.get('name'))}",
+        f"{relic.get('price', 0)} 金币",
+    ]
+    description = _clean_text(relic.get("description"))
+    if description:
+        parts.append(description)
+    status = _purchase_status(relic)
+    if status:
+        parts.append(status)
+    return " | ".join(parts)
+
+
+def _format_shop_potion(potion: Mapping[str, Any]) -> str:
+    """把商店药水格式化为含索引、说明、价格和状态的文本。
+
+    Args:
+        potion (Mapping[str, Any]): Mod 返回的商店药水描述。
+
+    Returns:
+        str: 可用于 ``buy_potion`` 选择的药水文本。
+    """
+    parts = [
+        f"[{potion.get('index')}] {_clean_text(potion.get('name'))}",
+        f"{potion.get('price', 0)} 金币",
+    ]
+    description = _clean_text(potion.get("description"))
+    if description:
+        parts.append(description)
+    status = _purchase_status(potion)
+    if status:
+        parts.append(status)
+    return " | ".join(parts)
+
+
+def _purchase_status(item: Mapping[str, Any]) -> str:
+    """返回一个商店物品当前不可购买的原因。
+
+    Args:
+        item (Mapping[str, Any]): 含库存和金币状态的商店物品。
+
+    Returns:
+        str: ``已售出``、``金币不足`` 或空字符串。
+    """
+    if item.get("is_stocked") is False:
+        return "已售出"
+    if item.get("enough_gold") is False:
+        return "金币不足"
+    return ""
 
 
 def _clean_text(value: Any) -> str:

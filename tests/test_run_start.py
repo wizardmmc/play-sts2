@@ -313,3 +313,104 @@ def test_start_run_sets_ascension_and_seed_before_embark() -> None:
         {"action": "set_seed", "game_seed": "ABCDEF1234"},
         {"action": "embark"},
     ]
+
+
+def test_resume_run_continues_save_from_main_menu() -> None:
+    """主菜单存在续局动作时执行它并等待当前局状态。
+
+    Raises:
+        AssertionError: 续局动作缺失、参数错误或没有等待运行状态。
+
+    Returns:
+        None: 此测试验证保存局的恢复流程。
+    """
+    run_state = {
+        "screen": "MAP",
+        "available_actions": ["choose_map_node"],
+        "run": {"character_id": "DEFECT", "floor": 3},
+    }
+    requests: list[dict[str, object]] = []
+    pending = False
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """返回主菜单、排队续局结果和最终地图状态。
+
+        Args:
+            request (httpx.Request): 续局流程发出的 HTTP 请求。
+
+        Returns:
+            httpx.Response: 当前步骤对应的 Mod 协议响应。
+        """
+        nonlocal pending
+        if request.method == "GET":
+            data = (
+                run_state
+                if pending
+                else {
+                    "screen": "MAIN_MENU",
+                    "available_actions": ["continue_run"],
+                }
+            )
+        else:
+            body = json.loads(request.content)
+            requests.append(body)
+            assert body == {"action": "continue_run"}
+            pending = True
+            data = {
+                "action": "continue_run",
+                "status": "pending",
+                "stable": False,
+                "state": {"screen": "MAIN_MENU"},
+            }
+        return httpx.Response(200, json={"ok": True, "data": data})
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        result = play_sts2.resume_run(client)
+
+    assert result == run_state
+    assert requests == [{"action": "continue_run"}]
+
+
+def test_resume_run_uses_already_active_run() -> None:
+    """游戏已经在局中时直接返回当前状态，不执行续局动作。
+
+    Raises:
+        AssertionError: 已在局中的状态仍触发了额外动作。
+
+    Returns:
+        None: 此测试验证当前局续玩的最短路径。
+    """
+    state = {
+        "screen": "EVENT",
+        "available_actions": ["choose_event_option"],
+        "run": {"character_id": "DEFECT", "floor": 2},
+    }
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """只允许读取一次当前游戏状态。
+
+        Args:
+            request (httpx.Request): 续局流程发出的 HTTP 请求。
+
+        Raises:
+            AssertionError: 流程尝试执行不必要的游戏动作。
+
+        Returns:
+            httpx.Response: 当前局状态响应。
+        """
+        requests.append(request)
+        assert request.method == "GET"
+        return httpx.Response(200, json={"ok": True, "data": state})
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        result = play_sts2.resume_run(client)
+
+    assert result == state
+    assert len(requests) == 1

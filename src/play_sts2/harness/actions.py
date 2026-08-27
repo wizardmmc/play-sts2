@@ -225,6 +225,8 @@ def _signature(name: str) -> tuple[tuple[str, ...], int]:
         return ("card_index", "target_index"), 1
     if name == "use_potion":
         return ("option_index", "target_index"), 1
+    if name == "choose_rest_option":
+        return ("option_index", "target_index"), 1
     if name in _OPTION_ACTIONS:
         return ("option_index",), 1
     if name in _NO_PARAMETER_ACTIONS:

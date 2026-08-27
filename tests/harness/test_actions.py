@@ -27,6 +27,12 @@ import pytest
             {"option_index": 1},
         ),
         (
+            "ACTION: choose_rest_option 1 2",
+            ["choose_rest_option"],
+            "choose_rest_option",
+            {"option_index": 1, "target_index": 2},
+        ),
+        (
             "ACTION: end_turn",
             ["play_card", "end_turn"],
             "end_turn",
