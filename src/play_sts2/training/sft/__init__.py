@@ -33,6 +33,7 @@ from .knowledge_evaluation import (
     score_compositional_answer,
     score_recall_answer,
 )
+from .merge import merge_sft_adapter
 from .trainer import (
     LORA_TARGET_MODULES,
     ChunkedCrossEntropy,
@@ -70,6 +71,7 @@ __all__ = [
     "load_knowledge_probes",
     "load_sft_config",
     "load_tokenized_samples",
+    "merge_sft_adapter",
     "optimize",
     "publish_adapter",
     "resolve_device",

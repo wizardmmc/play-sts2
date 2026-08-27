@@ -10,6 +10,7 @@ from .sft import (
     evaluate_sft,
     evaluate_sft_loss,
     load_sft_config,
+    merge_sft_adapter,
     run_knowledge_evaluation,
     train_sft,
 )
@@ -46,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
     train.add_argument("--name", required=True, help="adapter 与 run 的目录名称")
     train.add_argument("--max-steps", type=int, help="限制优化步数，用于真实冒烟")
+
+    merge = subparsers.add_parser("merge-sft", help="把 LoRA 合并为独立 HF 模型")
+    merge.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
+    merge.add_argument("--adapter", type=Path, required=True)
+    merge.add_argument("--output", type=Path)
 
     evaluate = subparsers.add_parser("eval-sft", help="生成式验证 LoRA adapter")
     evaluate.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
@@ -90,13 +96,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """执行可读 SFT 数据集构建。
+    """执行 SFT 数据构建、训练、合并或评测命令。
 
     Args:
         argv (Sequence[str] | None): 可选命令行参数，省略时读取进程参数。
 
     Returns:
-        int: 数据集成功写入时返回 ``0``。
+        int: 所选命令成功完成时返回 ``0``。
     """
     args = build_parser().parse_args(argv)
     if args.command == "build-sft":
@@ -116,6 +122,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "sft":
         config = load_sft_config(args.config)
         output = train_sft(config, args.name, max_steps=args.max_steps)
+    elif args.command == "merge-sft":
+        config = load_sft_config(args.config)
+        output = merge_sft_adapter(config, args.adapter, args.output)
     elif args.command == "eval-sft":
         config = load_sft_config(args.config)
         output = evaluate_sft(

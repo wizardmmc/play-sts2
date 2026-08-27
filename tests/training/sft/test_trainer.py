@@ -17,6 +17,7 @@ from play_sts2.training.sft import (
     publish_adapter,
     save_last_checkpoint,
 )
+from play_sts2.training.sft import trainer as trainer_module
 
 
 def test_optimize_updates_a_tiny_causal_model(tmp_path: Path) -> None:
@@ -99,6 +100,43 @@ def test_optimize_updates_a_tiny_causal_model(tmp_path: Path) -> None:
     trace = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
     assert trace["samples"] == 2
     assert trace["loss"] > 0
+
+
+def test_training_rejects_base_model_changed_after_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """训练清单不能把旧摘要绑定到随后被改写的基座。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+
+    Raises:
+        AssertionError: 同尺寸改写并恢复 mtime 后仍被视为同一基座。
+
+    Returns:
+        None: 此测试只覆盖训练前后的来源身份校验。
+    """
+    model_root = tmp_path / "base"
+    model_root.mkdir()
+    config = model_root / "config.json"
+    weights = model_root / "model.safetensors"
+    config.write_text("{}\n", encoding="utf-8")
+    weights.write_text("before\n", encoding="utf-8")
+    files = trainer_module.model_source_files(model_root)
+    snapshot = trainer_module.snapshot_files(files)
+    previous = weights.stat()
+    weights.write_text("after!\n", encoding="utf-8")
+    trainer_module.os.utime(
+        weights,
+        ns=(previous.st_atime_ns, previous.st_mtime_ns),
+    )
+
+    with pytest.raises(SftTrainingError, match="训练基座发生变化"):
+        trainer_module._require_unchanged_model_sources(
+            model_root,
+            files,
+            snapshot,
+        )
 
 
 def test_chunked_cross_entropy_matches_masked_teacher_forced_stats() -> None:

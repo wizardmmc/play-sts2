@@ -44,6 +44,7 @@ SFT 实现集中在 `src/play_sts2/training/sft/`：
 - `dataset.py`：合并知识与 raw，按整局分卷。
 - `encoding.py`：配置、chat template 与 assistant-only mask。
 - `trainer.py`：LoRA、分块 loss、优化、checkpoint 与 adapter 发布。
+- `merge.py`：安全合并 LoRA、记录来源哈希并原子发布 HF 模型。
 - `evaluation.py`：teacher-forced 与生成式行为评测。
 - `knowledge_evaluation.py`：知识召回和组合算术探针。
 
@@ -96,14 +97,15 @@ manifest 会记录 `approximate_resume=true`。先用独立运行名和 `--max-s
 ## 行为评测
 
 轮次比较优先使用 assistant-only teacher-forced loss、perplexity 和 token
-accuracy。e1/e2 必须在新的 stateless dev/test 上重跑：
+accuracy。当前目标是为 GRPO 打好基础，不必为了防御性横向比较重跑 e1/e2；
+需要诊断 e3 时再运行：
 
 ```bash
 uv run --group training play-sts2-train eval-sft-loss \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e2 \
+  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
   --split dev
 uv run --group training play-sts2-train eval-sft-loss \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e2 \
+  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
   --split test
 ```
 
@@ -112,9 +114,25 @@ uv run --group training play-sts2-train eval-sft-loss \
 
 ```bash
 uv run --group training play-sts2-train eval-sft \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e2 \
+  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
   --split dev
 ```
+
+## 合并模型
+
+训练成功后从配置读取基座模型并合并指定 adapter：
+
+```bash
+uv run --group training play-sts2-train merge-sft \
+  --adapter models/adapters/sft-clean-20260827-native-r16-e3
+```
+
+默认输出为 `models/merged/sft-clean-20260827-native-r16-e3-merged/`。合并固定在
+CPU bfloat16 上执行，调用 `merge_and_unload(safe_merge=True)`，保存失败不会发布
+半成品；排他 rename 保证发布竞态也不会覆盖已有目标。命令会先核对训练清单或
+旧 adapter 声明的本地基座，且输入在合并期间变化时拒绝发布。
+`merge_manifest.json` 保存全部基座权重、adapter、实际 tokenizer 来源的
+SHA-256、血缘校验方式以及依赖版本。
 
 ## 知识探针
 
@@ -125,16 +143,16 @@ uv run --group training play-sts2-train eval-sft \
 
 ```bash
 uv run --group training play-sts2-train eval-sft-knowledge \
-  --model models/merged/sft-clean-20260827-native-r16-e2-merged
+  --model models/merged/sft-clean-20260827-native-r16-e3-merged
 ```
 
 ## MLX 服务件
 
-把用户选定的 e2 合并模型转换到独立目录：
+把新合并模型转换到独立目录：
 
 ```bash
 uv sync --group inference
 uv run --group inference play-sts2-model prepare \
-  --source models/merged/sft-clean-20260827-native-r16-e2-merged \
-  --output models/serving/sft-clean-20260827-native-r16-e2-mlx-8bit
+  --source models/merged/sft-clean-20260827-native-r16-e3-merged \
+  --output models/serving/sft-clean-20260827-native-r16-e3-mlx-8bit
 ```

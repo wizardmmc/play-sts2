@@ -5,6 +5,54 @@ from pathlib import Path
 from play_sts2.training import cli
 
 
+def test_merge_sft_command_uses_config_and_optional_output(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """合并子命令把配置、adapter 与目标目录交给发布实现。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Raises:
+        AssertionError: CLI 没有按契约传递合并参数。
+
+    Returns:
+        None: 此测试不加载真实模型。
+    """
+    config = object()
+    calls: list[tuple[object, Path, Path | None]] = []
+    monkeypatch.setattr(cli, "load_sft_config", lambda path: config)
+    monkeypatch.setattr(
+        cli,
+        "merge_sft_adapter",
+        lambda value, adapter, output=None: (
+            calls.append((value, adapter, output)) or {"output": str(output)}
+        ),
+    )
+
+    result = cli.main(
+        [
+            "merge-sft",
+            "--adapter",
+            "models/adapters/e3",
+            "--output",
+            "models/merged/e3-merged",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        (
+            config,
+            Path("models/adapters/e3"),
+            Path("models/merged/e3-merged"),
+        )
+    ]
+    assert '"output": "models/merged/e3-merged"' in capsys.readouterr().out
+
+
 def test_train_sft_command_passes_config_name_and_step_limit(
     monkeypatch: object,
     capsys: object,

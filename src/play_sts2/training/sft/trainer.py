@@ -25,6 +25,12 @@ from .encoding import (
     config_as_json,
     load_tokenized_samples,
 )
+from .provenance import (
+    model_source_files,
+    sha256_files,
+    snapshot_files,
+    sources_unchanged,
+)
 
 LORA_TARGET_MODULES = (
     "in_proj_a",
@@ -469,6 +475,14 @@ def train_sft(
         _validate_init_adapter(config)
     dataset_manifest = validate_sft_dataset(config.dataset_root)
     dataset_manifest_sha256 = _sha256(config.dataset_root / "manifest.json")
+    base_model_files = model_source_files(config.base_model)
+    base_model_snapshot = snapshot_files(base_model_files)
+    base_model_sha256 = sha256_files(base_model_files)
+    _require_unchanged_model_sources(
+        config.base_model,
+        base_model_files,
+        base_model_snapshot,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(
         str(config.base_model),
@@ -482,12 +496,22 @@ def train_sft(
     )
     device = resolve_device(config.device)
     dtype = torch.bfloat16 if device == "mps" else torch.float32
+    _require_unchanged_model_sources(
+        config.base_model,
+        base_model_files,
+        base_model_snapshot,
+    )
     base_model = AutoModelForCausalLM.from_pretrained(
         str(config.base_model),
         dtype=dtype,
         local_files_only=True,
         trust_remote_code=False,
         low_cpu_mem_usage=True,
+    )
+    _require_unchanged_model_sources(
+        config.base_model,
+        base_model_files,
+        base_model_snapshot,
     )
     base_model.config.use_cache = False
     if config.init_adapter is None:
@@ -532,6 +556,7 @@ def train_sft(
     manifest = {
         "run_name": run_name,
         "base_model": str(config.base_model),
+        "base_model_sha256": base_model_sha256,
         "init_adapter": (
             str(config.init_adapter) if config.init_adapter is not None else None
         ),
@@ -568,6 +593,32 @@ def train_sft(
     publish_adapter(model, tokenizer, adapter_path, manifest)
     _write_json(run_path / "summary.json", manifest)
     return manifest
+
+
+def _require_unchanged_model_sources(
+    root: Path,
+    expected_files: Mapping[str, Path],
+    expected_snapshot: Mapping[str, tuple[int, int, int, int, int]],
+) -> None:
+    """确认训练取摘要与加载前后的基座文件身份保持一致。
+
+    Args:
+        root (Path): 本地 Hugging Face 基座模型目录。
+        expected_files (Mapping[str, Path]): 取摘要时的模型来源文件。
+        expected_snapshot (Mapping[str, tuple[int, int, int, int, int]]): 初始状态。
+
+    Raises:
+        SftTrainingError: 文件集合或任一文件状态发生变化。
+
+    Returns:
+        None: 基座来源保持不变时返回。
+    """
+    current_files = model_source_files(root)
+    if current_files != dict(expected_files) or not sources_unchanged(
+        expected_files,
+        expected_snapshot,
+    ):
+        raise SftTrainingError("训练基座发生变化，已拒绝使用过时指纹")
 
 
 def _decoder_and_head(model: Any) -> tuple[Any | None, Any | None]:
