@@ -48,6 +48,12 @@ uv run play-sts2-transcribe data/raw/human/<run_id>
 原生 UI 动作和非空参数；面向模型的状态文本与 SFT messages 将由后续 Harness
 共享组件生成。
 
+## Harness 契约
+
+Harness 使用严格的单行 `ACTION:` 协议，并根据完整状态区分战斗、战略与过渡
+屏幕。模型系统提示词作为独立文本资源存放在
+`src/play_sts2/harness/prompts/`，在线推理和离线 SFT 数据构建将读取同一份内容。
+
 ## 目录边界
 
 - `src/play_sts2/`：Python 客户端、录制、转录、推理与训练代码。
