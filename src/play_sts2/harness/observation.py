@@ -356,7 +356,42 @@ def _render_shop(state: Mapping[str, Any]) -> str:
         elif removal.get("enough_gold") is False:
             parts.append("金币不足")
         lines.append(" | ".join(parts))
+    if shop_purchase_available(shop) is False:
+        message = "当前没有任何可购买项目；重新打开库存不会刷新商品。"
+        if "proceed" in (state.get("available_actions") or []):
+            message += "请输出 `ACTION: proceed` 离开商店。"
+        else:
+            message += "若不再购买，请关闭库存后离开商店。"
+        lines.append(message)
     return "\n".join(lines)
+
+
+def shop_purchase_available(shop: Mapping[str, Any]) -> bool | None:
+    """判断已知商店库存中是否仍有可购买项目。
+
+    Args:
+        shop (Mapping[str, Any]): Mod 返回的商店库存状态。
+
+    Returns:
+        bool | None: 有项目可购买时为 ``True``，完整库存均不可购买时为
+        ``False``，库存尚未加载时为 ``None``。
+    """
+    inventory_items = [
+        *(shop.get("cards") or []),
+        *(shop.get("relics") or []),
+        *(shop.get("potions") or []),
+    ]
+    removal = shop.get("card_removal")
+    if not inventory_items and not isinstance(removal, Mapping):
+        return None
+    return any(
+        item.get("is_stocked") is not False and item.get("enough_gold") is True
+        for item in inventory_items
+    ) or (
+        isinstance(removal, Mapping)
+        and removal.get("available") is True
+        and removal.get("enough_gold") is True
+    )
 
 
 def _render_chest(state: Mapping[str, Any]) -> str:

@@ -47,11 +47,17 @@ class StrategicRunner:
         )
         self._max_retries = max_retries
 
-    def step(self, state: Mapping[str, Any]) -> DecisionStep:
+    def step(
+        self,
+        state: Mapping[str, Any],
+        *,
+        notice: str | None = None,
+    ) -> DecisionStep:
         """根据当前战略页面生成、校验并执行一个模型动作。
 
         Args:
             state (Mapping[str, Any]): Mod 返回的稳定战略决策状态。
+            notice (str | None): 仅针对当前状态附加的运行时纠偏提示。
 
         Raises:
             StrategicRunError: 当前状态不属于战略决策。
@@ -63,4 +69,8 @@ class StrategicRunner:
         """
         if classify_run_state(state) is not RunRoute.STRATEGIC:
             raise StrategicRunError("当前状态不属于战略决策")
-        return self._engine.step(state, max_retries=self._max_retries)
+        return self._engine.step(
+            state,
+            notice=notice,
+            max_retries=self._max_retries,
+        )

@@ -8,6 +8,7 @@
 - 教程已关闭，不包含进行中的游戏。
 - `unique_id`、解锁时间与游玩统计均使用固定测试值。
 - 只启用 `STS2AIAgent`，并关闭 `UnifiedSavePath`。
+- 使用游戏原生 `fast` 加速模式，并关闭游戏数据上传。
 
-不要用个人 `progress.save` 或 `settings.save` 直接覆盖这些文件。更新存档后必须
+不要用个人 `progress.save`、`prefs.save` 或 `settings.save` 直接覆盖这些文件。更新存档后必须
 运行 `uv run pytest tests/test_e2e_profile.py e2e/test_launcher.py`。

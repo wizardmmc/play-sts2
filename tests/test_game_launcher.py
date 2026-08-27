@@ -148,6 +148,9 @@ def test_stage_profile_copies_only_isolated_non_steam_files(tmp_path: Path) -> N
         data_root / "default/1/modded/profile1/saves/progress.save": (
             profile / "progress.save"
         ).read_bytes(),
+        data_root / "default/1/modded/profile1/saves/prefs.save": (
+            profile / "prefs.save"
+        ).read_bytes(),
     }
     assert {path for path in data_root.rglob("*") if path.is_file()} == set(
         expected_files
@@ -178,5 +181,9 @@ def _write_profile(profile: Path) -> None:
     (profile / "settings.save").write_text(json.dumps(settings), encoding="utf-8")
     (profile / "progress.save").write_text(
         '{"unique_id":"TEST"}',
+        encoding="utf-8",
+    )
+    (profile / "prefs.save").write_text(
+        '{"fast_mode":"fast","upload_data":false}',
         encoding="utf-8",
     )

@@ -176,6 +176,67 @@ class ConflictingStrategicGame:
         return _map_state()
 
 
+class ShopLoopGame:
+    """模拟金币耗尽后反复开关同一商店库存的游戏。"""
+
+    def __init__(self, *, state_changes: bool = False) -> None:
+        """初始化关闭的库存和空动作记录。
+
+        Args:
+            state_changes (bool): 是否让每次动作后的观测资源发生变化。
+
+        Returns:
+            None: 此方法只初始化商店循环测试替身。
+        """
+        self.actions: list[str] = []
+        self._is_open = False
+        self._state_changes = state_changes
+
+    def execute_action(self, action: str, **_parameters: int) -> dict[str, Any]:
+        """切换库存开关，或在模型主动离开时返回终局。
+
+        Args:
+            action (str): 模型提交的商店动作。
+            _parameters (int): 商店开关与离开动作不使用的参数。
+
+        Raises:
+            AssertionError: 模型动作与当前库存状态不一致。
+
+        Returns:
+            dict[str, Any]: 下一份商店状态或胜利终局。
+        """
+        self.actions.append(action)
+        if action == "open_shop_inventory":
+            assert self._is_open is False
+            self._is_open = True
+            return _completed(self._shop_state())
+        if action == "close_shop_inventory":
+            assert self._is_open is True
+            self._is_open = False
+            return _completed(self._shop_state())
+        if action == "proceed":
+            assert self._is_open is False
+            return _completed(_game_over_state(True))
+        raise AssertionError(f"预期外动作: {action}")
+
+    def state(self) -> dict[str, Any]:
+        """返回当前库存开关对应的商店状态。
+
+        Returns:
+            dict[str, Any]: 当前商店状态。
+        """
+        return self._shop_state()
+
+    def _shop_state(self) -> dict[str, Any]:
+        """构造当前库存状态和可见动作。
+
+        Returns:
+            dict[str, Any]: 金币不足的商店观测。
+        """
+        gold = len(self.actions) if self._state_changes else 0
+        return _shop_state(is_open=self._is_open, gold=gold)
+
+
 def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
     """整局 Runner 按顺序处理战略、战斗、过渡状态和胜利终局。
 
@@ -319,6 +380,92 @@ def test_run_runner_times_out_while_state_stays_transient() -> None:
     assert provider.requests == []
 
 
+def test_run_runner_warns_once_then_accepts_model_shop_exit() -> None:
+    """商店开关循环触发一次提示后仍由模型主动离开。
+
+    Raises:
+        AssertionError: Harness 自动代打、没有提示循环或阻止模型纠偏。
+
+    Returns:
+        None: 此测试验证不代打的商店循环纠偏路径。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ShopLoopGame()
+    provider = WholeRunProvider(
+        [
+            "ACTION: open_shop_inventory",
+            "ACTION: close_shop_inventory",
+            "ACTION: open_shop_inventory",
+            "ACTION: close_shop_inventory",
+            "ACTION: open_shop_inventory",
+            "ACTION: close_shop_inventory",
+            "ACTION: proceed",
+        ]
+    )
+
+    result = runtime.RunRunner(game, provider).run(_shop_state())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert game.actions == [
+        "open_shop_inventory",
+        "close_shop_inventory",
+        "open_shop_inventory",
+        "close_shop_inventory",
+        "open_shop_inventory",
+        "close_shop_inventory",
+        "proceed",
+    ]
+    assert "立刻输出 `ACTION: proceed`" in provider.requests[0][-1].content
+    corrective_message = provider.requests[6][-1].content
+    assert "动作循环" in corrective_message
+    assert "商店库存不会" in corrective_message
+    assert "harness 不会替你操作" in corrective_message
+
+
+def test_run_runner_stops_repeated_shop_loop_without_harness_action() -> None:
+    """模型忽略一次循环提示后明确停止本局且不替它离开。
+
+    Raises:
+        AssertionError: 循环耗尽全局步数、Harness 自动离开或错误继续运行。
+
+    Returns:
+        None: 此测试验证循环被归类为模型失败。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ShopLoopGame()
+    provider = WholeRunProvider(
+        ["ACTION: open_shop_inventory", "ACTION: close_shop_inventory"] * 6
+    )
+
+    with pytest.raises(runtime.RunError, match="纠偏提示后仍重复战略动作循环"):
+        runtime.RunRunner(game, provider).run(_shop_state())
+
+    assert game.actions == ["open_shop_inventory", "close_shop_inventory"] * 6
+    assert len(provider.requests) == 12
+
+
+def test_run_runner_does_not_flag_actions_when_observation_progresses() -> None:
+    """动作名称重复但模型观测持续变化时不误判为循环。
+
+    Raises:
+        AssertionError: Harness 只按动作名检测而忽略真实状态进展。
+
+    Returns:
+        None: 此测试验证循环检测绑定模型实际观测。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ShopLoopGame(state_changes=True)
+    provider = WholeRunProvider(
+        ["ACTION: open_shop_inventory", "ACTION: close_shop_inventory"] * 3
+        + ["ACTION: proceed"]
+    )
+
+    result = runtime.RunRunner(game, provider).run(_shop_state())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert all("动作循环" not in request[-1].content for request in provider.requests)
+
+
 def _completed(state: dict[str, Any]) -> dict[str, Any]:
     """把状态包装成 Mod 的稳定动作结果。
 
@@ -413,6 +560,48 @@ def _reward_state() -> dict[str, Any]:
         "available_actions": ["claim_reward"],
         "run": _run_state(),
         "reward": {"rewards": [{"index": 0, "name": "金币", "claimable": True}]},
+    }
+
+
+def _shop_state(*, is_open: bool = False, gold: int = 0) -> dict[str, Any]:
+    """构造库存固定且没有任何可购买项目的商店状态。
+
+    Args:
+        is_open (bool): 当前是否打开商店库存。
+        gold (int): 用于区分测试观测的当前金币数。
+
+    Returns:
+        dict[str, Any]: 与战略 Harness 兼容的商店状态。
+    """
+    run = _run_state()
+    run["gold"] = gold
+    return {
+        "screen": "SHOP",
+        "in_combat": False,
+        "available_actions": (
+            ["close_shop_inventory"] if is_open else ["open_shop_inventory", "proceed"]
+        ),
+        "run": run,
+        "shop": {
+            "is_open": is_open,
+            "cards": [
+                {
+                    "index": 0,
+                    "name": "眼部攻击",
+                    "price": 45,
+                    "is_stocked": True,
+                    "enough_gold": False,
+                }
+            ],
+            "relics": [],
+            "potions": [],
+            "card_removal": {
+                "price": 75,
+                "available": True,
+                "used": False,
+                "enough_gold": False,
+            },
+        },
     }
 
 

@@ -1,7 +1,7 @@
 """在战略与战斗之间调度模型，直到当前一局结束。"""
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from ..client import GameClient
-from ..harness import HarnessLayer
+from ..harness import HarnessLayer, format_action, shop_purchase_available
 from ..inference import DecisionProvider
 from .battle import BattleRunner
 from .decision import DecisionStep, is_action_window_conflict
@@ -20,6 +20,8 @@ _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_MAX_STRATEGIC_STEPS = 400
 _DEFAULT_POLL_INTERVAL = 0.2
 _DEFAULT_STATE_TIMEOUT = 30.0
+_SHOP_LOOP_ACTIONS = {"close_shop_inventory", "open_shop_inventory"}
+_SHOP_LOOP_REPETITIONS = 3
 
 
 class RunError(RuntimeError):
@@ -136,6 +138,9 @@ class RunRunner:
         battle_count = 0
         strategic_steps = 0
         conflict_retries = 0
+        shop_trace: list[tuple[str, str]] = []
+        warned_shop_loops: set[tuple[tuple[str, str], ...]] = set()
+        shop_notice_active = False
 
         while True:
             route = classify_run_state(state)
@@ -152,6 +157,8 @@ class RunRunner:
                     final_state=state,
                 )
             if route is RunRoute.BATTLE:
+                shop_trace.clear()
+                shop_notice_active = False
                 battle = self._battle.run(state)
                 battle_count += 1
                 decisions.extend(
@@ -163,7 +170,12 @@ class RunRunner:
             if strategic_steps >= self._max_strategic_steps:
                 raise RunError(f"战略动作数超过上限: {self._max_strategic_steps}")
             try:
-                step = self._strategic.step(state)
+                notice = (
+                    _shop_loop_notice(state)
+                    if shop_notice_active
+                    else _shop_exit_notice(state)
+                )
+                step = self._strategic.step(state, notice=notice)
             except httpx.HTTPStatusError as exc:
                 if (
                     not is_action_window_conflict(exc)
@@ -177,6 +189,20 @@ class RunRunner:
             strategic_steps += 1
             decisions.append(RunDecision(HarnessLayer.STRATEGIC, step))
             state = self._state_after(step.action_result)
+            shop_trace.append((step.observation.text, format_action(step.action)))
+            del shop_trace[: -2 * _SHOP_LOOP_REPETITIONS]
+            loop = _repeated_shop_loop(shop_trace)
+            if loop is not None:
+                shop_trace.clear()
+                if loop in warned_shop_loops:
+                    raise RunError(
+                        "模型在纠偏提示后仍重复战略动作循环: "
+                        "open_shop_inventory ↔ close_shop_inventory"
+                    )
+                warned_shop_loops.add(loop)
+                shop_notice_active = True
+            elif step.action.name not in _SHOP_LOOP_ACTIONS:
+                shop_notice_active = False
 
     def _state_after(self, action_result: Mapping[str, Any]) -> dict[str, Any]:
         """从战略动作结果或后续轮询取得下一份可处理状态。
@@ -240,3 +266,78 @@ def _terminal_outcome(state: Mapping[str, Any]) -> RunOutcome:
     game_over = state.get("game_over") or {}
     victory = game_over.get("is_victory", game_over.get("victory"))
     return RunOutcome.VICTORY if victory is True else RunOutcome.DIED
+
+
+def _repeated_shop_loop(
+    trace: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str], ...] | None:
+    """识别同两份模型观测之间连续三次开关商店的周期。
+
+    Args:
+        trace (Sequence[tuple[str, str]]): 按执行顺序记录的观测与动作行。
+
+    Returns:
+        tuple[tuple[str, str], ...] | None: 与起点无关的两步循环键；
+        尚未形成真实商店周期时返回 ``None``。
+    """
+    window_size = 2 * _SHOP_LOOP_REPETITIONS
+    if len(trace) < window_size:
+        return None
+    window = tuple(trace[-window_size:])
+    cycle = window[:2]
+    if window != cycle * _SHOP_LOOP_REPETITIONS:
+        return None
+    actions = {entry[1].split()[1] for entry in cycle}
+    if actions != _SHOP_LOOP_ACTIONS:
+        return None
+    reversed_cycle = (cycle[1], cycle[0])
+    return min(cycle, reversed_cycle)
+
+
+def _shop_loop_notice(state: Mapping[str, Any]) -> str:
+    """根据当前商店页面给出不代打的循环出口提示。
+
+    Args:
+        state (Mapping[str, Any]): 待交给战略模型的当前商店状态。
+
+    Returns:
+        str: 说明库存语义、当前真实出口和再次循环后果的提示。
+    """
+    actions = {str(action) for action in state.get("available_actions") or []}
+    if "proceed" in actions:
+        exit_hint = "立刻输出 `ACTION: proceed` 离开商店。"
+    elif "close_shop_inventory" in actions:
+        exit_hint = (
+            "若不再购买，先输出 `ACTION: close_shop_inventory`；"
+            "回到商店后再使用真实离开动作。"
+        )
+    else:
+        exit_hint = "请使用当前页面真实的离开动作。"
+    return (
+        "注意：你已经连续重复商店开关动作循环。商店库存不会因关闭并重新打开而刷新；"
+        f"{exit_hint}harness 不会替你操作；再次重复该循环将终止本局。"
+    )
+
+
+def _shop_exit_notice(state: Mapping[str, Any]) -> str | None:
+    """在零购买力商店存在真实出口时给模型精确提示。
+
+    Args:
+        state (Mapping[str, Any]): 待交给战略模型的当前商店状态。
+
+    Returns:
+        str | None: 应附在观测后的退出提示；仍可购买或没有出口时为 ``None``。
+    """
+    actions = {str(action) for action in state.get("available_actions") or []}
+    shop = state.get("shop")
+    if (
+        state.get("screen") != "SHOP"
+        or "proceed" not in actions
+        or not isinstance(shop, Mapping)
+        or shop_purchase_available(shop) is not False
+    ):
+        return None
+    return (
+        "决策提示：当前没有任何可购买项目，关闭并重新打开库存也不会刷新商品。"
+        "立刻输出 `ACTION: proceed` 离开商店。"
+    )

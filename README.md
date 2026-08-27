@@ -29,8 +29,8 @@ uv run play-sts2-game --mode headed
 命令默认监听 `http://127.0.0.1:8080`，使用
 `e2e/fixtures/profile/` 中不含个人信息的全解锁模板，并在临时 HOME 中关闭
 Steam 与 `UnifiedSavePath`。命令保持前台运行，退出时会结束游戏进程并删除本次
-隔离存档；端口、游戏路径或模板不同时可传入 `--port`、`--app-path` 和
-`--profile`。
+隔离存档；模板还会启用游戏原生 `fast` 模式，加快战斗动画和转场。端口、游戏
+路径或模板不同时可传入 `--port`、`--app-path` 和 `--profile`。
 
 ## 录制人类轨迹
 

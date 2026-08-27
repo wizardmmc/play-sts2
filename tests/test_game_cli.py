@@ -59,6 +59,7 @@ def test_default_profile_does_not_depend_on_working_directory(
 
     assert profile.is_absolute()
     assert (profile / "settings.save").is_file()
+    assert (profile / "prefs.save").is_file()
     assert (profile / "progress.save").is_file()
 
 

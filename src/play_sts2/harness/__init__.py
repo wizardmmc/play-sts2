@@ -8,7 +8,12 @@ from .actions import (
     model_actions,
     parse_action,
 )
-from .observation import Observation, ObservationError, build_observation
+from .observation import (
+    Observation,
+    ObservationError,
+    build_observation,
+    shop_purchase_available,
+)
 from .ownership import HarnessLayer, state_layer
 from .prompts import system_prompt
 
@@ -23,6 +28,7 @@ __all__ = [
     "format_action",
     "model_actions",
     "parse_action",
+    "shop_purchase_available",
     "state_layer",
     "system_prompt",
 ]

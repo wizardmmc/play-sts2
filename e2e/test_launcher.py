@@ -28,8 +28,10 @@ def _write_test_profile(profile: Path, mod_list: list[dict[str, object]]) -> Non
         }
     ).encode()
     progress = b'{"unique_id":"E2E"}'
+    preferences = b'{"fast_mode":"fast","upload_data":false}'
     (profile / "settings.save").write_bytes(settings)
     (profile / "progress.save").write_bytes(progress)
+    (profile / "prefs.save").write_bytes(preferences)
 
 
 @pytest.mark.parametrize(
@@ -100,6 +102,9 @@ def test_stage_test_profile_copies_only_non_steam_save_files(tmp_path: Path) -> 
         data_root / "default/1/settings.save": (profile / "settings.save").read_bytes(),
         data_root / "default/1/modded/profile1/saves/progress.save": (
             b'{"unique_id":"E2E"}'
+        ),
+        data_root / "default/1/modded/profile1/saves/prefs.save": (
+            b'{"fast_mode":"fast","upload_data":false}'
         ),
     }
     assert {path for path in data_root.rglob("*") if path.is_file()} == set(

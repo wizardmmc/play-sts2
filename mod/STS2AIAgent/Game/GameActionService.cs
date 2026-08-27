@@ -1231,7 +1231,7 @@ internal static class GameActionService
         }
 
         var selectedReward = rewardButtons[request.option_index.Value];
-        if (!selectedReward.IsEnabled)
+        if (!GameStateService.IsRewardClaimable(selectedReward))
         {
             throw new ApiException(409, "invalid_action", "The selected reward is not claimable in the current state.", new
             {
@@ -1796,13 +1796,11 @@ internal static class GameActionService
         HashSet<ulong> attemptedRewardButtons,
         out NRewardButton? rewardButton)
     {
-        var hasPotionSlots = GameStateService.GetLocalPlayer(RunManager.Instance.DebugOnlyGetState())?.HasOpenPotionSlots ?? false;
         rewardButton = GameStateService
             .GetRewardButtons(rewardsScreen)
             .FirstOrDefault(button =>
-                button.IsEnabled &&
+                GameStateService.IsRewardClaimable(button) &&
                 !attemptedRewardButtons.Contains(button.GetInstanceId()) &&
-                (button.Reward is not PotionReward || hasPotionSlots) &&
                 (!_cardRewardSkipped || button.Reward is not CardReward));
 
         return rewardButton != null;

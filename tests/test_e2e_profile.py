@@ -102,8 +102,12 @@ def test_profile_contains_no_local_identity_or_path() -> None:
         None: 此测试仅验证可公开提交的数据范围。
     """
     progress = _read_json(_PROFILE / "progress.save")
+    preferences = _read_json(_PROFILE / "prefs.save")
     settings = _read_json(_PROFILE / "settings.save")
-    serialized = json.dumps([progress, settings], ensure_ascii=False).casefold()
+    serialized = json.dumps(
+        [progress, preferences, settings],
+        ensure_ascii=False,
+    ).casefold()
 
     for key in ("steam_id", "account_id", "player_name", "user_name", "email"):
         assert f'"{key}"' not in serialized
@@ -126,3 +130,18 @@ def test_profile_enables_only_the_agent_mod() -> None:
 
     assert settings["mod_settings"]["mods_enabled"] is True
     assert mod_states == {"STS2AIAgent": True, "UnifiedSavePath": False}
+
+
+def test_profile_enables_native_fast_mode_without_data_upload() -> None:
+    """公开 fixture 默认使用游戏原生加速且关闭数据上传。
+
+    Raises:
+        AssertionError: fixture 未启用原生 fast mode 或仍允许遥测上传。
+
+    Returns:
+        None: 此测试只验证正式启动命令使用的 profile 偏好。
+    """
+    preferences = _read_json(_PROFILE / "prefs.save")
+
+    assert preferences["fast_mode"] == "fast"
+    assert preferences["upload_data"] is False

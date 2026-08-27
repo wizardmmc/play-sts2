@@ -65,7 +65,7 @@ def launch_game(
         executable (Path): STS2 的 macOS 可执行文件。
         port (int): Agent Mod HTTP 服务监听端口。
         home (Path): 当前实例独占且必须为空的 HOME 目录。
-        profile (Path): 只包含安全设置与进度的存档模板目录。
+        profile (Path): 只包含安全设置、偏好与进度的存档模板目录。
         mode (str): ``headless`` 或 ``headed`` 启动模式。
         enable_debug_actions (bool): 是否开放场景重置使用的调试动作。
 
@@ -137,7 +137,7 @@ def stage_profile(profile: Path, home: Path) -> None:
     """把受控存档模板写入隔离 HOME 的非 Steam 路径。
 
     Args:
-        profile (Path): 包含 ``settings.save`` 和 ``progress.save`` 的模板目录。
+        profile (Path): 包含设置、偏好和进度文件的模板目录。
         home (Path): 当前游戏独占且必须为空的 HOME 目录。
 
     Raises:
@@ -146,11 +146,12 @@ def stage_profile(profile: Path, home: Path) -> None:
         OSError: 无法读取或复制存档文件。
 
     Returns:
-        None: 两个允许的存档文件复制完成后返回。
+        None: 三个允许的存档文件复制完成后返回。
     """
     settings = profile / "settings.save"
+    preferences = profile / "prefs.save"
     progress = profile / "progress.save"
-    for path in (settings, progress):
+    for path in (settings, preferences, progress):
         if not path.is_file():
             raise FileNotFoundError(f"隔离存档模板缺少文件: {path}")
     if home.exists() and any(home.iterdir()):
@@ -161,6 +162,7 @@ def stage_profile(profile: Path, home: Path) -> None:
     targets = (
         (settings, data_root / "default/1/settings.save"),
         (progress, data_root / "default/1/modded/profile1/saves/progress.save"),
+        (preferences, data_root / "default/1/modded/profile1/saves/prefs.save"),
     )
     for source, target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)

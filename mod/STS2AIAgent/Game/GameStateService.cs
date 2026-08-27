@@ -778,7 +778,21 @@ internal static class GameStateService
 
     public static bool CanClaimReward(IScreenContext? currentScreen)
     {
-        return GetRewardButtons(currentScreen).Any(button => button.IsEnabled);
+        return GetRewardButtons(currentScreen).Any(IsRewardClaimable);
+    }
+
+    /// <summary>
+    /// 判断奖励按钮对应的奖励是否能被当前玩家实际领取。
+    /// </summary>
+    public static bool IsRewardClaimable(NRewardButton button)
+    {
+        if (!button.IsEnabled)
+        {
+            return false;
+        }
+
+        return button.Reward is not PotionReward ||
+            GetLocalPlayer(RunManager.Instance.DebugOnlyGetState())?.HasOpenPotionSlots == true;
     }
 
     public static bool CanChooseRewardCard(IScreenContext? currentScreen)
@@ -4848,7 +4862,7 @@ internal static class GameStateService
             name = name,
             description = reward?.Description.GetFormattedText() ?? string.Empty,
             effect_description = effectDescription,
-            claimable = button.IsEnabled
+            claimable = IsRewardClaimable(button)
         };
     }
 

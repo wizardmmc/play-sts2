@@ -24,7 +24,7 @@ _ACTION_WINDOW_MESSAGE = "Action is not available in the current state."
 
 
 class DecisionRetriesExhausted(ActionParseError):
-    """表示模型在有限重试内始终没有给出合法动作。"""
+    """表示模型在有限重试内始终没有完成合法动作。"""
 
     def __init__(
         self,
@@ -34,7 +34,7 @@ class DecisionRetriesExhausted(ActionParseError):
         """保存每次失败原因与原始模型回复。
 
         Args:
-            errors (Sequence[str]): 每次动作解析失败的错误信息。
+            errors (Sequence[str]): 每次动作解析或执行被拒绝的错误信息。
             replies (Sequence[ModelReply]): 模型依次返回的原始回复。
 
         Returns:
@@ -53,7 +53,7 @@ class DecisionStep:
         observation (Observation): 从动作前状态生成的模型观测。
         messages (tuple[ChatMessage, ...]): 本次实际发送给 Provider 的消息。
         replies (tuple[ModelReply, ...]): Provider 每次尝试返回的原始回复。
-        retry_errors (tuple[str, ...]): 成功前各次失败的动作解析错误。
+        retry_errors (tuple[str, ...]): 成功前各次动作失败或拒绝原因。
         action (HarnessAction): 通过 Harness 校验的结构化动作。
         action_result (dict[str, Any]): Mod 返回的原始动作结果。
     """
@@ -107,6 +107,7 @@ class DecisionEngine:
         state: Mapping[str, Any],
         *,
         history: Sequence[ChatMessage] = (),
+        notice: str | None = None,
         max_retries: int = 0,
     ) -> DecisionStep:
         """根据一个稳定游戏状态生成、校验并执行一次模型动作。
@@ -115,6 +116,7 @@ class DecisionEngine:
             state (Mapping[str, Any]): Mod 返回的动作前稳定游戏状态。
             history (Sequence[ChatMessage]): 当前战斗中已经完成的消息历史，
                 不包含固定的 system 消息。
+            notice (str | None): 附加到当前观测后的运行时纠偏提示。
             max_retries (int): 首次输出失败后允许追加的重试次数。
 
         Raises:
@@ -128,13 +130,16 @@ class DecisionEngine:
             DecisionStep: 本次闭环的消息、回复、动作和 Mod 结果。
         """
         observation = build_observation(state)
+        user_content = observation.text
+        if notice:
+            user_content = f"{user_content}\n\n{notice}"
         messages = [
             ChatMessage(
                 role="system",
                 content=system_prompt(observation.layer),
             ),
             *history,
-            ChatMessage(role="user", content=observation.text),
+            ChatMessage(role="user", content=user_content),
         ]
         replies: list[ModelReply] = []
         errors: list[str] = []
@@ -154,17 +159,32 @@ class DecisionEngine:
                 messages.append(
                     ChatMessage(
                         role="user",
-                        content=(
-                            f"{observation.text}\n\n{_RETRY_NOTE.format(error=exc)}"
-                        ),
+                        content=(f"{user_content}\n\n{_RETRY_NOTE.format(error=exc)}"),
                     )
                 )
                 continue
 
-            action_result = self._game.execute_action(
-                action.name,
-                **action.parameters,
-            )
+            try:
+                action_result = self._game.execute_action(
+                    action.name,
+                    **action.parameters,
+                )
+            except httpx.HTTPStatusError as exc:
+                error = _model_action_rejection(exc)
+                if error is None:
+                    raise
+                errors.append(error)
+                if attempt == max_retries:
+                    raise DecisionRetriesExhausted(errors, replies) from exc
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            f"{user_content}\n\n{_RETRY_NOTE.format(error=error)}"
+                        ),
+                    )
+                )
+                continue
             return DecisionStep(
                 observation=observation,
                 messages=tuple(messages),
@@ -186,17 +206,55 @@ def is_action_window_conflict(exc: httpx.HTTPStatusError) -> bool:
     Returns:
         bool: 仅对真实观测到的瞬时动作窗口冲突返回 ``True``。
     """
-    if exc.response.status_code != 409:
-        return False
-    try:
-        payload = exc.response.json()
-    except ValueError:
-        return False
-    if not isinstance(payload, Mapping):
-        return False
-    error = payload.get("error")
+    error = _mod_error(exc)
     return (
         isinstance(error, Mapping)
         and error.get("code") == "invalid_action"
         and error.get("message") == _ACTION_WINDOW_MESSAGE
     )
+
+
+def _model_action_rejection(exc: httpx.HTTPStatusError) -> str | None:
+    """提取适合反馈给模型自行纠正的 Mod 业务拒绝。
+
+    Args:
+        exc (httpx.HTTPStatusError): 执行模型动作时收到的 HTTP 错误。
+
+    Returns:
+        str | None: 可反馈的明确拒绝原因；瞬时窗口或其他 HTTP 错误返回
+        ``None``。
+    """
+    error = _mod_error(exc)
+    if not isinstance(error, Mapping):
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    if (
+        code not in {"invalid_action", "invalid_target"}
+        or not isinstance(message, str)
+        or (code == "invalid_action" and message == _ACTION_WINDOW_MESSAGE)
+    ):
+        return None
+    return f"Mod 拒绝动作: {message}"
+
+
+def _mod_error(exc: httpx.HTTPStatusError) -> Mapping[object, object] | None:
+    """读取 Mod 409 响应中的结构化错误对象。
+
+    Args:
+        exc (httpx.HTTPStatusError): 待检查的 HTTP 错误。
+
+    Returns:
+        Mapping[object, object] | None: 结构合法的错误对象；状态码或响应体
+        不匹配时返回 ``None``。
+    """
+    if exc.response.status_code != 409:
+        return None
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    error = payload.get("error")
+    return error if isinstance(error, Mapping) else None

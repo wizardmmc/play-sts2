@@ -185,6 +185,50 @@ def test_build_observation_renders_supported_strategic_screen(
     assert all(fragment in observation.text for fragment in expected_fragments)
 
 
+def test_shop_observation_explains_that_reopening_does_not_refresh_stock() -> None:
+    """商店没有任何可购买项目时明确提示重开库存不会刷新。
+
+    Raises:
+        AssertionError: 观测没有向模型说明零购买力和真实离开语义。
+
+    Returns:
+        None: 此测试只验证商店观测，不替模型选择离开动作。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "SHOP",
+        "available_actions": ["open_shop_inventory", "proceed"],
+        "run": {"gold": 0},
+        "shop": {
+            "is_open": False,
+            "cards": [
+                {
+                    "index": 0,
+                    "name": "眼部攻击",
+                    "price": 45,
+                    "is_stocked": True,
+                    "enough_gold": False,
+                }
+            ],
+            "relics": [],
+            "potions": [],
+            "card_removal": {
+                "price": 75,
+                "available": True,
+                "used": False,
+                "enough_gold": False,
+            },
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "当前没有任何可购买项目" in observation.text
+    assert "重新打开库存不会刷新商品" in observation.text
+    assert "ACTION: proceed" in observation.text
+    assert observation.available_actions == ("open_shop_inventory", "proceed")
+
+
 def test_build_observation_renders_combat_decision() -> None:
     """战斗观测展示资源、敌人意图、手牌索引和合法动作。
 

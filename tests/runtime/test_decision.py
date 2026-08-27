@@ -225,6 +225,53 @@ class RecordingGame:
         return {"status": "completed", "stable": True, "state": {}}
 
 
+class RejectingGame:
+    """按指定次数拒绝模型动作，随后完成纠正动作。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_action",
+        status_code: int = 409,
+        rejection_count: int = 1,
+    ) -> None:
+        """保存 Mod 拒绝响应并初始化动作记录。
+
+        Args:
+            message (str): 动作返回的拒绝消息。
+            code (str): Mod 错误代码。
+            status_code (int): HTTP 状态码。
+            rejection_count (int): 返回错误的动作次数。
+
+        Returns:
+            None: 此方法只初始化测试替身。
+        """
+        self._message = message
+        self._code = code
+        self._status_code = status_code
+        self._rejection_count = rejection_count
+        self.actions: list[tuple[str, dict[str, int]]] = []
+
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        """在指定次数内抛出 HTTP 错误，随后返回成功结果。
+
+        Args:
+            action (str): Runtime 提交的动作名称。
+            parameters (int): Runtime 提交的动作参数。
+
+        Raises:
+            httpx.HTTPStatusError: 当前动作仍在预设拒绝次数内。
+
+        Returns:
+            dict[str, Any]: 纠正动作的最小成功结果。
+        """
+        self.actions.append((action, parameters))
+        if len(self.actions) <= self._rejection_count:
+            raise _action_error(self._status_code, self._code, self._message)
+        return {"status": "completed", "stable": True, "state": {}}
+
+
 def test_decision_engine_retries_invalid_model_output() -> None:
     """非法输出携带错误说明重试，直到得到一个合法动作。
 
@@ -256,6 +303,148 @@ def test_decision_engine_retries_invalid_model_output() -> None:
     )
     assert "上次动作无效" in provider.requests[1][-1].content
     assert "模型输出必须以 ACTION: 开头" in provider.requests[1][-1].content
+
+
+@pytest.mark.parametrize(
+    ("state", "replies", "code", "message", "expected_actions"),
+    [
+        (
+            "combat",
+            ["ACTION: play_card 0 1", "ACTION: end_turn"],
+            "invalid_action",
+            "Card cannot be played in the current state.",
+            [
+                ("play_card", {"card_index": 0, "target_index": 1}),
+                ("end_turn", {}),
+            ],
+        ),
+        (
+            "reward",
+            ["ACTION: claim_reward 0", "ACTION: proceed"],
+            "invalid_action",
+            "The selected reward is not claimable in the current state.",
+            [("claim_reward", {"option_index": 0}), ("proceed", {})],
+        ),
+        (
+            "combat",
+            ["ACTION: play_card 0 1", "ACTION: end_turn"],
+            "invalid_target",
+            "Action is not available in the current state.",
+            [
+                ("play_card", {"card_index": 0, "target_index": 1}),
+                ("end_turn", {}),
+            ],
+        ),
+    ],
+    ids=("unplayable_card", "unclaimable_reward", "invalid_target"),
+)
+def test_decision_engine_lets_model_correct_rejected_action(
+    state: str,
+    replies: list[str],
+    code: str,
+    message: str,
+    expected_actions: list[tuple[str, dict[str, int]]],
+) -> None:
+    """把 Mod 的业务拒绝反馈给模型，并执行模型自行选择的纠正动作。
+
+    Args:
+        state (str): 动作被拒绝时的模型观测类型。
+        replies (list[str]): 模型首次动作和自行纠正动作。
+        code (str): Mod 返回的语义错误代码。
+        message (str): 真实运行中观测到的 Mod 业务拒绝消息。
+        expected_actions (list[tuple[str, dict[str, int]]]): 模型依次选择的动作。
+
+    Raises:
+        AssertionError: Harness 代打、直接退出或没有反馈准确拒绝原因。
+
+    Returns:
+        None: 此测试只验证有限的业务动作纠错。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(replies)
+    game = RejectingGame(message, code=code)
+    initial_state = _combat_state() if state == "combat" else _reward_state()
+
+    step = runtime.DecisionEngine(game, provider).step(
+        initial_state,
+        max_retries=1,
+    )
+
+    assert game.actions == expected_actions
+    assert step.action.name == expected_actions[-1][0]
+    assert step.retry_errors == (f"Mod 拒绝动作: {message}",)
+    assert "上次动作无效" in provider.requests[1][-1].content
+    assert message in provider.requests[1][-1].content
+
+
+def test_decision_engine_stops_after_rejected_action_retry_limit() -> None:
+    """模型持续选择被 Mod 拒绝的动作时有限停止且不代打。
+
+    Raises:
+        AssertionError: Runtime 超出重试预算、吞掉原因或执行替代动作。
+
+    Returns:
+        None: 此测试验证业务拒绝与文本错误共享同一重试预算。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    message = "Card cannot be played in the current state."
+    provider = ReplyQueue(["ACTION: play_card 0 1"] * 2)
+    game = RejectingGame(message, rejection_count=2)
+
+    with pytest.raises(runtime.DecisionRetriesExhausted) as raised:
+        runtime.DecisionEngine(game, provider).step(
+            _combat_state(),
+            max_retries=1,
+        )
+
+    assert game.actions == [
+        ("play_card", {"card_index": 0, "target_index": 1}),
+        ("play_card", {"card_index": 0, "target_index": 1}),
+    ]
+    assert raised.value.errors == (
+        f"Mod 拒绝动作: {message}",
+        f"Mod 拒绝动作: {message}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (409, "invalid_action", "Action is not available in the current state."),
+        (409, "server_error", "Unexpected Mod failure."),
+        (500, "invalid_action", "Card cannot be played in the current state."),
+    ],
+)
+def test_decision_engine_propagates_non_semantic_http_errors(
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """瞬时窗口和非业务 HTTP 错误不在单步引擎中被吞掉。
+
+    Args:
+        status_code (int): Mod 返回的 HTTP 状态码。
+        code (str): Mod 返回的错误代码。
+        message (str): Mod 返回的错误消息。
+
+    Raises:
+        AssertionError: 单步引擎错误地把系统错误反馈给模型重试。
+
+    Returns:
+        None: 此测试只验证 HTTP 错误分类边界。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(["ACTION: play_card 0 1"])
+    game = RejectingGame(message, code=code, status_code=status_code)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        runtime.DecisionEngine(game, provider).step(
+            _combat_state(),
+            max_retries=1,
+        )
+
+    assert len(provider.requests) == 1
+    assert len(game.actions) == 1
 
 
 def test_decision_engine_stops_after_retry_limit() -> None:
@@ -394,6 +583,49 @@ def _combat_state() -> dict[str, Any]:
             ],
             "draw_count": 5,
             "discard_count": 0,
+        },
+    }
+
+
+def _reward_state() -> dict[str, Any]:
+    """构造包含不可领取药水和真实出口的奖励状态。
+
+    Returns:
+        dict[str, Any]: 可以验证奖励业务拒绝纠错的战略状态。
+    """
+    return {
+        "screen": "REWARD",
+        "in_combat": False,
+        "available_actions": ["claim_reward", "proceed"],
+        "run": {
+            "character_name": "故障机器人",
+            "ascension": 0,
+            "act_id": "0",
+            "floor": 8,
+            "current_hp": 27,
+            "max_hp": 75,
+            "gold": 38,
+            "potions": [
+                {"index": 0, "name": "集中药水", "occupied": True},
+                {"index": 1, "name": "力量药水", "occupied": True},
+                {"index": 2, "name": "速度药水", "occupied": True},
+            ],
+        },
+        "reward": {
+            "rewards": [
+                {
+                    "index": 0,
+                    "name": "流动铜液",
+                    "reward_type": "Potion",
+                    "claimable": False,
+                },
+                {
+                    "index": 1,
+                    "name": "卡牌奖励",
+                    "reward_type": "Card",
+                    "claimable": True,
+                },
+            ]
         },
     }
 
