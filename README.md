@@ -19,6 +19,23 @@ uv run pytest e2e --run-e2e
 uv run pytest e2e --run-e2e --sts2-mode=headed
 ```
 
+## 录制人类轨迹
+
+先启动已经加载 Agent Mod 的有头 STS2，再运行：
+
+```bash
+uv run play-sts2-record
+```
+
+命令默认连接 `http://127.0.0.1:8080`，等待一局开始，并将轨迹保存到
+`data/raw/human/<run_id>/`。服务地址或数据根目录不同时可以显式指定：
+
+```bash
+uv run play-sts2-record \
+  --base-url http://127.0.0.1:8082 \
+  --output-root data/raw
+```
+
 ## 目录边界
 
 - `src/play_sts2/`：Python 客户端、录制、转录、推理与训练代码。

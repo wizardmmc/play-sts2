@@ -1,6 +1,7 @@
 """定义录制阶段使用的最小轨迹数据结构。"""
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 
@@ -54,3 +55,18 @@ class RecordedEvent:
             dict[str, Any]: 保留字段顺序的事件字典。
         """
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedRun:
+    """描述已经结束的一次人工轨迹录制。
+
+    Args:
+        run_dir (Path): 当前局的原始轨迹目录。
+        termination_reason (str): 录制结束原因。
+        event_count (int): 写入 ``events.jsonl`` 的事件总数。
+    """
+
+    run_dir: Path
+    termination_reason: str
+    event_count: int

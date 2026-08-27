@@ -1,6 +1,7 @@
 """根据上游响应协议验证 STS2 Mod HTTP 客户端。"""
 
 import json
+from threading import Event
 
 import httpx
 import pytest
@@ -152,6 +153,82 @@ def test_state_returns_complete_mod_payload() -> None:
         state = client.state()
 
     assert state == state_data
+
+
+def test_iter_events_parses_multiline_sse_payload() -> None:
+    """忽略 SSE 注释，并把多行 data 解析成一个 Mod 事件。
+
+    Raises:
+        AssertionError: 客户端请求或 SSE 解析结果不符合真实协议。
+
+    Returns:
+        None: 此测试仅验证只读事件流协议。
+    """
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """返回包含心跳注释和多行 JSON 的有限事件流。
+
+        Args:
+            request (httpx.Request): 游戏客户端发出的流式请求。
+
+        Raises:
+            AssertionError: 请求方法、路径或 Accept 头不正确。
+
+        Returns:
+            httpx.Response: 可由测试完整消费的 SSE 响应。
+        """
+        assert request.method == "GET"
+        assert request.url.path == "/events/stream"
+        assert request.headers["accept"] == "text/event-stream"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b": heartbeat\n\n"
+                b"event: stream_ready\n"
+                b'data: {"event_id": 1,\n'
+                b'data: "type": "stream_ready", "data": {}}\n\n'
+            ),
+        )
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        events = list(client.iter_events(Event()))
+
+    assert events == [{"event_id": 1, "type": "stream_ready", "data": {}}]
+
+
+def test_iter_events_rejects_non_object_payload() -> None:
+    """拒绝根节点不是对象的 SSE data。
+
+    Raises:
+        AssertionError: 非对象事件没有触发 ``ProtocolError``。
+
+    Returns:
+        None: 此测试仅验证事件流的数据边界。
+    """
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        """返回根节点为数组的非法 SSE 事件。
+
+        Args:
+            _request (httpx.Request): 游戏客户端发出的流式请求。
+
+        Returns:
+            httpx.Response: 包含非法事件的 SSE 响应。
+        """
+        return httpx.Response(200, content=b"data: []\n\n")
+
+    with (
+        GameClient(
+            "http://127.0.0.1:8080",
+            transport=httpx.MockTransport(respond),
+        ) as client,
+        pytest.raises(ProtocolError, match="invalid /events/stream response"),
+    ):
+        list(client.iter_events(Event()))
 
 
 def test_available_actions_reads_typed_descriptors() -> None:

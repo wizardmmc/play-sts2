@@ -1,7 +1,9 @@
 """访问 STS2 Agent Mod 暴露的本地 HTTP API。"""
 
-from collections.abc import Mapping
+import json
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from threading import Event
 from types import TracebackType
 from typing import Any, Self
 
@@ -196,6 +198,53 @@ class GameClient:
             screen=_required_text(data, "screen", path),
             actions=tuple(_parse_action(action, path) for action in raw_actions),
         )
+
+    def iter_events(self, stop_event: Event) -> Iterator[dict[str, Any]]:
+        """持续读取 Mod 的只读 SSE 事件流。
+
+        Args:
+            stop_event (Event): 外部用于结束事件消费的线程事件。
+
+        Raises:
+            httpx.HTTPStatusError: Mod 拒绝事件流请求。
+            httpx.HTTPError: 读取事件流时连接中断。
+            ProtocolError: SSE data 不是有效的 JSON 对象。
+
+        Yields:
+            dict[str, Any]: Mod 发布的原始事件对象。
+        """
+        if stop_event.is_set():
+            return
+
+        path = "/events/stream"
+        with self._http.stream(
+            "GET",
+            path,
+            headers={"Accept": "text/event-stream"},
+            timeout=None,
+        ) as response:
+            response.raise_for_status()
+            data_lines: list[str] = []
+            for line in response.iter_lines():
+                if stop_event.is_set():
+                    return
+                if not line:
+                    if not data_lines:
+                        continue
+                    raw_data = "\n".join(data_lines)
+                    data_lines.clear()
+                    try:
+                        payload = json.loads(raw_data)
+                    except json.JSONDecodeError as exc:
+                        raise ProtocolError(f"invalid {path} response") from exc
+                    if not isinstance(payload, Mapping):
+                        raise ProtocolError(f"invalid {path} response")
+                    yield dict(payload)
+                    continue
+                if line.startswith(":") or not line.startswith("data:"):
+                    continue
+                value = line[5:]
+                data_lines.append(value.removeprefix(" "))
 
     def execute_action(self, action: str, **parameters: Any) -> dict[str, Any]:
         """执行一个 Mod 当前允许的游戏动作。
