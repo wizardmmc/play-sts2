@@ -1,7 +1,34 @@
-"""在模型的规范动作行与 Mod 请求参数之间转换。"""
+"""筛选模型可见动作，并在规范动作行与 Mod 参数之间转换。"""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
+
+from .ownership import HarnessLayer, state_layer
+
+_BATTLE_ACTIONS = {
+    "confirm_modal",
+    "confirm_selection",
+    "dismiss_modal",
+    "end_turn",
+    "play_card",
+    "select_deck_card",
+    "skip_card_selection",
+    "use_potion",
+}
+_PLAYER_TURN_ACTIONS = {"end_turn", "play_card", "use_potion"}
+_STRATEGIC_EXCLUDED_ACTIONS = {
+    "abandon_run",
+    "choose_capstone_option",
+    "collect_rewards_and_proceed",
+    "end_turn",
+    "play_card",
+    "resolve_rewards",
+    "return_to_main_menu",
+    "return_to_menu",
+    "save_and_quit",
+    "use_potion",
+}
 
 _OPTION_ACTIONS = {
     "buy_card",
@@ -66,6 +93,34 @@ class HarnessAction:
 
     name: str
     parameters: dict[str, int]
+
+
+def model_actions(state: Mapping[str, Any]) -> tuple[str, ...]:
+    """返回当前状态中应向模型公开的动作。
+
+    结果保留 Mod 给出的顺序。正常出牌阶段允许模型主动弃药；奖励选牌则
+    隐藏 Mod 内部复用的选牌动作，避免同一决策出现两套动作语义。
+
+    Args:
+        state (Mapping[str, Any]): Mod 返回的完整当前游戏状态。
+
+    Returns:
+        tuple[str, ...]: 当前决策层允许模型选择的动作名称。
+    """
+    layer = state_layer(state)
+    available = tuple(str(action) for action in state.get("available_actions") or ())
+    if layer is HarnessLayer.TRANSIENT:
+        return ()
+    if layer is HarnessLayer.BATTLE:
+        allowed = set(_BATTLE_ACTIONS)
+        if state.get("screen") == "COMBAT" and set(available) & _PLAYER_TURN_ACTIONS:
+            allowed.add("discard_potion")
+        return tuple(action for action in available if action in allowed)
+
+    excluded = set(_STRATEGIC_EXCLUDED_ACTIONS)
+    if "choose_reward_card" in available:
+        excluded.add("select_deck_card")
+    return tuple(action for action in available if action not in excluded)
 
 
 def parse_action(text: str, available_actions: Sequence[str]) -> HarnessAction:

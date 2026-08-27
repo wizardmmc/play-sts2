@@ -53,6 +53,8 @@ uv run play-sts2-transcribe data/raw/human/<run_id>
 Harness 使用严格的单行 `ACTION:` 协议，并根据完整状态区分战斗、战略与过渡
 屏幕。模型系统提示词作为独立文本资源存放在
 `src/play_sts2/harness/prompts/`，在线推理和离线 SFT 数据构建将读取同一份内容。
+可读观测目前覆盖战斗、事件、地图、奖励和选牌屏幕，并统一过滤模型不应执行的
+存档、退出及底层重复动作。
 
 ## 目录边界
 
