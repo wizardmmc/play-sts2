@@ -63,6 +63,12 @@ Harness 使用严格的单行 `ACTION:` 协议，并根据完整状态区分战�
 SFT 模型复用同一份 Python 接入代码，只在启动推理服务时选择不同模型目录。
 LoRA adapter 是训练权重，不是另一套 Provider 实现。
 
+## 单步决策闭环
+
+`src/play_sts2/runtime/DecisionEngine` 接收一个稳定游戏状态，依次构建 Harness
+观测与系统提示词、调用 `DecisionProvider`、校验 `ACTION:` 并通过 `GameClient`
+执行动作。它会返回本次完整决策产物，但不负责对话历史、重试和整局调度。
+
 ## 目录边界
 
 - `src/play_sts2/`：Python 客户端、录制、转录、推理与训练代码。
