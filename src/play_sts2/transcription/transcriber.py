@@ -14,6 +14,7 @@ from ..harness import (
     format_action,
     system_prompt,
 )
+from ..recording.audit import RawRunIntegrityError, audit_human_run
 from .models import TranscriptResult
 
 _SCREEN_NAMES = {
@@ -53,8 +54,6 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
         TranscriptResult: 输出目录和两类决策计数。
     """
     source = Path(run_dir).resolve()
-    if not (source / "meta.json").is_file():
-        raise TranscriptError(f"人类局缺少 meta.json: {source}")
     destination_root = Path(output_root).resolve()
     destination = destination_root / source.name
     if (
@@ -65,6 +64,10 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
         raise TranscriptError(
             f"Transcript 输出不能与 raw 重叠: {source} -> {destination}"
         )
+    try:
+        audit = audit_human_run(source)
+    except RawRunIntegrityError as exc:
+        raise TranscriptError(str(exc)) from exc
     destination_root.mkdir(parents=True, exist_ok=True)
     previous = destination_root / f".{source.name}-previous"
     if previous.exists() and not destination.exists():
@@ -75,7 +78,7 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
     try:
         battle_output = staging / "combat"
         battle_output.mkdir()
-        for battle_path in sorted((source / "combat").glob("*.jsonl")):
+        for battle_path in audit.battle_paths:
             rows = list(_read_jsonl(battle_path))
             if not rows:
                 continue
@@ -86,9 +89,8 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
             )
             battle_count += len(rows)
 
-        strategy_path = source / "strategy/decisions.jsonl"
-        if strategy_path.is_file():
-            rows = list(_read_jsonl(strategy_path))
+        if audit.strategy_path is not None:
+            rows = list(_read_jsonl(audit.strategy_path))
             if rows:
                 strategy_output = staging / "strategy"
                 strategy_output.mkdir()

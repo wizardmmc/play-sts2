@@ -29,7 +29,21 @@ def test_main_renders_run_to_default_transcript_directory(
     monkeypatch.chdir(tmp_path)
     run_dir = tmp_path / "data/raw/human/20260827-a0-f1-CLI-SEED"
     (run_dir / "strategy").mkdir(parents=True)
-    (run_dir / "meta.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "CLI-SEED",
+                "termination_reason": "game_over",
+                "training_eligible": True,
+                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "battle_count": 0,
+                "battle_sample_count": 0,
+                "strategic_sample_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
     state = {
         "screen": "MAP",
         "available_actions": ["choose_map_node"],

@@ -22,10 +22,7 @@ def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -
     run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
     (run_dir / "combat").mkdir(parents=True)
     (run_dir / "strategy").mkdir()
-    (run_dir / "meta.json").write_text(
-        json.dumps({"run_id": "TEST-SEED", "seed": "TEST-SEED"}),
-        encoding="utf-8",
-    )
+    _write_meta(run_dir, battle_count=1, battle_samples=2, strategic_samples=1)
     battle_rows = [
         _decision(event_id=101, screen="COMBAT", action="end_turn"),
         _decision(event_id=102, screen="COMBAT", action="end_turn"),
@@ -79,7 +76,7 @@ def test_render_run_replaces_stale_transcript_tree(tmp_path: Path) -> None:
     run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
     (run_dir / "combat").mkdir(parents=True)
     (run_dir / "strategy").mkdir()
-    (run_dir / "meta.json").write_text("{}\n", encoding="utf-8")
+    _write_meta(run_dir, battle_count=1, battle_samples=1, strategic_samples=0)
     _write_jsonl(
         run_dir / "combat/battle-f002-01.jsonl",
         [_decision(event_id=1, screen="COMBAT", action="end_turn")],
@@ -114,7 +111,7 @@ def test_render_run_restores_previous_tree_when_publish_fails(
     run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
     (run_dir / "combat").mkdir(parents=True)
     (run_dir / "strategy").mkdir()
-    (run_dir / "meta.json").write_text("{}\n", encoding="utf-8")
+    _write_meta(run_dir, battle_count=1, battle_samples=1, strategic_samples=0)
     _write_jsonl(
         run_dir / "combat/battle-f002-01.jsonl",
         [_decision(event_id=1, screen="COMBAT", action="end_turn")],
@@ -180,6 +177,42 @@ def test_render_run_rejects_output_that_overlaps_raw(tmp_path: Path) -> None:
         transcription.render_run(run_dir, run_dir.parent)
 
     assert meta_path.is_file()
+
+
+def test_render_run_rejects_truncated_published_raw(tmp_path: Path) -> None:
+    """meta 宣称的样本数与分片不一致时不发布误导性 transcript。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 截断 raw 仍被渲染成看似完整的 transcript。
+
+    Returns:
+        None: 此测试只检查 raw 完整性边界。
+    """
+    run_dir = tmp_path / "raw/human/20260827-a1-f2-TRUNCATED"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "TRUNCATED",
+                "termination_reason": "game_over",
+                "training_eligible": True,
+                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "battle_count": 0,
+                "battle_sample_count": 0,
+                "strategic_sample_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    transcription = importlib.import_module("play_sts2.transcription")
+    with pytest.raises(transcription.TranscriptError, match="strategic_sample_count"):
+        transcription.render_run(run_dir, tmp_path / "transcripts")
 
 
 def _decision(
@@ -263,5 +296,41 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     """
     path.write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_meta(
+    run_dir: Path,
+    *,
+    battle_count: int,
+    battle_samples: int,
+    strategic_samples: int,
+) -> None:
+    """写入与测试分片严格对账的当前 raw 元数据。
+
+    Args:
+        run_dir (Path): 测试局目录。
+        battle_count (int): 战斗文件数。
+        battle_samples (int): 战斗动作行数。
+        strategic_samples (int): 战略动作行数。
+
+    Returns:
+        None: 元数据写入完成后返回。
+    """
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "TEST-SEED",
+                "seed": "TEST-SEED",
+                "termination_reason": "game_over",
+                "training_eligible": True,
+                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "battle_count": battle_count,
+                "battle_sample_count": battle_samples,
+                "strategic_sample_count": strategic_samples,
+            }
+        ),
         encoding="utf-8",
     )
