@@ -1,0 +1,19 @@
+[project]
+name = "play-sts2"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "ruff>=0.16.4"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: 启动真实 STS2 实例并验证 Mod HTTP 链路",
+]
