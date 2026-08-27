@@ -8,8 +8,8 @@ from play_sts2.runtime.model_smoke import smoke_model
 
 from .local_model import prepare_model, serve_model
 
-DEFAULT_SOURCE = Path("models/merged/sft-clean-20260827-native-r16-e1-merged")
-DEFAULT_OUTPUT = Path("models/serving/sft-clean-20260827-native-r16-e1-mlx-8bit")
+DEFAULT_SOURCE = Path("models/merged/sft-clean-20260827-native-r16-e2-merged")
+DEFAULT_OUTPUT = Path("models/serving/sft-clean-20260827-native-r16-e2-mlx-8bit")
 
 
 def build_parser() -> argparse.ArgumentParser:

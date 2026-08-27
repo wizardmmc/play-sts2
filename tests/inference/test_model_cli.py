@@ -9,6 +9,25 @@ import pytest
 from play_sts2.inference import ModelReply
 
 
+def test_prepare_defaults_to_round_two_merged_model() -> None:
+    """默认转换目标跟随用户选定的 e2 合并模型且不覆盖 e1 服务件。
+
+    Raises:
+        AssertionError: prepare 默认路径仍指向第一轮或复用同一输出目录。
+
+    Returns:
+        None: 此测试只解析命令行默认值。
+    """
+    cli = importlib.import_module("play_sts2.inference.cli")
+
+    args = cli.build_parser().parse_args(["prepare"])
+
+    assert args.source == Path("models/merged/sft-clean-20260827-native-r16-e2-merged")
+    assert args.output == Path(
+        "models/serving/sft-clean-20260827-native-r16-e2-mlx-8bit"
+    )
+
+
 def test_main_prepares_requested_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

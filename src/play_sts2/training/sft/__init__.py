@@ -1,41 +1,58 @@
-"""提供 SFT、RL 与奖励计算的后训练入口。"""
+"""统一导出 SFT 数据、编码、训练与评测能力。"""
 
-from .sft import (
+from .dataset import (
     DatasetBuildError,
-    GeneratedReply,
-    GenerationScore,
-    KnowledgeProbe,
-    OptimizationResult,
-    SftConfig,
     SftDatasetResult,
+    build_sft_dataset,
+    validate_sft_dataset,
+)
+from .encoding import (
+    SftConfig,
     SftTrainingError,
     TokenizedSample,
-    attach_lora,
-    build_sft_dataset,
-    decode_generation,
     encode_messages,
+    load_sft_config,
+    load_tokenized_samples,
+)
+from .evaluation import (
+    GeneratedReply,
+    GenerationScore,
+    MaskedTokenStats,
+    chunked_masked_stats,
+    decode_generation,
     evaluate_rows,
     evaluate_sft,
     evaluate_sft_loss,
+    evaluate_tokenized_samples,
+    score_generation,
+)
+from .knowledge_evaluation import (
+    KnowledgeProbe,
     load_knowledge_probes,
-    load_sft_config,
-    load_tokenized_samples,
+    run_knowledge_evaluation,
+    score_compositional_answer,
+    score_recall_answer,
+)
+from .trainer import (
+    LORA_TARGET_MODULES,
+    ChunkedCrossEntropy,
+    OptimizationResult,
+    attach_lora,
     optimize,
     publish_adapter,
     resolve_device,
-    run_knowledge_evaluation,
-    score_compositional_answer,
-    score_generation,
-    score_recall_answer,
+    save_last_checkpoint,
     train_sft,
-    validate_sft_dataset,
 )
 
 __all__ = [
+    "LORA_TARGET_MODULES",
+    "ChunkedCrossEntropy",
     "DatasetBuildError",
     "GeneratedReply",
     "GenerationScore",
     "KnowledgeProbe",
+    "MaskedTokenStats",
     "OptimizationResult",
     "SftConfig",
     "SftDatasetResult",
@@ -43,11 +60,13 @@ __all__ = [
     "TokenizedSample",
     "attach_lora",
     "build_sft_dataset",
+    "chunked_masked_stats",
     "decode_generation",
     "encode_messages",
     "evaluate_rows",
     "evaluate_sft",
     "evaluate_sft_loss",
+    "evaluate_tokenized_samples",
     "load_knowledge_probes",
     "load_sft_config",
     "load_tokenized_samples",
@@ -55,6 +74,7 @@ __all__ = [
     "publish_adapter",
     "resolve_device",
     "run_knowledge_evaluation",
+    "save_last_checkpoint",
     "score_compositional_answer",
     "score_generation",
     "score_recall_answer",

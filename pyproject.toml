@@ -25,6 +25,11 @@ dev = ["pytest>=9.1.1", "ruff>=0.16.4"]
 inference = [
     "mlx-lm>=0.31.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
+training = [
+    "peft>=0.20.0",
+    "torch>=2.9.0",
+    "transformers>=5.2.0",
+]
 
 [tool.pytest.ini_options]
 markers = [
