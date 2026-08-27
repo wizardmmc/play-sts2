@@ -1,11 +1,10 @@
-"""提供原始轨迹到精确决策记录的转录接口。"""
+"""提供当前人类 raw 到可读 transcript 的派生接口。"""
 
-from .models import TranscribedDecision, TranscribedRun
-from .transcriber import TranscriptionError, transcribe_run
+from .models import TranscriptResult
+from .transcriber import TranscriptError, render_run
 
 __all__ = [
-    "TranscribedDecision",
-    "TranscribedRun",
-    "TranscriptionError",
-    "transcribe_run",
+    "TranscriptError",
+    "TranscriptResult",
+    "render_run",
 ]

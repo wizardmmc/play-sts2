@@ -1,184 +1,237 @@
-"""从 recorder 原始事件中提取无损的人类 UI 决策。"""
+"""把当前人类 raw 无损投影为便于审阅的文本。"""
 
 import json
-from collections.abc import Iterator, Mapping
+import shutil
+import tempfile
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .models import TranscribedDecision, TranscribedRun
+from ..harness import (
+    HarnessAction,
+    Observation,
+    build_observation,
+    format_action,
+    system_prompt,
+)
+from .models import TranscriptResult
 
-_SUCCESS_STATUSES = {"accepted", "completed", "pending"}
-
-
-class TranscriptionError(RuntimeError):
-    """表示原始轨迹无法转换为可信的精确决策。"""
-
-
-def transcribe_run(run_dir: Path, output_root: Path) -> TranscribedRun:
-    """把一局原始人类轨迹转录为按动作排序的精确决策。
-
-    Args:
-        run_dir (Path): 包含 ``meta.json`` 和 ``events.jsonl`` 的原始局目录。
-        output_root (Path): 精确决策文件的输出目录。
-
-    Raises:
-        TranscriptionError: 输入文件不可读、JSON 无效或人类动作字段不完整。
-        OSError: 无法创建输出目录或写入转录结果。
-        ValueError: 决策包含不能表示成标准 JSON 的值。
-
-    Returns:
-        TranscribedRun: 输出路径和转录到的人类决策数量。
-    """
-    run_dir = Path(run_dir)
-    metadata = _read_object(run_dir / "meta.json")
-    run_id = metadata.get("run_id")
-    if not isinstance(run_id, str) or not run_id:
-        raise TranscriptionError("meta.json 缺少有效的 run_id")
-    if metadata.get("source") != "human":
-        raise TranscriptionError("精确人类转录只接受 source=human 的轨迹")
-
-    decisions: list[TranscribedDecision] = []
-    for event in _read_jsonl(run_dir / "events.jsonl"):
-        decision = _decision_from_event(run_id, event)
-        if decision is not None:
-            decisions.append(decision)
-
-    output_path = Path(output_root) / f"{run_id}.jsonl"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        "".join(
-            json.dumps(
-                decision.to_dict(),
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-            + "\n"
-            for decision in decisions
-        ),
-        encoding="utf-8",
-    )
-    return TranscribedRun(
-        output_path=output_path,
-        decision_count=len(decisions),
-    )
+_SCREEN_NAMES = {
+    "BUNDLE_SELECTION": "卡牌包",
+    "CARD_SELECTION": "选牌",
+    "CARDS_VIEW": "卡牌浏览",
+    "CHEST": "宝箱",
+    "COMBAT": "战斗",
+    "CRYSTAL_SPHERE": "水晶球",
+    "EVENT": "事件",
+    "MAP": "地图",
+    "MODAL": "弹窗",
+    "REST": "休息处",
+    "REWARD": "奖励",
+    "SHOP": "商店",
+    "TIMELINE": "时间线",
+    "UNKNOWN": "房间结算",
+}
 
 
-def _decision_from_event(
-    run_id: str,
-    event: Mapping[str, Any],
-) -> TranscribedDecision | None:
-    """从一条 recorder 事件中提取人类 UI 决策。
+class TranscriptError(RuntimeError):
+    """表示当前 raw 不能可靠生成 transcript。"""
+
+
+def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
+    """重新生成一局完整的人类可读 transcript 目录。
 
     Args:
-        run_id (str): 当前原始轨迹的局 ID。
-        event (Mapping[str, Any]): recorder 保存的一条事件。
+        run_dir (Path): 含 ``meta.json``、``combat`` 和 ``strategy`` 的 raw 局。
+        output_root (Path): Transcript 根目录，例如 ``data/transcripts``。
 
     Raises:
-        TranscriptionError: 匹配到的人类动作缺少精确转录所需字段。
+        TranscriptError: Raw 目录、JSONL 或动作字段不符合当前契约。
+        OSError: 无法读取 raw 或原子发布 transcript。
 
     Returns:
-        TranscribedDecision | None: 精确人类决策；无关事件返回 ``None``。
+        TranscriptResult: 输出目录和两类决策计数。
     """
-    if event.get("type") != "mod_event":
-        return None
-    payload = event.get("payload")
-    if not isinstance(payload, Mapping) or payload.get("type") != "action_executed":
-        return None
-    data = payload.get("data")
-    if not isinstance(data, Mapping):
-        return None
-    request = data.get("request")
-    if not isinstance(request, Mapping):
-        return None
-    context = request.get("client_context")
-    if not isinstance(context, Mapping) or context.get("source") != "human_ui":
-        return None
-    if data.get("status") not in _SUCCESS_STATUSES:
-        return None
-
-    source_sequence = event.get("sequence")
-    event_id = payload.get("event_id")
-    observed_at = event.get("observed_at")
-    before_state = data.get("before_state")
-    action = request.get("action")
+    source = Path(run_dir).resolve()
+    if not (source / "meta.json").is_file():
+        raise TranscriptError(f"人类局缺少 meta.json: {source}")
+    destination_root = Path(output_root).resolve()
+    destination = destination_root / source.name
     if (
-        isinstance(source_sequence, bool)
-        or not isinstance(source_sequence, int)
-        or isinstance(event_id, bool)
-        or not isinstance(event_id, int)
-        or not isinstance(observed_at, str)
-        or not isinstance(before_state, Mapping)
-        or not isinstance(action, str)
-        or not action
+        source == destination
+        or source in destination.parents
+        or destination in source.parents
     ):
-        raise TranscriptionError("action_executed 缺少精确决策字段")
+        raise TranscriptError(
+            f"Transcript 输出不能与 raw 重叠: {source} -> {destination}"
+        )
+    destination_root.mkdir(parents=True, exist_ok=True)
+    previous = destination_root / f".{source.name}-previous"
+    if previous.exists() and not destination.exists():
+        previous.rename(destination)
+    staging = Path(tempfile.mkdtemp(prefix=f".{source.name}-", dir=destination_root))
+    battle_count = 0
+    strategic_count = 0
+    try:
+        battle_output = staging / "combat"
+        battle_output.mkdir()
+        for battle_path in sorted((source / "combat").glob("*.jsonl")):
+            rows = list(_read_jsonl(battle_path))
+            if not rows:
+                continue
+            text = _render_file(rows, title=_battle_title(rows))
+            (battle_output / f"{battle_path.stem}.txt").write_text(
+                text,
+                encoding="utf-8",
+            )
+            battle_count += len(rows)
 
-    recorded_layer = context.get("layer")
-    if not isinstance(recorded_layer, str):
-        recorded_layer = None
-    parameters = {
-        key: value
-        for key, value in request.items()
-        if key not in {"action", "client_context"} and value is not None
-    }
-    return TranscribedDecision(
-        run_id=run_id,
-        source_sequence=source_sequence,
-        event_id=event_id,
-        observed_at=observed_at,
-        recorded_layer=recorded_layer,
-        before_state=dict(before_state),
-        action=action,
-        parameters=parameters,
-    )
+        strategy_path = source / "strategy/decisions.jsonl"
+        if strategy_path.is_file():
+            rows = list(_read_jsonl(strategy_path))
+            if rows:
+                strategy_output = staging / "strategy"
+                strategy_output.mkdir()
+                (strategy_output / "decisions.txt").write_text(
+                    _render_file(rows, title="# 战略决策"),
+                    encoding="utf-8",
+                )
+                strategic_count = len(rows)
+
+        if previous.exists():
+            shutil.rmtree(previous)
+        if destination.exists():
+            destination.rename(previous)
+        staging.rename(destination)
+        if previous.exists():
+            shutil.rmtree(previous)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        if previous.exists() and not destination.exists():
+            previous.rename(destination)
+        raise
+    return TranscriptResult(destination, battle_count, strategic_count)
 
 
-def _read_object(path: Path) -> dict[str, Any]:
-    """读取一个必须为 JSON 对象的文件。
+def _render_file(rows: list[dict[str, Any]], *, title: str) -> str:
+    """把同层动作渲染成只重复一次规则的可读文件。
 
     Args:
-        path (Path): 待读取的 JSON 文件。
+        rows (list[dict[str, Any]]): 按时间排序的 raw 动作。
+        title (str): 文件首行的人类可读标题。
 
     Raises:
-        TranscriptionError: 文件不可读、JSON 无效或顶层不是对象。
+        TranscriptError: 动作无法由当前 Harness 重建。
 
     Returns:
-        dict[str, Any]: 解码后的普通字典。
+        str: 以换行结尾的 transcript 文本。
     """
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise TranscriptionError(f"无法读取转录输入: {path}") from exc
-    if not isinstance(value, Mapping):
-        raise TranscriptionError(f"转录输入不是 JSON 对象: {path}")
-    return dict(value)
+    rendered = [_render_decision(row) for row in rows]
+    layers = {item[0].layer for item in rendered}
+    if len(layers) != 1:
+        raise TranscriptError("同一 transcript 文件包含多个 Harness 层")
+    prompt = system_prompt(rendered[0][0].layer)
+    sections = [title, f"## 规则\n\n{prompt}"]
+    for index, (observation, action_line) in enumerate(rendered, start=1):
+        heading = f"## 决策 {index}"
+        if observation.layer.value == "strategic":
+            heading += _decision_context(rows[index - 1])
+        sections.append(
+            f"{heading}\n\n### 状态\n\n{observation.text}\n\n### 动作\n\n{action_line}"
+        )
+    return "\n\n".join(sections) + "\n"
 
 
-def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    """逐行读取只包含 JSON 对象的事件文件。
+def _render_decision(row: Mapping[str, Any]) -> tuple[Observation, str]:
+    """用当前 Harness 重建一条动作的观测与规范动作行。
 
     Args:
-        path (Path): 待读取的 JSONL 文件。
+        row (Mapping[str, Any]): 当前 raw schema 的动作行。
 
     Raises:
-        TranscriptionError: 文件不可读、某行 JSON 无效或某行不是对象。
+        TranscriptError: 状态、动作或参数缺失或不合法。
+
+    Returns:
+        tuple[Observation, str]: Harness 观测与规范 ``ACTION:`` 文本。
+    """
+    state = row.get("before_state")
+    action = row.get("action")
+    parameters = row.get("parameters")
+    if (
+        not isinstance(state, Mapping)
+        or not isinstance(action, str)
+        or not isinstance(parameters, Mapping)
+    ):
+        raise TranscriptError("Raw 动作缺少 before_state/action/parameters")
+    try:
+        observation = build_observation(state)
+        if action not in observation.available_actions:
+            raise ValueError(f"动作未向 Harness 开放: {action}")
+        action_line = format_action(HarnessAction(action, dict(parameters)))
+    except ValueError as exc:
+        raise TranscriptError(f"Raw 动作无法重建: {exc}") from exc
+    return observation, action_line
+
+
+def _battle_title(rows: list[dict[str, Any]]) -> str:
+    """从首个战斗状态生成文件标题。
+
+    Args:
+        rows (list[dict[str, Any]]): 当前战斗的 raw 动作。
+
+    Returns:
+        str: 含楼层的战斗标题。
+    """
+    state = rows[0].get("before_state")
+    run = state.get("run") if isinstance(state, Mapping) else None
+    floor = run.get("floor") if isinstance(run, Mapping) else None
+    return f"# 第 {floor} 层 · 战斗" if isinstance(floor, int) else "# 战斗"
+
+
+def _decision_context(row: Mapping[str, Any]) -> str:
+    """为战略决策生成楼层和页面后缀。
+
+    Args:
+        row (Mapping[str, Any]): 当前战略 raw 动作。
+
+    Returns:
+        str: 可直接追加到决策标题的上下文。
+    """
+    state = row.get("before_state")
+    if not isinstance(state, Mapping):
+        return ""
+    run = state.get("run")
+    floor = run.get("floor") if isinstance(run, Mapping) else None
+    screen = state.get("screen")
+    screen_name = _SCREEN_NAMES.get(str(screen), str(screen))
+    details = [f"第 {floor} 层" if isinstance(floor, int) else "", screen_name]
+    suffix = " · ".join(item for item in details if item)
+    return f" · {suffix}" if suffix else ""
+
+
+def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    """逐行读取并校验 JSON object。
+
+    Args:
+        path (Path): Raw JSONL 路径。
+
+    Raises:
+        TranscriptError: 某行不是合法 JSON object。
+        OSError: 文件无法读取。
 
     Yields:
-        dict[str, Any]: 按文件顺序读取的事件字典。
+        dict[str, Any]: 保持文件顺序的动作对象。
     """
-    try:
-        with path.open(encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise TranscriptionError(
-                        f"无效 JSONL: {path}:{line_number}"
-                    ) from exc
-                if not isinstance(value, Mapping):
-                    raise TranscriptionError(f"JSONL 行不是对象: {path}:{line_number}")
-                yield dict(value)
-    except OSError as exc:
-        raise TranscriptionError(f"无法读取转录输入: {path}") from exc
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise TranscriptError(f"无效 JSON: {path}:{line_number}") from exc
+        if not isinstance(value, dict):
+            raise TranscriptError(f"JSONL 行必须是 object: {path}:{line_number}")
+        yield value

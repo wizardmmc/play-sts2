@@ -1,6 +1,5 @@
-"""以只读方式录制一局人类游玩产生的状态和 Mod 事件。"""
+"""以只读方式从 Mod SSE 流录制一局精确人类决策。"""
 
-import copy
 import queue
 import threading
 import time
@@ -10,25 +9,23 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .models import RecordedRun, RunMetadata
-from .writer import TrajectoryWriter
+from .writer import HumanRunWriter
 
 _STREAM_START_TIMEOUT_SECONDS = 5.0
+_SUCCESS_STATUSES = {"accepted", "completed", "pending"}
+_PARTIAL_RUN_REASON = "partial_run: recording_started_after_run_start"
 
 
 class RecordingError(RuntimeError):
     """表示事件流无法提供完整的原始动作记录。"""
 
 
+class _RecordingStreamError(RecordingError):
+    """表示已连接的 SSE 流在一局中途结束。"""
+
+
 class _RecordingClient(Protocol):
-    """描述录制器需要的两个只读 Mod 接口。"""
-
-    def state(self) -> dict[str, Any]:
-        """读取当前完整状态。
-
-        Returns:
-            dict[str, Any]: Mod 的 ``GET /state`` 数据对象。
-        """
-        ...
+    """描述录制器唯一需要的只读 Mod 事件接口。"""
 
     def iter_events(self, stop_event: threading.Event) -> Iterator[dict[str, Any]]:
         """持续读取原始 Mod 事件。
@@ -46,10 +43,10 @@ class HumanRunRecorder:
     """等待一局开始，并把人类操作涉及的原始事实写入磁盘。
 
     Args:
-        client (_RecordingClient): 只提供状态和事件流的 Mod 客户端。
+        client (_RecordingClient): 只提供事件流的 Mod 客户端。
         output_root (Path): 原始轨迹根目录，通常为 ``data/raw``。
         stop_event (threading.Event | None): 外部中止录制的线程事件。
-        poll_interval (float): 两次状态读取之间的秒数。
+        check_interval (float): 检查停止信号与事件线程异常的间隔秒数。
     """
 
     def __init__(
@@ -58,7 +55,7 @@ class HumanRunRecorder:
         output_root: Path,
         *,
         stop_event: threading.Event | None = None,
-        poll_interval: float = 0.1,
+        check_interval: float = 0.1,
     ) -> None:
         """保存录制所需依赖，不主动读取或改变游戏。
 
@@ -66,22 +63,22 @@ class HumanRunRecorder:
             client (_RecordingClient): 只读 Mod 客户端。
             output_root (Path): 原始轨迹根目录。
             stop_event (threading.Event | None): 可选的外部停止信号。
-            poll_interval (float): 状态轮询间隔秒数。
+            check_interval (float): 停止信号与线程异常检查间隔秒数。
         """
         self._client = client
         self._output_root = Path(output_root)
         self._stop_event = stop_event or threading.Event()
-        self._poll_interval = poll_interval
+        self._check_interval = check_interval
 
     def record(self) -> RecordedRun | None:
         """录制从当前时刻开始遇到的第一局游戏。
 
-        录制器只调用状态与事件流端点。角色选择和出发等开局事件可以保留在
-        原始流中，但是否作为训练决策由后续转录器决定。
+        录制器只消费事件流；Mod 已经为事件检测构造完整状态，因此这里不会
+        额外轮询 ``/state``。角色选择和出发等环境动作不进入局内策略样本。
 
         Raises:
             RecordingError: 事件流未就绪或在录制期间中断。
-            httpx.HTTPError: 状态端点连接失败。
+            httpx.HTTPError: SSE 端点连接失败。
             ProtocolError: Mod 返回了不符合客户端协议的数据。
             OSError: 无法创建或写入轨迹目录。
 
@@ -101,49 +98,66 @@ class HumanRunRecorder:
             listener_stop,
             stream_ready,
         )
-        writer: TrajectoryWriter | None = None
-        previous_state: dict[str, Any] | None = None
+        writer: HumanRunWriter | None = None
+        active_run_id: str | None = None
         event_count = 0
         termination_reason: str | None = None
 
         try:
             self._wait_for_stream(stream_ready, error_queue, listener_stop)
             while not self._stop_event.is_set():
-                self._raise_stream_error(error_queue)
-                state = self._client.state()
+                try:
+                    observed_at, envelope = event_queue.get(
+                        timeout=max(self._check_interval, 0.01)
+                    )
+                except queue.Empty:
+                    self._raise_stream_error(error_queue)
+                    continue
                 if writer is None:
-                    metadata = self._metadata_from(state)
-                    if metadata is None:
-                        time.sleep(self._poll_interval)
-                        continue
-                    writer = TrajectoryWriter(self._output_root, metadata)
-                    event_count += self._drain_events(writer, event_queue)
-
-                if state != previous_state:
-                    writer.append("state", state, observed_at=_utc_now())
+                    metadata = self._metadata_from_event(envelope)
+                    if metadata is not None:
+                        writer = HumanRunWriter(self._output_root, metadata)
+                        active_run_id = metadata.run_id
+                        if envelope.get("type") == "stream_ready":
+                            writer.record_integrity_failure(_PARTIAL_RUN_REASON)
+                if writer is None:
+                    continue
+                assert active_run_id is not None
+                if envelope.get("type") == "combat_ended":
+                    writer.end_battle()
+                integrity_failure = self._integrity_failure_from_event(envelope)
+                if integrity_failure is not None:
+                    writer.record_integrity_failure(integrity_failure)
+                decision = self._decision_from_event(
+                    active_run_id,
+                    observed_at,
+                    envelope,
+                )
+                if decision is not None:
+                    writer.append_decision(decision)
                     event_count += 1
-                    previous_state = copy.deepcopy(state)
-                event_count += self._drain_events(writer, event_queue)
-
-                termination_reason = self._termination_reason(state)
+                termination_reason = self._termination_from_event(
+                    envelope,
+                    active_run_id,
+                )
                 if termination_reason is not None:
-                    time.sleep(self._poll_interval)
-                    event_count += self._drain_events(writer, event_queue)
                     break
-                time.sleep(self._poll_interval)
+        except _RecordingStreamError:
+            if writer is None:
+                raise
+            termination_reason = "stream_interrupted"
+        except KeyboardInterrupt:
+            if writer is None:
+                raise
+            termination_reason = "interrupted"
         finally:
             listener_stop.set()
-            listener.join(timeout=max(self._poll_interval, 0.01))
+            listener.join(timeout=max(self._check_interval, 0.01))
 
         if writer is None:
             return None
         termination_reason = termination_reason or "interrupted"
-        writer.append(
-            "recording_ended",
-            {"reason": termination_reason},
-            observed_at=_utc_now(),
-        )
-        event_count += 1
+        writer.finalize(termination_reason, completed_at=_utc_now())
         return RecordedRun(
             run_dir=writer.run_dir,
             termination_reason=termination_reason,
@@ -157,7 +171,7 @@ class HumanRunRecorder:
         listener_stop: threading.Event,
         stream_ready: threading.Event,
     ) -> threading.Thread:
-        """在独立线程中持续接收 SSE，避免阻塞状态轮询。
+        """在独立线程中持续接收 SSE，允许主线程处理停止信号。
 
         Args:
             destination (queue.Queue[tuple[str, dict[str, Any]]]): 事件目标队列。
@@ -176,11 +190,11 @@ class HumanRunRecorder:
                     destination.put((_utc_now(), envelope))
                     stream_ready.set()
                 if not listener_stop.is_set():
-                    errors.put(RecordingError("Mod 事件流意外结束"))
+                    errors.put(_RecordingStreamError("Mod 事件流意外结束"))
             # 异常必须跨线程交还给调用者，不能让守护线程静默死亡。
             except Exception as exc:  # noqa: BLE001
                 if not listener_stop.is_set():
-                    errors.put(RecordingError(f"Mod 事件流中断: {exc}"))
+                    errors.put(_RecordingStreamError(f"Mod 事件流中断: {exc}"))
 
         listener = threading.Thread(
             target=listen,
@@ -196,7 +210,7 @@ class HumanRunRecorder:
         errors: queue.Queue[Exception],
         listener_stop: threading.Event,
     ) -> None:
-        """在读取状态前确认精确动作事件流已经连接。
+        """在创建任何局目录前确认精确动作事件流已经连接。
 
         Args:
             stream_ready (threading.Event): 首个 SSE 事件就绪信号。
@@ -238,74 +252,147 @@ class HumanRunRecorder:
         raise error
 
     @staticmethod
-    def _drain_events(
-        writer: TrajectoryWriter,
-        source: queue.Queue[tuple[str, dict[str, Any]]],
-    ) -> int:
-        """把当前已到达的原始 Mod 事件写入同一局轨迹。
+    def _metadata_from_event(envelope: Mapping[str, Any]) -> RunMetadata | None:
+        """从 ``run_started`` 或运行态 ``stream_ready`` 构造局身份。
 
         Args:
-            writer (TrajectoryWriter): 当前局的事件 writer。
-            source (queue.Queue[tuple[str, dict[str, Any]]]): 待写入事件队列。
-
-        Returns:
-            int: 本次追加的 Mod 事件数量。
-        """
-        count = 0
-        while True:
-            try:
-                observed_at, envelope = source.get_nowait()
-            except queue.Empty:
-                return count
-            writer.append("mod_event", envelope, observed_at=observed_at)
-            count += 1
-
-    @staticmethod
-    def _metadata_from(state: Mapping[str, Any]) -> RunMetadata | None:
-        """从第一个运行态状态构造轨迹身份。
-
-        Args:
-            state (Mapping[str, Any]): Mod 的完整当前状态。
+            envelope (Mapping[str, Any]): Mod 的原始 SSE 事件对象。
 
         Returns:
             RunMetadata | None: 已进入一局时的元数据，否则为 ``None``。
         """
-        session = state.get("session")
-        run_id = state.get("run_id")
+        event_type = envelope.get("type")
+        data = envelope.get("data")
         if (
-            not isinstance(session, Mapping)
-            or session.get("phase") != "run"
-            or isinstance(run_id, bool)
-            or not isinstance(run_id, (str, int))
-            or not str(run_id).strip()
+            event_type not in {"run_started", "stream_ready"}
+            or not isinstance(data, Mapping)
+            or (event_type == "stream_ready" and data.get("session_phase") != "run")
         ):
             return None
-
-        run = state.get("run")
-        character_id = run.get("character_id") if isinstance(run, Mapping) else None
+        run_id = data.get("run_id")
+        if (
+            isinstance(run_id, bool)
+            or not isinstance(run_id, (str, int))
+            or not str(run_id).strip()
+            or str(run_id) == "run_unknown"
+        ):
+            return None
+        character_id = data.get("character_id")
+        ascension = data.get("ascension")
         return RunMetadata(
             run_id=str(run_id),
             source="human",
             started_at=_utc_now(),
             character_id=character_id if isinstance(character_id, str) else None,
             seed=str(run_id),
+            ascension=(
+                ascension
+                if isinstance(ascension, int) and not isinstance(ascension, bool)
+                else None
+            ),
         )
 
     @staticmethod
-    def _termination_reason(state: Mapping[str, Any]) -> str | None:
-        """判断当前状态是否已经离开可继续录制的一局。
+    def _termination_from_event(
+        envelope: Mapping[str, Any],
+        run_id: str,
+    ) -> str | None:
+        """读取 Mod 明确发布的一局终止原因。
 
         Args:
-            state (Mapping[str, Any]): Mod 的完整当前状态。
+            envelope (Mapping[str, Any]): Mod 的原始 SSE 事件对象。
+            run_id (str): 当前正在录制的局 ID。
 
         Returns:
             str | None: 终局或返回菜单的原因；仍在局中时为 ``None``。
         """
-        if state.get("screen") == "GAME_OVER" or bool(state.get("game_over")):
-            return "game_over"
-        if state.get("screen") == "MAIN_MENU":
-            return "returned_to_menu"
-        return None
+        data = envelope.get("data")
+        if envelope.get("type") != "run_ended" or not isinstance(data, Mapping):
+            return None
+        if str(data.get("run_id")) != run_id:
+            return None
+        reason = data.get("reason")
+        return reason if isinstance(reason, str) and reason else "game_over"
+
+    @staticmethod
+    def _integrity_failure_from_event(envelope: Mapping[str, Any]) -> str | None:
+        """把 Mod 报告的原生 UI 采集缺口转成稳定审计原因。
+
+        Args:
+            envelope (Mapping[str, Any]): Mod 的原始 SSE 事件对象。
+
+        Returns:
+            str | None: 可写入局元数据的原因；其他事件返回 ``None``。
+        """
+        data = envelope.get("data")
+        if envelope.get("type") != "native_ui_capture_gap" or not isinstance(
+            data, Mapping
+        ):
+            return None
+        action = data.get("action")
+        reason = data.get("reason")
+        action_text = (
+            action.strip() if isinstance(action, str) and action.strip() else "?"
+        )
+        reason_text = (
+            reason.strip() if isinstance(reason, str) and reason.strip() else "?"
+        )
+        return f"native_ui_capture_gap: {action_text}: {reason_text}"
+
+    @staticmethod
+    def _decision_from_event(
+        run_id: str,
+        observed_at: str,
+        envelope: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """从一条成功的人类 UI 动作事件提取精确决策。
+
+        Args:
+            run_id (str): 当前正在录制的局 ID。
+            observed_at (str): Python 收到事件时的 UTC 时间。
+            envelope (Mapping[str, Any]): Mod 的原始 SSE 事件对象。
+
+        Returns:
+            dict[str, Any] | None: 可写入人类数据集的决策；无关事件返回
+                ``None``。
+        """
+        if envelope.get("type") != "action_executed":
+            return None
+        data = envelope.get("data")
+        if not isinstance(data, Mapping) or data.get("status") not in _SUCCESS_STATUSES:
+            return None
+        request = data.get("request")
+        if not isinstance(request, Mapping):
+            return None
+        context = request.get("client_context")
+        if not isinstance(context, Mapping) or context.get("source") != "human_ui":
+            return None
+        event_id = envelope.get("event_id")
+        state = data.get("before_state")
+        action = request.get("action")
+        if (
+            isinstance(event_id, bool)
+            or not isinstance(event_id, int)
+            or not isinstance(state, Mapping)
+            or not isinstance(action, str)
+            or not action
+        ):
+            raise RecordingError("action_executed 缺少精确人类决策字段")
+        layer = context.get("layer")
+        return {
+            "run_id": run_id,
+            "source_sequence": event_id,
+            "event_id": event_id,
+            "observed_at": observed_at,
+            "recorded_layer": layer if isinstance(layer, str) else None,
+            "before_state": dict(state),
+            "action": action,
+            "parameters": {
+                key: value
+                for key, value in request.items()
+                if key not in {"action", "client_context"} and value is not None
+            },
+        }
 
 
 def _utc_now() -> str:

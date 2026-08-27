@@ -9,7 +9,8 @@ __pycache__/
 htmlcov/
 /dist/
 
-/data/
+/data/*
+!/data/README.md
 /models/
 /runs/
 

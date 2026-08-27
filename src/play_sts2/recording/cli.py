@@ -10,7 +10,7 @@ from .recorder import HumanRunRecorder
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _DEFAULT_OUTPUT_ROOT = Path("data/raw")
-_DEFAULT_POLL_INTERVAL = 0.1
+_DEFAULT_CHECK_INTERVAL = 0.1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -28,7 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = HumanRunRecorder(
             client,
             args.output_root,
-            poll_interval=args.poll_interval,
+            check_interval=args.check_interval,
         ).record()
 
     if result is not None:
@@ -57,9 +57,11 @@ def _parser() -> argparse.ArgumentParser:
         help=f"原始数据根目录，默认为 {_DEFAULT_OUTPUT_ROOT}",
     )
     parser.add_argument(
+        "--check-interval",
         "--poll-interval",
+        dest="check_interval",
         type=float,
-        default=_DEFAULT_POLL_INTERVAL,
-        help=f"状态轮询间隔秒数，默认为 {_DEFAULT_POLL_INTERVAL}",
+        default=_DEFAULT_CHECK_INTERVAL,
+        help=f"事件队列检查间隔秒数，默认为 {_DEFAULT_CHECK_INTERVAL}",
     )
     return parser

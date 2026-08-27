@@ -1,186 +1,267 @@
-"""验证原始人类轨迹到精确决策记录的转换。"""
+"""验证原始人类动作到可读 transcript 的可重复投影。"""
 
 import importlib
 import json
 from pathlib import Path
-from typing import Any
+
+import pytest
 
 
-def test_transcribe_run_writes_exact_human_ui_decisions(tmp_path: Path) -> None:
-    """只转录成功执行的人类 UI 动作，并保留动作前状态。
+def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -> None:
+    """每个战斗只写一个可读文件，并隐藏机器内部定位字段。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离数据目录。
 
     Raises:
-        AssertionError: 转录数量、顺序或规范化字段不符合约定。
+        AssertionError: Transcript 目录、内容或计数不符合契约。
 
     Returns:
-        None: 此测试只验证转录器的可观察输出。
+        None: 此测试只检查可观察的派生文件。
     """
-    transcription = importlib.import_module("play_sts2.transcription")
-    run_dir = tmp_path / "raw/human/RUN-001"
-    before_play = {
-        "run_id": "RUN-001",
-        "screen": "COMBAT",
-        "available_actions": ["play_card", "end_turn"],
-    }
-    before_end_turn = {
-        **before_play,
-        "state_version": 2,
-    }
-    _write_run(
-        run_dir,
+    run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    (run_dir / "meta.json").write_text(
+        json.dumps({"run_id": "TEST-SEED", "seed": "TEST-SEED"}),
+        encoding="utf-8",
+    )
+    battle_rows = [
+        _decision(event_id=101, screen="COMBAT", action="end_turn"),
+        _decision(event_id=102, screen="COMBAT", action="end_turn"),
+    ]
+    _write_jsonl(run_dir / "combat/battle-f002-01.jsonl", battle_rows)
+    _write_jsonl(
+        run_dir / "strategy/decisions.jsonl",
         [
-            {
-                "sequence": 1,
-                "observed_at": "2026-08-27T02:00:00.000Z",
-                "type": "state",
-                "payload": before_play,
-            },
-            _action_event(
-                sequence=2,
-                event_id=7,
-                observed_at="2026-08-27T02:00:01.000Z",
-                source="human_ui",
-                action="play_card",
-                before_state=before_play,
-                card_index=0,
-                target_index=1,
-            ),
-            _action_event(
-                sequence=3,
-                event_id=8,
-                observed_at="2026-08-27T02:00:02.000Z",
-                source="harness",
-                action="proceed",
-                before_state=before_play,
-            ),
-            _action_event(
-                sequence=4,
-                event_id=9,
-                observed_at="2026-08-27T02:00:03.000Z",
-                source="human_ui",
-                action="end_turn",
-                before_state=before_end_turn,
-                status="completed",
-            ),
+            _decision(
+                event_id=103,
+                screen="MAP",
+                action="choose_map_node",
+                option_index=0,
+            )
         ],
     )
 
-    result = transcription.transcribe_run(run_dir, tmp_path / "transcripts")
+    transcription = importlib.import_module("play_sts2.transcription")
+    result = transcription.render_run(run_dir, tmp_path / "transcripts")
 
-    assert result.output_path == tmp_path / "transcripts/RUN-001.jsonl"
-    assert result.decision_count == 2
-    decisions = [
-        json.loads(line)
-        for line in result.output_path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert decisions == [
-        {
-            "run_id": "RUN-001",
-            "source_sequence": 2,
-            "event_id": 7,
-            "observed_at": "2026-08-27T02:00:01.000Z",
-            "recorded_layer": "battle",
-            "before_state": before_play,
-            "action": "play_card",
-            "parameters": {"card_index": 0, "target_index": 1},
-        },
-        {
-            "run_id": "RUN-001",
-            "source_sequence": 4,
-            "event_id": 9,
-            "observed_at": "2026-08-27T02:00:03.000Z",
-            "recorded_layer": "battle",
-            "before_state": before_end_turn,
-            "action": "end_turn",
-            "parameters": {},
-        },
-    ]
+    assert result.output_dir == (tmp_path / "transcripts/20260827-a1-f2-TEST-SEED")
+    assert result.battle_decision_count == 2
+    assert result.strategic_decision_count == 1
+    battle_text = (result.output_dir / "combat/battle-f002-01.txt").read_text(
+        encoding="utf-8"
+    )
+    strategy_text = (result.output_dir / "strategy/decisions.txt").read_text(
+        encoding="utf-8"
+    )
+    assert battle_text.count("## 规则") == 1
+    assert battle_text.count("## 决策") == 2
+    assert "ACTION: end_turn" in battle_text
+    assert "human_play/" not in battle_text
+    assert "event 101" not in battle_text
+    assert "sample_id" not in strategy_text
+    assert "ACTION: choose_map_node 0" in strategy_text
 
 
-def _write_run(run_dir: Path, events: list[dict[str, Any]]) -> None:
-    """写入一份不含个人数据的最小原始轨迹。
+def test_render_run_replaces_stale_transcript_tree(tmp_path: Path) -> None:
+    """重复渲染时原子替换旧派生目录，不留下已删除战斗。
 
     Args:
-        run_dir (Path): 测试轨迹目录。
-        events (list[dict[str, Any]]): 要写入 JSONL 的原始事件。
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 重新生成后仍保留旧 transcript 文件。
 
     Returns:
-        None: 元数据和事件写入完成后返回。
+        None: 此测试只检查派生视图的覆盖语义。
     """
-    run_dir.mkdir(parents=True)
-    (run_dir / "meta.json").write_text(
-        json.dumps(
-            {
-                "run_id": "RUN-001",
-                "source": "human",
-                "started_at": "2026-08-27T02:00:00.000Z",
-                "character_id": "DEFECT",
-                "seed": "RUN-001",
-            }
-        ),
-        encoding="utf-8",
+    run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    (run_dir / "meta.json").write_text("{}\n", encoding="utf-8")
+    _write_jsonl(
+        run_dir / "combat/battle-f002-01.jsonl",
+        [_decision(event_id=1, screen="COMBAT", action="end_turn")],
     )
-    (run_dir / "events.jsonl").write_text(
-        "".join(json.dumps(event) + "\n" for event in events),
-        encoding="utf-8",
-    )
+    output_root = tmp_path / "transcripts"
+    transcription = importlib.import_module("play_sts2.transcription")
+    transcription.render_run(run_dir, output_root)
+    stale = output_root / run_dir.name / "combat/stale.txt"
+    stale.write_text("旧文件", encoding="utf-8")
+
+    transcription.render_run(run_dir, output_root)
+
+    assert not stale.exists()
 
 
-def _action_event(
+def test_render_run_restores_previous_tree_when_publish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上次发布中断后，新发布再次失败时仍保留最近完整 transcript。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+        monkeypatch (pytest.MonkeyPatch): 用于模拟暂存目录发布失败。
+
+    Raises:
+        AssertionError: 两次发布中断导致最近完整 transcript 丢失。
+
+    Returns:
+        None: 此测试只检查跨进程恢复边界。
+    """
+    run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    (run_dir / "meta.json").write_text("{}\n", encoding="utf-8")
+    _write_jsonl(
+        run_dir / "combat/battle-f002-01.jsonl",
+        [_decision(event_id=1, screen="COMBAT", action="end_turn")],
+    )
+    output_root = tmp_path / "transcripts"
+    transcription = importlib.import_module("play_sts2.transcription")
+    result = transcription.render_run(run_dir, output_root)
+    previous = output_root / f".{run_dir.name}-previous"
+    result.output_dir.rename(previous)
+    original_rename = Path.rename
+
+    def fail_staging_publish(path: Path, target: Path) -> Path:
+        """只拒绝新暂存树到最终目录的发布。
+
+        Args:
+            path (Path): 正在重命名的源路径。
+            target (Path): 目标路径。
+
+        Raises:
+            OSError: 源是本次暂存目录时固定失败。
+
+        Returns:
+            Path: 其他重命名委托给 pathlib。
+        """
+        if (
+            path.parent == output_root
+            and path.name.startswith(f".{run_dir.name}-")
+            and path != previous
+            and Path(target) == result.output_dir
+        ):
+            raise OSError("simulated publish failure")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_staging_publish)
+
+    with pytest.raises(OSError, match="simulated publish failure"):
+        transcription.render_run(run_dir, output_root)
+
+    assert result.output_dir.is_dir()
+    assert (result.output_dir / "combat/battle-f002-01.txt").is_file()
+
+
+def test_render_run_rejects_output_that_overlaps_raw(tmp_path: Path) -> None:
+    """拒绝把 transcript 发布到会覆盖 raw 事实源的位置。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 危险输出路径未被拒绝或 raw 被改写。
+
+    Returns:
+        None: 此测试只检查数据保护边界。
+    """
+    run_dir = tmp_path / "raw/human/20260827-a1-f2-TEST-SEED"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    meta_path = run_dir / "meta.json"
+    meta_path.write_text("{}\n", encoding="utf-8")
+    transcription = importlib.import_module("play_sts2.transcription")
+
+    with pytest.raises(transcription.TranscriptError, match="不能与 raw 重叠"):
+        transcription.render_run(run_dir, run_dir.parent)
+
+    assert meta_path.is_file()
+
+
+def _decision(
     *,
-    sequence: int,
     event_id: int,
-    observed_at: str,
-    source: str,
+    screen: str,
     action: str,
-    before_state: dict[str, Any],
-    status: str = "accepted",
-    card_index: int | None = None,
-    target_index: int | None = None,
-) -> dict[str, Any]:
-    """构造与真实 Mod ``action_executed`` 同形状的测试事件。
+    option_index: int | None = None,
+) -> dict[str, object]:
+    """构造一条能由当前 Harness 渲染的原始动作。
 
     Args:
-        sequence (int): recorder 分配的原始事件序号。
-        event_id (int): Mod 分配的 SSE 事件序号。
-        observed_at (str): recorder 观察事件的时间。
-        source (str): 动作客户端来源。
+        event_id (int): Mod 事件编号。
+        screen (str): 动作前屏幕。
         action (str): 已执行动作名称。
-        before_state (dict[str, Any]): 动作执行前的完整游戏状态。
-        status (str): Mod 报告的动作状态。
-        card_index (int | None): 可选的卡牌索引。
-        target_index (int | None): 可选的目标索引。
+        option_index (int | None): 可选动作索引。
 
     Returns:
-        dict[str, Any]: 可直接写入原始轨迹的事件对象。
+        dict[str, object]: 当前 raw schema 的动作行。
     """
-    return {
-        "sequence": sequence,
-        "observed_at": observed_at,
-        "type": "mod_event",
-        "payload": {
-            "event_id": event_id,
-            "timestamp_utc": observed_at,
-            "type": "action_executed",
-            "data": {
-                "request": {
-                    "action": action,
-                    "card_index": card_index,
-                    "target_index": target_index,
-                    "option_index": None,
-                    "command": None,
-                    "client_context": {
-                        "source": source,
-                        "layer": "battle",
-                    },
-                },
-                "before_state": before_state,
-                "after_state": before_state,
-                "status": status,
-                "stable": status == "completed",
-            },
+    battle = screen == "COMBAT"
+    state: dict[str, object] = {
+        "screen": screen,
+        "in_combat": battle,
+        "available_actions": [action],
+        "run": {
+            "character_name": "故障机器人",
+            "ascension": 1,
+            "act_id": 0,
+            "floor": 2,
+            "current_hp": 70,
+            "max_hp": 75,
+            "gold": 99,
+            "relics": [],
+            "potions": [],
+            "deck": [],
         },
     }
+    if battle:
+        state["combat"] = {
+            "player": {
+                "current_hp": 70,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 3,
+                "stars": 0,
+                "focus": 0,
+                "powers": [],
+                "orbs": [],
+            },
+            "enemies": [],
+            "hand": [],
+            "draw_count": 0,
+            "discard_count": 0,
+        }
+    else:
+        state["map"] = {
+            "available_nodes": [
+                {"index": 0, "row": 2, "col": 1, "node_type": "Monster"}
+            ]
+        }
+    parameters = {} if option_index is None else {"option_index": option_index}
+    return {
+        "event_id": event_id,
+        "observed_at": f"2026-08-27T08:00:{event_id:02d}Z",
+        "before_state": state,
+        "action": action,
+        "parameters": parameters,
+    }
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    """把测试动作按 JSONL 格式写入目标文件。
+
+    Args:
+        path (Path): 目标文件。
+        rows (list[dict[str, object]]): 待写入动作行。
+
+    Returns:
+        None: 文件写入完成后返回。
+    """
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )

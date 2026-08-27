@@ -120,6 +120,9 @@ internal sealed class GameEventService
             {
                 run_id = snapshot.RunId,
                 screen = snapshot.Screen,
+                session_phase = snapshot.SessionPhase,
+                character_id = snapshot.CharacterId,
+                ascension = snapshot.Ascension,
                 in_combat = snapshot.InCombat,
                 turn = snapshot.Turn,
                 action_window_open = snapshot.PlayerActionWindowOpen
@@ -182,6 +185,15 @@ internal sealed class GameEventService
                 screen = current.Screen,
                 session_phase = current.SessionPhase
             });
+            if (string.Equals(current.SessionPhase, "run", StringComparison.Ordinal))
+            {
+                Publish("run_started", new
+                {
+                    run_id = current.RunId,
+                    character_id = current.CharacterId,
+                    ascension = current.Ascension
+                });
+            }
             _lastState = current;
             return;
         }
@@ -193,6 +205,39 @@ internal sealed class GameEventService
                 from = previous.Screen,
                 to = current.Screen,
                 run_id = current.RunId
+            });
+        }
+
+        if (!string.Equals(previous.SessionPhase, "run", StringComparison.Ordinal) &&
+            string.Equals(current.SessionPhase, "run", StringComparison.Ordinal))
+        {
+            Publish("run_started", new
+            {
+                run_id = current.RunId,
+                character_id = current.CharacterId,
+                ascension = current.Ascension
+            });
+        }
+
+        if (!string.Equals(previous.Screen, "GAME_OVER", StringComparison.Ordinal) &&
+            string.Equals(current.Screen, "GAME_OVER", StringComparison.Ordinal))
+        {
+            Publish("run_ended", new
+            {
+                run_id = current.RunId,
+                reason = "game_over",
+                victory = current.IsVictory
+            });
+        }
+        else if (string.Equals(previous.SessionPhase, "run", StringComparison.Ordinal) &&
+                 !string.Equals(current.SessionPhase, "run", StringComparison.Ordinal) &&
+                 !string.Equals(previous.Screen, "GAME_OVER", StringComparison.Ordinal))
+        {
+            Publish("run_ended", new
+            {
+                run_id = previous.RunId,
+                reason = "returned_to_menu",
+                victory = (bool?)null
             });
         }
 
@@ -355,6 +400,9 @@ internal sealed class GameEventService
         public string RunId { get; init; } = "run_unknown";
         public string Screen { get; init; } = "UNKNOWN";
         public string SessionPhase { get; init; } = "menu";
+        public string? CharacterId { get; init; }
+        public int? Ascension { get; init; }
+        public bool? IsVictory { get; init; }
         public bool InCombat { get; init; }
         public int? Turn { get; init; }
         public string[] AvailableActions { get; init; } = Array.Empty<string>();
@@ -392,6 +440,9 @@ internal sealed class GameEventService
                 RunId = state.run_id,
                 Screen = state.screen,
                 SessionPhase = state.session.phase,
+                CharacterId = state.run?.character_id,
+                Ascension = state.run?.ascension,
+                IsVictory = state.game_over?.is_victory,
                 InCombat = state.in_combat,
                 Turn = state.turn,
                 AvailableActions = actions,

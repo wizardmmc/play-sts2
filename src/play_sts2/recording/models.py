@@ -15,6 +15,7 @@ class RunMetadata:
         started_at (str): 录制开始时的 UTC 时间。
         character_id (str | None): 当前角色 ID，尚未开局时为 ``None``。
         seed (str | None): 游戏种子，尚不可用时为 ``None``。
+        ascension (int | None): 当前局进阶难度，尚不可用时为 ``None``。
     """
 
     run_id: str
@@ -22,6 +23,7 @@ class RunMetadata:
     started_at: str
     character_id: str | None = None
     seed: str | None = None
+    ascension: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换成可直接写入 JSON 的对象。
@@ -33,38 +35,13 @@ class RunMetadata:
 
 
 @dataclass(frozen=True, slots=True)
-class RecordedEvent:
-    """表示原始轨迹中的一条有序事件。
-
-    Args:
-        sequence (int): 从 1 开始递增的局内事件序号。
-        observed_at (str): 观察到事件时的 UTC 时间。
-        type (str): 事件类型，例如 ``state`` 或 ``action``。
-        payload (dict[str, Any]): 未转录的 Mod 状态或动作内容。
-    """
-
-    sequence: int
-    observed_at: str
-    type: str
-    payload: dict[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        """转换成可写入 JSONL 的对象。
-
-        Returns:
-            dict[str, Any]: 保留字段顺序的事件字典。
-        """
-        return asdict(self)
-
-
-@dataclass(frozen=True, slots=True)
 class RecordedRun:
     """描述已经结束的一次人工轨迹录制。
 
     Args:
         run_dir (Path): 当前局的原始轨迹目录。
         termination_reason (str): 录制结束原因。
-        event_count (int): 写入 ``events.jsonl`` 的事件总数。
+        event_count (int): 本次写入的精确决策事件总数。
     """
 
     run_dir: Path

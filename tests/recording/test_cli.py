@@ -19,7 +19,7 @@ class CliGameClient:
     """
 
     def __init__(self, base_url: str) -> None:
-        """校验默认地址并准备一局即将结束的状态。
+        """校验默认地址并准备一局即将结束的 SSE 事件。
 
         Args:
             base_url (str): CLI 使用的 Mod 服务地址。
@@ -28,25 +28,6 @@ class CliGameClient:
             AssertionError: CLI 没有使用约定的默认 Mod 地址。
         """
         assert base_url == "http://127.0.0.1:8080"
-        run_state = {
-            "state_version": 1,
-            "run_id": "CLI-SEED",
-            "screen": "MAP",
-            "session": {"phase": "run"},
-            "run": {"character_id": "DEFECT", "floor": 1},
-        }
-        self._states: Iterator[dict[str, Any]] = iter(
-            [
-                run_state,
-                {
-                    **run_state,
-                    "state_version": 2,
-                    "screen": "GAME_OVER",
-                    "game_over": {"victory": True},
-                },
-            ]
-        )
-        self._last_state = run_state
 
     def __enter__(self) -> Self:
         """进入测试客户端上下文。
@@ -74,13 +55,12 @@ class CliGameClient:
         """
 
     def state(self) -> dict[str, Any]:
-        """返回下一份状态，耗尽后保持最终状态。
+        """拒绝录制 CLI 重新引入重复 ``/state`` 请求。
 
-        Returns:
-            dict[str, Any]: 与 Mod ``GET /state`` 同形状的状态。
+        Raises:
+            AssertionError: CLI 使用了事件流之外的状态轮询。
         """
-        self._last_state = next(self._states, self._last_state)
-        return self._last_state
+        raise AssertionError("录制器不应调用 /state")
 
     def iter_events(self, stop_event: Event) -> Iterator[dict[str, Any]]:
         """发送就绪事件并等待录制器停止监听。
@@ -91,7 +71,20 @@ class CliGameClient:
         Yields:
             dict[str, Any]: 与 Mod SSE 同形状的就绪事件。
         """
-        yield {"event_id": 1, "type": "stream_ready", "data": {}}
+        yield {
+            "event_id": 1,
+            "type": "run_started",
+            "data": {
+                "run_id": "CLI-SEED",
+                "character_id": "DEFECT",
+                "ascension": 0,
+            },
+        }
+        yield {
+            "event_id": 2,
+            "type": "run_ended",
+            "data": {"run_id": "CLI-SEED", "reason": "game_over"},
+        }
         stop_event.wait()
 
 
@@ -117,17 +110,19 @@ def test_main_records_one_run_to_default_human_directory(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "GameClient", CliGameClient)
 
-    exit_code = cli.main(["--poll-interval", "0"])
+    exit_code = cli.main(["--check-interval", "0"])
 
-    run_dir = tmp_path / "data/raw/human/CLI-SEED"
+    human_root = tmp_path / "data/raw/human"
+    run_dir = next(path for path in human_root.iterdir() if path.is_dir())
     assert exit_code == 0
+    assert run_dir.name.endswith("-a0-f0-CLI-SEED")
     assert (
         json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))["source"]
         == "human"
     )
-    events = [
-        json.loads(line)
-        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    assert events[-1]["payload"] == {"reason": "game_over"}
+    metadata = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert metadata["termination_reason"] == "game_over"
+    assert metadata["battle_sample_count"] == 0
+    assert metadata["strategic_sample_count"] == 0
+    assert not (run_dir / "events.jsonl").exists()
     assert capsys.readouterr().out == f"录制完成: {run_dir}\n"

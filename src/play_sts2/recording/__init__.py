@@ -1,14 +1,13 @@
 """提供原始游戏轨迹的数据结构与落盘工具。"""
 
-from .models import RecordedEvent, RecordedRun, RunMetadata
+from .models import RecordedRun, RunMetadata
 from .recorder import HumanRunRecorder, RecordingError
-from .writer import TrajectoryWriter
+from .writer import HumanRunWriter
 
 __all__ = [
     "HumanRunRecorder",
-    "RecordedEvent",
+    "HumanRunWriter",
     "RecordedRun",
     "RecordingError",
     "RunMetadata",
-    "TrajectoryWriter",
 ]
