@@ -86,6 +86,29 @@ def test_model_actions_filters_strategic_actions() -> None:
     )
 
 
+def test_model_actions_keeps_anytime_potion_on_strategic_screen() -> None:
+    """战略层保留 Mod 明确开放的任意时机药水动作。
+
+    Raises:
+        AssertionError: 果汁等战略药水动作被错误过滤。
+
+    Returns:
+        None: 此测试只约束跨层药水的可见性。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "REWARD",
+        "in_combat": False,
+        "available_actions": ["claim_reward", "proceed", "use_potion"],
+    }
+
+    assert harness.model_actions(state) == (
+        "claim_reward",
+        "proceed",
+        "use_potion",
+    )
+
+
 def test_model_actions_returns_empty_for_transient_state() -> None:
     """无需模型介入的过渡状态不公开任何动作。
 

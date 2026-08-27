@@ -229,11 +229,11 @@ class ConflictingBattleGame:
         return _combat_state()
 
 
-def test_battle_runner_keeps_history_and_waits_for_pending_action() -> None:
-    """战斗循环等待下一可决策帧，并把前一步动作留在后续对话中。
+def test_battle_runner_uses_stateless_steps_and_waits_for_pending_action() -> None:
+    """战斗循环等待下一可决策帧，但不把前一步带入下一次请求。
 
     Raises:
-        AssertionError: Runtime 读取过渡帧、丢失历史或未正确结束战斗。
+        AssertionError: Runtime 读取过渡帧、保留历史或未正确结束战斗。
 
     Returns:
         None: 此测试只验证两步战斗的完整闭环。
@@ -254,13 +254,8 @@ def test_battle_runner_keeps_history_and_waits_for_pending_action() -> None:
     assert result.final_state == _reward_state()
     assert game.actions == ["end_turn", "end_turn"]
     assert game.state_calls == 2
-    assert tuple(message.role for message in provider.requests[1]) == (
-        "system",
-        "user",
-        "assistant",
-        "user",
-    )
-    assert provider.requests[1][2].content == "ACTION: end_turn"
+    assert tuple(message.role for message in provider.requests[1]) == ("system", "user")
+    assert "对话历史" not in provider.requests[1][0].content
     assert "回合 2" in provider.requests[1][-1].content
 
 

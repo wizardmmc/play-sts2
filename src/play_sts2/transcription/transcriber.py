@@ -116,7 +116,7 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
 
 
 def _render_file(rows: list[dict[str, Any]], *, title: str) -> str:
-    """把同层动作渲染成只重复一次规则的可读文件。
+    """把同层动作渲染为与独立训练消息一致的可读文件。
 
     Args:
         rows (list[dict[str, Any]]): 按时间排序的 raw 动作。
@@ -133,13 +133,16 @@ def _render_file(rows: list[dict[str, Any]], *, title: str) -> str:
     if len(layers) != 1:
         raise TranscriptError("同一 transcript 文件包含多个 Harness 层")
     prompt = system_prompt(rendered[0][0].layer)
-    sections = [title, f"## 规则\n\n{prompt}"]
+    sections = [title]
     for index, (observation, action_line) in enumerate(rendered, start=1):
         heading = f"## 决策 {index}"
         if observation.layer.value == "strategic":
             heading += _decision_context(rows[index - 1])
         sections.append(
-            f"{heading}\n\n### 状态\n\n{observation.text}\n\n### 动作\n\n{action_line}"
+            f"{heading}\n\n"
+            f"──── system ────\n{prompt}\n\n"
+            f"──── user ────\n{observation.text}\n\n"
+            f"──── assistant ────\n{action_line}"
         )
     return "\n\n".join(sections) + "\n"
 

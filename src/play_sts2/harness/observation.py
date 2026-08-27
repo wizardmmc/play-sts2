@@ -1,26 +1,16 @@
 """把 Mod 状态投影为在线推理与 SFT 共用的可读观测。"""
 
 import re
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from .actions import action_signature, model_actions
 from .ownership import HarnessLayer, state_layer
+from .strategic_observation import render_map, render_strategic_context
 
 _MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
 _RESOURCE_PATTERN = re.compile(r"res://\S+?\.png")
-_NODE_NAMES = {
-    "Ancient": "先古之民",
-    "Boss": "Boss",
-    "Elite": "精英敌人",
-    "Monster": "普通敌人",
-    "RestSite": "休息处",
-    "Shop": "商店",
-    "Treasure": "宝箱",
-    "Unknown": "未知地点",
-}
 _INTENT_NAMES = {
     "Attack": "攻击",
     "Buff": "强化",
@@ -79,7 +69,7 @@ def build_observation(state: Mapping[str, Any]) -> Observation:
         "COMBAT": _render_combat,
         "CRYSTAL_SPHERE": _render_crystal_sphere,
         "EVENT": _render_event,
-        "MAP": _render_map,
+        "MAP": render_map,
         "MODAL": _render_modal,
         "REST": _render_rest,
         "REWARD": _render_reward,
@@ -91,9 +81,11 @@ def build_observation(state: Mapping[str, Any]) -> Observation:
     if renderer is None:
         raise ObservationError(f"尚未支持的决策屏幕: {screen}")
 
-    sections = [_render_run(state)]
-    if layer is HarnessLayer.STRATEGIC:
-        sections.append(_render_inventory(state))
+    sections = [
+        render_strategic_context(state)
+        if layer is HarnessLayer.STRATEGIC
+        else _render_run(state)
+    ]
     sections.extend((renderer(state), _render_actions(state, actions)))
     return Observation(
         layer=layer,
@@ -113,53 +105,31 @@ def _render_run(state: Mapping[str, Any]) -> str:
     """
     run = state.get("run") or {}
     act = int(run.get("act_id", 0)) + 1
-    return (
+    relic_items = run.get("relics") or []
+    relics = "，".join(_clean_text(relic.get("name")) for relic in relic_items)
+    deck = run.get("deck") or []
+    deck_names = _format_deck_names(deck)
+    summary = (
         f"角色: {run.get('character_name', '未知')} | "
         f"进阶: {run.get('ascension', 0)} | 第 {act} 幕 | "
         f"第 {run.get('floor', 0)} 层\n"
         f"生命: {run.get('current_hp', 0)}/{run.get('max_hp', 0)} | "
         f"金币: {run.get('gold', 0)}"
     )
-
-
-def _render_inventory(state: Mapping[str, Any]) -> str:
-    """渲染战略决策长期依赖的遗物、药水和牌组。
-
-    Args:
-        state (Mapping[str, Any]): Mod 返回的完整当前游戏状态。
-
-    Returns:
-        str: 战略层的整局物品与牌组摘要。
-    """
-    run = state.get("run") or {}
-    relics = run.get("relics") or []
-    potions = run.get("potions") or []
-    deck = run.get("deck") or []
-    relic_text = (
-        "，".join(
-            f"[{relic.get('index')}] {_clean_text(relic.get('name'))}"
-            for relic in relics
+    details = [summary, f"遗物: {relics or '无'}"]
+    described_relics = [
+        relic for relic in relic_items if _clean_text(relic.get("description"))
+    ]
+    if described_relics:
+        details.append("遗物效果:")
+        details.extend(
+            f"- [{relic.get('index')}] {_clean_text(relic.get('name'))}: "
+            f"{_clean_text(relic.get('description'))}"
+            for relic in described_relics
         )
-        or "无"
-    )
-    potion_text = (
-        "，".join(
-            f"[{potion.get('index')}] "
-            f"{_clean_text(potion.get('name')) if potion.get('occupied') else '空'}"
-            for potion in potions
-        )
-        or "无"
-    )
-
-    card_counts = Counter(_card_name(card) for card in deck)
-    deck_text = (
-        "，".join(
-            name if count == 1 else f"{name}×{count}"
-            for name, count in card_counts.items()
-        )
-        or "空"
-    )
-    return f"遗物: {relic_text}\n药水: {potion_text}\n牌组: {deck_text}"
+    if deck:
+        details.append(f"牌组 {len(deck)} 张: {deck_names}")
+    return "\n".join(details)
 
 
 def _render_combat(state: Mapping[str, Any]) -> str:
@@ -188,6 +158,13 @@ def _render_combat(state: Mapping[str, Any]) -> str:
         f"=== 战斗（回合 {state.get('turn', 0)}）===",
         f"玩家: {' | '.join(player_parts)}",
     ]
+    if player.get("card_play_counters_reliable") is True:
+        lines.append(
+            "本回合已打出: "
+            f"卡牌 {player.get('cards_played_this_turn', 0)} | "
+            f"攻击 {player.get('attacks_played_this_turn', 0)} | "
+            f"技能 {player.get('skills_played_this_turn', 0)}"
+        )
     powers = _format_powers(player.get("powers") or [])
     if powers:
         lines.append(f"玩家状态: {powers}")
@@ -199,10 +176,34 @@ def _render_combat(state: Mapping[str, Any]) -> str:
     lines.extend(_format_enemy(enemy) for enemy in combat.get("enemies") or [])
     lines.append("手牌:")
     lines.extend(_format_card(card) for card in combat.get("hand") or [])
-    lines.append(
-        f"牌堆: 抽牌 {combat.get('draw_count', 0)} | "
-        f"弃牌 {combat.get('discard_count', 0)}"
+    agent_combat = (state.get("agent_view") or {}).get("combat") or {}
+    lines.extend(
+        _format_visible_pile(
+            "抽牌堆",
+            agent_combat.get("draw") or [],
+            combat.get("draw_count"),
+        )
     )
+    lines.extend(
+        _format_visible_pile(
+            "弃牌堆",
+            agent_combat.get("discard") or [],
+            combat.get("discard_count"),
+        )
+    )
+    lines.extend(
+        _format_visible_pile(
+            "消耗牌堆",
+            agent_combat.get("exhaust") or [],
+            _visible_pile_count(
+                agent_combat.get("exhaust") or [],
+                agent_combat.get("exhaust_cards") or [],
+            ),
+        )
+    )
+
+    risks = combat.get("lethal_risks") or []
+    lines.extend(f"危险: {_format_risk(risk)}" for risk in risks)
 
     potions = (state.get("run") or {}).get("potions") or []
     if potions:
@@ -235,26 +236,6 @@ def _render_event(state: Mapping[str, Any]) -> str:
         if description:
             parts.append(description)
         lines.append(" | ".join(parts))
-    return "\n".join(lines)
-
-
-def _render_map(state: Mapping[str, Any]) -> str:
-    """渲染当前可以前往的地图节点。
-
-    Args:
-        state (Mapping[str, Any]): 当前地图状态。
-
-    Returns:
-        str: 带选择索引和节点类型的地图观测。
-    """
-    map_state = state.get("map") or {}
-    lines = ["=== 地图 ==="]
-    for node in map_state.get("available_nodes") or []:
-        node_type = str(node.get("node_type") or "Unknown")
-        lines.append(
-            f"[{node.get('index')}] 第 {node.get('row')} 行，第 {node.get('col')} 列"
-            f" | {_NODE_NAMES.get(node_type, node_type)}"
-        )
     return "\n".join(lines)
 
 
@@ -640,6 +621,24 @@ def _card_name(card: Mapping[str, Any]) -> str:
     return f"{name}+" if card.get("upgraded") else name
 
 
+def _format_deck_names(deck: Sequence[Mapping[str, Any]]) -> str:
+    """按首次出现顺序压缩战斗观测中的牌组名称。
+
+    Args:
+        deck (Sequence[Mapping[str, Any]]): 当前完整牌组。
+
+    Returns:
+        str: 例如 ``打击×4，防御×4，电击`` 的紧凑摘要。
+    """
+    counts: dict[str, int] = {}
+    for card in deck:
+        name = _card_name(card)
+        counts[name] = counts.get(name, 0) + 1
+    return "，".join(
+        name if count == 1 else f"{name}×{count}" for name, count in counts.items()
+    )
+
+
 def _format_cost(card: Mapping[str, Any]) -> str:
     """把卡牌的能量与星能费用压缩为一段文本。
 
@@ -738,6 +737,91 @@ def _format_orb(orb: Mapping[str, Any]) -> str:
     )
 
 
+def _format_visible_pile(
+    name: str,
+    entries: Sequence[Any],
+    count: Any,
+) -> list[str]:
+    """渲染模型实际可见的战斗牌堆内容。
+
+    Args:
+        name (str): 牌堆的中文名称。
+        entries (Sequence[Any]): Mod ``agent_view`` 中已分组的可见牌行。
+        count (Any): 结构化状态给出的准确牌数。
+
+    Returns:
+        list[str]: 首行带牌数、后续行缩进的牌堆文本。
+    """
+    lines = [_visible_pile_line(entry) for entry in entries]
+    lines = [line for line in lines if line]
+    total = count if isinstance(count, int) else _visible_pile_count(entries, [])
+    if not lines and not total:
+        return []
+    if not lines:
+        return [f"{name}（{total}张）: 内容不可见"]
+    return [f"{name}（{total}张）: {lines[0]}", *(f"  {line}" for line in lines[1:])]
+
+
+def _visible_pile_line(entry: Any) -> str:
+    """提取一个 ``agent_view`` 牌堆条目的可读行。
+
+    Args:
+        entry (Any): 字符串或含 ``line`` 字段的映射。
+
+    Returns:
+        str: 清理富文本后的牌堆条目。
+    """
+    if isinstance(entry, Mapping):
+        return _clean_text(entry.get("line") or entry.get("name"))
+    return _clean_text(entry)
+
+
+def _visible_pile_count(
+    entries: Sequence[Any],
+    structured_cards: Sequence[Any],
+) -> int:
+    """从结构化卡牌或分组文本计算牌堆中的实际牌数。
+
+    Args:
+        entries (Sequence[Any]): 可能含 ``名称*数量`` 的可见牌行。
+        structured_cards (Sequence[Any]): Mod 提供的逐卡牌列表。
+
+    Returns:
+        int: 牌堆中的卡牌总数。
+    """
+    if structured_cards:
+        return len(structured_cards)
+    total = 0
+    for entry in entries:
+        line = _visible_pile_line(entry)
+        match = re.search(r"\*(\d+)", line)
+        total += int(match.group(1)) if match else 1
+    return total
+
+
+def _format_risk(risk: Any) -> str:
+    """把 Mod 的致命风险提示统一为单行文本。
+
+    Args:
+        risk (Any): 字符串或结构化风险对象。
+
+    Returns:
+        str: 战斗模型可直接理解的危险提示。
+    """
+    if isinstance(risk, Mapping):
+        if risk.get("risk_id") == "incoming_damage":
+            damage = risk.get("damage_after_block", risk.get("incoming_damage", "?"))
+            suffix = "，足以致命。" if risk.get("will_kill_player") else "。"
+            return f"预计承受{damage}点未格挡伤害{suffix}"
+        return _clean_text(
+            risk.get("line")
+            or risk.get("description")
+            or risk.get("message")
+            or risk.get("reason")
+        )
+    return _clean_text(risk)
+
+
 def _format_potion(potion: Mapping[str, Any]) -> str:
     """把一个药水槽格式化为带可用状态和目标索引的单行文本。
 
@@ -751,6 +835,9 @@ def _format_potion(potion: Mapping[str, Any]) -> str:
     parts = [f"[{potion.get('index')}] {name}"]
     if potion.get("occupied"):
         parts.append("可使用" if potion.get("can_use") else "不可使用")
+        description = _clean_text(potion.get("description"))
+        if description:
+            parts.append(description)
     targets = potion.get("valid_target_indices") or []
     if targets:
         parts.append(f"目标: {list(targets)}")

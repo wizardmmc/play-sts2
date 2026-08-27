@@ -13,10 +13,9 @@ from ..harness import (
     HarnessLayer,
     ObservationError,
     build_observation,
-    format_action,
     state_layer,
 )
-from ..inference import ChatMessage, DecisionProvider
+from ..inference import DecisionProvider
 from .decision import DecisionEngine, DecisionStep, is_action_window_conflict
 from .router import RunRoute, classify_run_state
 
@@ -53,7 +52,7 @@ class BattleResult:
 
 
 class BattleRunner:
-    """维护一场战斗的对话，并持续驱动模型动作直到离场。"""
+    """用彼此独立的状态决策持续驱动当前战斗直到离场。"""
 
     def __init__(
         self,
@@ -113,7 +112,6 @@ class BattleRunner:
         if not _fight_ongoing(state):
             raise BattleRunError("当前状态不在战斗中")
         state = self._wait_for_state(state)
-        history: tuple[ChatMessage, ...] = ()
         steps: list[DecisionStep] = []
         conflict_retries = 0
 
@@ -123,7 +121,6 @@ class BattleRunner:
             try:
                 step = self._engine.step(
                     state,
-                    history=history,
                     max_retries=self._max_retries,
                 )
             except httpx.HTTPStatusError as exc:
@@ -137,10 +134,6 @@ class BattleRunner:
                 continue
             conflict_retries = 0
             steps.append(step)
-            history = (
-                *step.messages[1:],
-                ChatMessage(role="assistant", content=format_action(step.action)),
-            )
             state = self._state_after(step.action_result)
 
         return BattleResult(

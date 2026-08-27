@@ -88,6 +88,15 @@ internal static class GameActionService
         LastTurnNumber = currentTurn;
     }
 
+    /// <summary>在一次手动出牌成功后更新当前回合的分类计数。</summary>
+    internal static void RecordCardPlayed(int currentTurn, string cardType)
+    {
+        SyncCardPlayCounters(currentTurn);
+        CardsPlayedThisTurn++;
+        if (cardType == "Attack") AttacksPlayedThisTurn++;
+        else if (cardType == "Skill") SkillsPlayedThisTurn++;
+    }
+
     public static Task<ActionResponsePayload> ExecuteAsync(ActionRequest request)
     {
         var actionName = request.action?.Trim().ToLowerInvariant();
@@ -326,12 +335,8 @@ internal static class GameActionService
             });
         }
 
-        var currentTurn = combatState?.RoundNumber ?? 0;
-        SyncCardPlayCounters(currentTurn);
-        CardsPlayedThisTurn++;
-        var cardType = card.Type.ToString();
-        if (cardType == "Attack") AttacksPlayedThisTurn++;
-        else if (cardType == "Skill") SkillsPlayedThisTurn++;
+        GameActionService.RecordCardPlayed(
+            combatState?.RoundNumber ?? 0, card.Type.ToString());
 
         var stable = await WaitForPlayCardTransitionAsync(card, TimeSpan.FromSeconds(5));
 

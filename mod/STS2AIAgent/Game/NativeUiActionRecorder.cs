@@ -475,9 +475,13 @@ internal static class NativeUiActionRecorder
             __state = WithTarget(capture, TargetIndex(
                 CombatManager.Instance.DebugOnlyGetState(), target));
         }
-        static void Postfix(bool __result, Capture? __state)
+        static void Postfix(CardModel __instance, bool __result, Capture? __state)
         {
             if (!__result) return;
+            if (Volatile.Read(ref _suppressionDepth) != 0) return;
+            GameActionService.RecordCardPlayed(
+                CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0,
+                __instance.Type.ToString());
             if (__state != null)
                 Finish(__state);
             else if (_cardUiCommitDepth > 0)

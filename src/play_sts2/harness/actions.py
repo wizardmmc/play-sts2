@@ -27,7 +27,6 @@ _STRATEGIC_EXCLUDED_ACTIONS = {
     "return_to_main_menu",
     "return_to_menu",
     "save_and_quit",
-    "use_potion",
 }
 
 _OPTION_ACTIONS = {

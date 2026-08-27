@@ -52,12 +52,18 @@ def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -
     strategy_text = (result.output_dir / "strategy/decisions.txt").read_text(
         encoding="utf-8"
     )
-    assert battle_text.count("## 规则") == 1
+    assert "## 规则" not in battle_text
     assert battle_text.count("## 决策") == 2
+    assert battle_text.count("──── system ────") == 2
+    assert battle_text.count("──── user ────") == 2
+    assert battle_text.count("──── assistant ────") == 2
     assert "ACTION: end_turn" in battle_text
     assert "human_play/" not in battle_text
     assert "event 101" not in battle_text
     assert "sample_id" not in strategy_text
+    assert strategy_text.count("──── system ────") == 1
+    assert strategy_text.count("──── user ────") == 1
+    assert strategy_text.count("──── assistant ────") == 1
     assert "ACTION: choose_map_node 0" in strategy_text
 
 

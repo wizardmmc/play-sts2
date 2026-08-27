@@ -24,6 +24,11 @@ def test_system_prompt_loads_layer_specific_action_contracts() -> None:
     assert "战略" in strategic
     assert "ACTION:" in battle
     assert "ACTION:" in strategic
+    assert "use_potion" in strategic
+    assert "每次决策彼此独立" in battle
+    assert "完整快照" in battle
+    assert "金币是贯穿整局的资源" in strategic
+    assert "可执行动作" in strategic
 
 
 def test_system_prompt_rejects_transient_layer() -> None:

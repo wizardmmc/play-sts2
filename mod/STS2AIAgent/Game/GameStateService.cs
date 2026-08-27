@@ -2612,7 +2612,8 @@ internal static class GameStateService
             orbs = orbs.Select((orb, index) => BuildCombatOrbPayload(orb, index)).ToArray(),
             cards_played_this_turn = GameActionService.CardsPlayedThisTurn,
             attacks_played_this_turn = GameActionService.AttacksPlayedThisTurn,
-            skills_played_this_turn = GameActionService.SkillsPlayedThisTurn
+            skills_played_this_turn = GameActionService.SkillsPlayedThisTurn,
+            card_play_counters_reliable = true
         };
         // 为紧凑版 /state 战斗载荷补充牌堆数量。这里复用智能体视图已经验证过的
         // 反射读取器，让 Harness 能显示实际数量而不是固定的“?”。
@@ -2862,7 +2863,8 @@ internal static class GameStateService
                 orbs = combat.player.orbs.Select(orb => FormatOrbLine(orb)).ToArray(),
                 cards_played_this_turn = combat.player.cards_played_this_turn,
                 attacks_played_this_turn = combat.player.attacks_played_this_turn,
-                skills_played_this_turn = combat.player.skills_played_this_turn
+                skills_played_this_turn = combat.player.skills_played_this_turn,
+                card_play_counters_reliable = combat.player.card_play_counters_reliable
             },
             end_turn_will_kill_player = combat.end_turn_will_kill_player,
             lethal_risks = combat.lethal_risks.Select(risk => new
@@ -4482,6 +4484,7 @@ internal static class GameStateService
         {
             index = index,
             card_id = card.Id.Entry,
+            card_type = card.Type.ToString(),
             name = card.Title,
             upgraded = card.IsUpgraded,
             upgrade_level = card.CurrentUpgradeLevel,
@@ -6514,6 +6517,8 @@ internal sealed class CombatPlayerPayload
     public int attacks_played_this_turn { get; init; }
 
     public int skills_played_this_turn { get; init; }
+
+    public bool card_play_counters_reliable { get; init; }
 }
 
 internal sealed class CombatCompanionPayload
@@ -6605,6 +6610,8 @@ internal sealed class CombatHandCardPayload
     public int index { get; init; }
 
     public string card_id { get; init; } = string.Empty;
+
+    public string card_type { get; init; } = string.Empty;
 
     public string name { get; init; } = string.Empty;
 

@@ -258,10 +258,32 @@ def test_build_observation_renders_combat_decision() -> None:
             "current_hp": 44,
             "max_hp": 75,
             "gold": 99,
+            "deck": [
+                {
+                    "index": 0,
+                    "name": "打击",
+                    "card_type": "Attack",
+                    "energy_cost": 1,
+                },
+                {
+                    "index": 1,
+                    "name": "防御",
+                    "card_type": "Skill",
+                    "energy_cost": 1,
+                },
+            ],
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "破损核心",
+                    "description": "战斗开始时生成1个闪电充能球。",
+                }
+            ],
             "potions": [
                 {
                     "index": 0,
                     "name": "火焰药水",
+                    "description": "对一个敌人造成20点伤害。",
                     "occupied": True,
                     "can_use": True,
                     "valid_target_indices": [0],
@@ -278,6 +300,10 @@ def test_build_observation_renders_combat_decision() -> None:
                 "focus": 2,
                 "orb_capacity": 3,
                 "empty_orb_slots": 2,
+                "cards_played_this_turn": 3,
+                "attacks_played_this_turn": 1,
+                "skills_played_this_turn": 2,
+                "card_play_counters_reliable": True,
                 "orbs": [
                     {
                         "slot_index": 0,
@@ -349,6 +375,24 @@ def test_build_observation_renders_combat_decision() -> None:
             ],
             "draw_count": 4,
             "discard_count": 2,
+            "lethal_risks": [
+                {
+                    "risk_id": "incoming_damage",
+                    "damage_after_block": 6,
+                    "player_hp": 5,
+                    "will_kill_player": True,
+                }
+            ],
+        },
+        "agent_view": {
+            "combat": {
+                "draw": [
+                    {"line": "打击*2 [1费]：造成6点伤害。"},
+                    {"line": "电击 [1费]：生成1个闪电充能球。"},
+                ],
+                "discard": [{"line": "防御*2 [1费]：获得5点格挡。"}],
+                "exhaust": [{"line": "白噪声 [1费]：加入一张能力牌。"}],
+            }
         },
     }
 
@@ -373,8 +417,20 @@ def test_build_observation_renders_combat_decision() -> None:
     assert "[0] 打击 | 1 能量 | 造成6点伤害。 | 目标: [0]" in observation.text
     assert "[2] 凡庸 | 不能被打出。 | 不可使用: unplayable" in observation.text
     assert "-1 能量" not in observation.text
-    assert "[0] 火焰药水 | 可使用 | 目标: [0]" in observation.text
-    assert "牌堆: 抽牌 4 | 弃牌 2" in observation.text
+    assert (
+        "[0] 火焰药水 | 可使用 | 对一个敌人造成20点伤害。 | 目标: [0]"
+        in observation.text
+    )
+    assert "对一个敌人造成20点伤害。" in observation.text
+    assert "本回合已打出: 卡牌 3 | 攻击 1 | 技能 2" in observation.text
+    assert "抽牌堆（4张）: 打击*2 [1费]：造成6点伤害。" in observation.text
+    assert "电击 [1费]：生成1个闪电充能球。" in observation.text
+    assert "弃牌堆（2张）: 防御*2 [1费]：获得5点格挡。" in observation.text
+    assert "消耗牌堆（1张）: 白噪声 [1费]：加入一张能力牌。" in observation.text
+    assert "牌组 2 张: 打击，防御" in observation.text
+    assert "遗物: 破损核心" in observation.text
+    assert "[0] 破损核心: 战斗开始时生成1个闪电充能球。" in observation.text
+    assert "危险: 预计承受6点未格挡伤害，足以致命。" in observation.text
     assert observation.text.endswith(
         "可执行动作:\n"
         "- play_card(card_index, target_index)\n"
@@ -382,6 +438,181 @@ def test_build_observation_renders_combat_decision() -> None:
         "- discard_potion(option_index)\n"
         "- end_turn"
     )
+
+
+def test_build_observation_renders_complete_strategic_map_context() -> None:
+    """地图决策包含整局资源、已走路径、可达统计和完整邻接图。
+
+    Raises:
+        AssertionError: 战略模型看到的地图快照不足以比较完整路线。
+
+    Returns:
+        None: 此测试只验证地图决策所需的全局上下文。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "MAP",
+        "in_combat": False,
+        "available_actions": ["choose_map_node"],
+        "run": {
+            "act_id": "0",
+            "ascension": 3,
+            "ascension_effects": [
+                {"name": "精英蜂拥", "description": "精英敌人出现更加频繁。"}
+            ],
+            "boss_id": "THE_KIN_BOSS",
+            "character_name": "故障机器人",
+            "current_hp": 60,
+            "max_hp": 75,
+            "gold": 110,
+            "floor": 2,
+            "potions": [
+                {"index": 0, "occupied": False},
+                {
+                    "index": 1,
+                    "occupied": True,
+                    "name": "火焰药水",
+                    "description": "造成20点伤害。",
+                },
+            ],
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "破损核心",
+                    "description": "生成1个闪电充能球。",
+                }
+            ],
+            "deck": [
+                {
+                    "index": 0,
+                    "name": "打击",
+                    "card_type": "Attack",
+                    "energy_cost": 1,
+                    "upgraded": False,
+                },
+                {
+                    "index": 1,
+                    "name": "打击",
+                    "card_type": "Attack",
+                    "energy_cost": 1,
+                    "upgraded": False,
+                },
+                {
+                    "index": 2,
+                    "name": "电击",
+                    "card_type": "Skill",
+                    "energy_cost": 0,
+                    "upgraded": True,
+                },
+            ],
+        },
+        "map": {
+            "current_node": {"row": 1, "col": 3},
+            "boss_node": {"row": 4, "col": 3},
+            "available_nodes": [
+                {"index": 0, "row": 2, "col": 2, "node_type": "Monster"},
+                {"index": 1, "row": 2, "col": 4, "node_type": "Unknown"},
+            ],
+            "nodes": [
+                {
+                    "row": 0,
+                    "col": 3,
+                    "node_type": "Ancient",
+                    "visited": True,
+                    "children": [{"row": 1, "col": 3}],
+                },
+                {
+                    "row": 1,
+                    "col": 3,
+                    "node_type": "Monster",
+                    "visited": True,
+                    "is_current": True,
+                    "children": [{"row": 2, "col": 2}, {"row": 2, "col": 4}],
+                },
+                {
+                    "row": 2,
+                    "col": 2,
+                    "node_type": "Monster",
+                    "children": [{"row": 3, "col": 3}],
+                },
+                {
+                    "row": 2,
+                    "col": 4,
+                    "node_type": "Unknown",
+                    "children": [{"row": 3, "col": 3}],
+                },
+                {
+                    "row": 3,
+                    "col": 3,
+                    "node_type": "RestSite",
+                    "children": [{"row": 4, "col": 3}],
+                },
+                {
+                    "row": 4,
+                    "col": 3,
+                    "node_type": "Boss",
+                    "is_boss": True,
+                    "children": [],
+                },
+            ],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "【第0幕】" in observation.text
+    assert "本幕Boss: 同族小队 (THE_KIN_BOSS)" in observation.text
+    assert "难度3: 精英蜂拥（精英敌人出现更加频繁。）" in observation.text
+    assert "【当前状态】" in observation.text
+    assert "HP 60/75 | 金币110 | 第2层" in observation.text
+    assert "药水栏 1/2: [0] - [1] 火焰药水（造成20点伤害。）" in observation.text
+    assert "遗物: 破损核心（生成1个闪电充能球。）" in observation.text
+    assert "牌组 3 张（升级1）" in observation.text
+    assert "- 打击 x2（1费攻击）" in observation.text
+    assert "- 电击+ x1（0费技能）" in observation.text
+    assert "位置: 行1 列3 | 已走: 古(行0)→敌(行1)" in observation.text
+    assert "[0] 行2列2 敌 | 距Boss 2步 | 后续: 火 → 王" in observation.text
+    assert "[1] 行2列4 ? | 距Boss 2步 | 后续: 火 → 王" in observation.text
+    assert "本幕可达: ?×1 敌×1 火×1 王×1 | 最深可达 2步" in observation.text
+    assert "=== 全图(坐标邻接, 未走层) ===" in observation.text
+    assert "(1,3)@敌→(2,2)敌 (2,4)?" in observation.text
+    assert "(3,3)火→(4,3)王" in observation.text
+
+
+def test_build_observation_hides_unverified_historical_card_counters() -> None:
+    """旧 raw 没有可靠性标记时不把恒为零的计数伪装成事实。
+
+    Raises:
+        AssertionError: 历史 Mod 的占位计数泄漏进模型观测。
+
+    Returns:
+        None: 此测试只验证旧录制数据的诚实降级。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
+        "run": {"act_id": 0},
+        "combat": {
+            "player": {
+                "current_hp": 10,
+                "max_hp": 10,
+                "block": 0,
+                "energy": 0,
+                "stars": 0,
+                "cards_played_this_turn": 0,
+                "attacks_played_this_turn": 0,
+                "skills_played_this_turn": 0,
+            },
+            "enemies": [],
+            "hand": [],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "本回合已打出" not in observation.text
 
 
 @pytest.mark.parametrize(
@@ -550,9 +781,11 @@ def test_build_observation_renders_strategic_decisions(
 
     assert observation.layer is harness.HarnessLayer.STRATEGIC
     assert observation.available_actions == expected_actions
-    assert "遗物: [0] 破损核心" in observation.text
-    assert "药水: [0] 空" in observation.text
-    assert "牌组: 打击×2，电击+" in observation.text
+    assert "遗物: 破损核心" in observation.text
+    assert "药水栏 0/1: [0] -" in observation.text
+    assert "牌组 3 张（升级1）" in observation.text
+    assert "- 打击 x2（未知）" in observation.text
+    assert "- 电击+ x1（未知）" in observation.text
     assert "[font_size" not in observation.text
     for snippet in expected_snippets:
         assert snippet in observation.text
