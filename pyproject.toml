@@ -8,6 +8,7 @@ dependencies = [
 
 [project.scripts]
 play-sts2-battle = "play_sts2.runtime.cli:main"
+play-sts2-model = "play_sts2.inference.cli:main"
 play-sts2-record = "play_sts2.recording.cli:main"
 play-sts2-transcribe = "play_sts2.transcription.cli:main"
 
@@ -17,6 +18,9 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "ruff>=0.16.4"]
+inference = [
+    "mlx-lm>=0.31.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 
 [tool.pytest.ini_options]
 markers = [

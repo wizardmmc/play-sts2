@@ -71,9 +71,24 @@ LoRA adapter 是训练权重，不是另一套 Provider 实现。
 
 ## Qwen 战斗闭环
 
-`play-sts2-battle` 只连接模型服务，不直接加载模型。先在 `8900` 端口启动一个
-已经加载 Qwen 或 SFT 模型的 OpenAI-compatible 服务；`models/merged/` 中的
-Transformers BF16 模型需要先转换为对应推理后端的服务格式。
+在 Apple Silicon Mac 上先安装独立的本地推理依赖，并把合并后的 Transformers
+BF16 模型一次性转换为 MLX 8-bit：
+
+```bash
+uv sync --group inference
+uv run --group inference play-sts2-model prepare
+```
+
+转换不会修改 `models/merged/` 中的原模型，默认产物写入
+`models/serving/sft-clean-20260827-native-r16-e1-mlx-8bit/`。随后在一个终端启动
+带十个前缀缓存槽的模型服务，并在另一个终端验证模型能够生成合法 Harness 动作：
+
+```bash
+uv run --group inference play-sts2-model serve
+uv run play-sts2-model smoke
+```
+
+`play-sts2-battle` 只连接这个模型服务，不直接加载模型。
 
 让已经加载 Agent Mod 的 STS2 停在一个稳定战斗决策画面，再运行：
 
@@ -85,6 +100,12 @@ uv run play-sts2-battle
 分别传入 `--game-url` 和 `--model-url`。`BattleRunner` 会在一场战斗内保留对话
 历史，非法模型输出最多重试三次，等待异步动作重新进入可决策状态，并在胜利或
 角色死亡时返回。本阶段只负责当前战斗，不会自动选择地图、事件或奖励。
+
+真实战斗冒烟应使用 Agent Mod 的调试场景能力：以
+`STS2_ENABLE_DEBUG_ACTIONS=1` 启动隔离的测试游戏，再用 scenario 工具的
+`--fight <ENCOUNTER_ID>` 直接进入指定遭遇，最后运行 `play-sts2-battle`。场景工具
+可以同时指定卡组、遗物、药水和生命，因此适合构造稳定、短小、可重复的测试；
+这种调试局不得录入人类轨迹、SFT 数据或正式评测结果。
 
 ## 目录边界
 
