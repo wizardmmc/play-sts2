@@ -60,6 +60,12 @@ SFT 实现集中在 `src/play_sts2/training/sft/`：
 
 顶层 `play_sts2.training` 只保留稳定公共入口；CLI 直接依赖 SFT 包。
 
+CUDA 入口位于 `src/play_sts2/training/sft_cuda/`，使用独立配置和
+`play-sts2-train sft-cuda` 子命令。它与 Mac 入口共享数据编码、LoRA 装配和
+checkpoint 格式，但 CUDA 基座固定使用 BF16，并单独保存 CUDA RNG；LoRA
+可训练参数仍必须为 FP32。单次训练只使用一张卡，需要并行实验时最多启动两个
+独立单卡任务，不使用五卡 DDP。
+
 ## 当前 LoRA 配方
 
 `configs/sft.toml` 继承第二轮 adapter：
@@ -92,7 +98,7 @@ layer，并不是解冻 4B 基座：24 个 linear-attention layer 覆盖
 `checkpoint_steps = 2000` 表示每 2,000 个优化步覆盖同一个
 `runs/sft/<name>/checkpoint-last`，不会按步数生成无限多个 adapter 目录。
 checkpoint 同时保存约 55 MB LoRA 权重、约 110 MB AdamW 状态、样本游标、当前
-洗牌顺序和 CPU/MPS 随机状态；r16 实测净文件约 165 MB，按 180～200 MB 预算
+洗牌顺序和 CPU 及所选 MPS/CUDA 设备随机状态；r16 实测净文件约 165 MB，按 180～200 MB 预算
 可以给文件系统元数据留出余量。权重与训练状态在同一
 暂存目录写完后再原子切换，避免恢复到不同 step。最终 adapter 仍通过暂存目录
 原子发布。若中断发生在 checkpoint 之后，恢复会原子截掉领先于 checkpoint 的
@@ -117,6 +123,14 @@ uv run --group training play-sts2-train sft \
   --name 20260828-sft-clean-native-r16-e3
 ```
 
+在 CUDA 机器上使用对应独立入口：
+
+```bash
+uv run --group training play-sts2-train sft-cuda \
+  --config configs/sft-cuda.toml \
+  --name 20260828-sft-clean-native-r16-e3
+```
+
 训练名必须以 `YYYYMMDD-` 开头。`init_adapter` 表示“用 E2 LoRA 初始化一个新的
 E3 运行”，不是恢复中断的同一运行，所以 manifest 仍记录
 `approximate_resume=true`。E3 运行中断后使用同名 `--resume`，会恢复优化器、
@@ -125,6 +139,15 @@ E3 运行”，不是恢复中断的同一运行，所以 manifest 仍记录
 ```bash
 uv run --group training play-sts2-train sft \
   --config configs/sft.toml \
+  --name 20260828-sft-clean-native-r16-e3 \
+  --resume
+```
+
+CUDA 续训使用同一名称和独立子命令：
+
+```bash
+uv run --group training play-sts2-train sft-cuda \
+  --config configs/sft-cuda.toml \
   --name 20260828-sft-clean-native-r16-e3 \
   --resume
 ```

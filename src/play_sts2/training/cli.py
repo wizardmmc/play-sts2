@@ -14,6 +14,7 @@ from .sft import (
     run_knowledge_evaluation,
     train_sft,
 )
+from .sft_cuda import load_cuda_sft_config, train_sft_cuda
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,6 +60,20 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--name", required=True, help="adapter 与 run 的目录名称")
     train.add_argument("--max-steps", type=int, help="限制优化步数，用于真实冒烟")
     train.add_argument(
+        "--resume",
+        action="store_true",
+        help="从同名运行的 checkpoint-last 精确恢复",
+    )
+
+    train_cuda = subparsers.add_parser("sft-cuda", help="使用独立 CUDA 实现训练 LoRA")
+    train_cuda.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/sft-cuda.toml"),
+    )
+    train_cuda.add_argument("--name", required=True, help="adapter 与 run 的目录名称")
+    train_cuda.add_argument("--max-steps", type=int, help="限制优化步数，用于真实冒烟")
+    train_cuda.add_argument(
         "--resume",
         action="store_true",
         help="从同名运行的 checkpoint-last 精确恢复",
@@ -141,6 +156,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "sft":
         config = load_sft_config(args.config)
         output = train_sft(
+            config,
+            args.name,
+            max_steps=args.max_steps,
+            exact_resume=args.resume,
+        )
+    elif args.command == "sft-cuda":
+        config = load_cuda_sft_config(args.config)
+        output = train_sft_cuda(
             config,
             args.name,
             max_steps=args.max_steps,

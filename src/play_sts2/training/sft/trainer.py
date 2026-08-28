@@ -470,10 +470,10 @@ def resolve_device(requested: str) -> str:
     """把 ``auto`` 解析为当前 PyTorch 可用设备。
 
     Args:
-        requested (str): ``auto``、``mps`` 或 ``cpu``。
+        requested (str): ``auto``、``mps``、``cpu`` 或显式 CUDA 设备。
 
     Raises:
-        SftTrainingError: 显式请求 MPS 但当前 PyTorch 不可用。
+        SftTrainingError: 显式请求的加速设备当前不可用。
 
     Returns:
         str: 可直接传给 PyTorch 的设备字符串。
@@ -484,7 +484,33 @@ def resolve_device(requested: str) -> str:
         return "mps" if torch.backends.mps.is_available() else "cpu"
     if requested == "mps" and not torch.backends.mps.is_available():
         raise SftTrainingError("当前 PyTorch 无法使用 MPS")
+    if requested.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise SftTrainingError("当前 PyTorch 无法使用 CUDA")
+        if requested == "cuda":
+            return f"cuda:{torch.cuda.current_device()}"
+        matched = re.fullmatch(r"cuda:(\d+)", requested)
+        if matched is None or int(matched.group(1)) >= torch.cuda.device_count():
+            raise SftTrainingError(f"当前 PyTorch 无法使用 {requested}")
     return requested
+
+
+def _base_model_dtype(device: str) -> Any:
+    """根据已解析设备选择基座模型精度。
+
+    Args:
+        device (str): 已规范化的 PyTorch 设备字符串。
+
+    Returns:
+        Any: MPS/CUDA 使用 BF16，CPU 使用 FP32。
+    """
+    import torch
+
+    return (
+        torch.bfloat16
+        if device == "mps" or device.startswith("cuda")
+        else torch.float32
+    )
 
 
 def _validate_optimization_checkpoint(
@@ -575,13 +601,15 @@ def _device_rng_state(device: str) -> Any | None:
         device (str): 当前 PyTorch 设备字符串。
 
     Returns:
-        Any | None: MPS 随机状态；CPU 训练不需要额外状态。
+        Any | None: MPS 或 CUDA 随机状态；CPU 训练不需要额外状态。
     """
-    if device != "mps":
-        return None
     import torch
 
-    return torch.mps.get_rng_state()
+    if device == "mps":
+        return torch.mps.get_rng_state()
+    if device.startswith("cuda"):
+        return torch.cuda.get_rng_state(device)
+    return None
 
 
 def _restore_device_rng_state(device: str, state: Any | None) -> None:
@@ -592,18 +620,21 @@ def _restore_device_rng_state(device: str, state: Any | None) -> None:
         state (Any | None): checkpoint 保存的设备随机状态。
 
     Raises:
-        SftTrainingError: MPS 精确续训缺少设备随机状态。
+        SftTrainingError: 加速设备精确续训缺少设备随机状态。
 
     Returns:
         None: 状态恢复完成后返回。
     """
-    if device != "mps":
+    if device == "cpu":
         return
     if state is None:
-        raise SftTrainingError("MPS checkpoint 缺少设备随机状态")
+        raise SftTrainingError(f"{device} checkpoint 缺少设备随机状态")
     import torch
 
-    torch.mps.set_rng_state(state.cpu())
+    if device == "mps":
+        torch.mps.set_rng_state(state.cpu())
+    elif device.startswith("cuda"):
+        torch.cuda.set_rng_state(state.cpu(), device)
 
 
 def attach_lora(
@@ -821,7 +852,6 @@ def _train_sft_locked(
     Returns:
         dict[str, Any]: 可序列化的最终训练清单。
     """
-    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     adapter_path = config.adapter_root / run_name
@@ -839,7 +869,7 @@ def _train_sft_locked(
     if config.init_adapter is not None and not exact_resume:
         _validate_init_adapter(config)
     device = resolve_device(config.device)
-    dtype = torch.bfloat16 if device == "mps" else torch.float32
+    dtype = _base_model_dtype(device)
     execution_runtime = {
         "device": device,
         "base_model_dtype": str(dtype).removeprefix("torch."),

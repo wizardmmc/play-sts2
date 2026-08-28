@@ -13,6 +13,10 @@ e2 adapter 初始化新的 E3 运行，使用
 怪池重点保留，高频常规动作按上限抽样，未列出的低频动作全部保留。运行
 `uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml` 重建正式分卷。
 
+`sft-cuda.toml` 使用同一数据和 LoRA 配方，但只允许 `cuda` 或 `cuda:N`，基座以
+BF16 加载，LoRA 可训练参数仍强制为 FP32。通过独立的 `sft-cuda` 子命令运行，
+不改变 Mac 默认配置和 `sft` 命令。
+
 `inference.toml` 是本地模型转换、服务、冒烟和游戏 Runner 共用的唯一模型选择。
 `artifact_id`、合并目录和 MLX 目录必须对应；默认预先指向下一轮 e3，因此 e3
 尚未合并和转换时，无参数命令会明确失败，不会回退到 e2。`no-think` 与 `think`

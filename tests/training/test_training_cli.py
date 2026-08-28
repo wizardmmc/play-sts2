@@ -146,6 +146,52 @@ def test_train_sft_command_passes_config_name_and_step_limit(
     assert '"optimizer_steps": 1' in capsys.readouterr().out
 
 
+def test_train_sft_cuda_command_uses_separate_backend(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """CUDA 子命令应只调用独立 CUDA 配置与训练入口。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Raises:
+        AssertionError: CUDA 命令误用了 Mac 训练入口或没有传递续训参数。
+
+    Returns:
+        None: 此测试不访问真实 GPU。
+    """
+    config = object()
+    calls: list[tuple[object, str, int | None, bool]] = []
+    monkeypatch.setattr(cli, "load_cuda_sft_config", lambda path: config)
+    monkeypatch.setattr(
+        cli,
+        "train_sft_cuda",
+        lambda value, name, max_steps=None, exact_resume=False: (
+            calls.append((value, name, max_steps, exact_resume))
+            or {"device": "cuda:0", "optimizer_steps": 1}
+        ),
+    )
+
+    result = cli.main(
+        [
+            "sft-cuda",
+            "--config",
+            "configs/sft-cuda.toml",
+            "--name",
+            "20260828-cuda-smoke",
+            "--max-steps",
+            "1",
+            "--resume",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [(config, "20260828-cuda-smoke", 1, True)]
+    assert '"device": "cuda:0"' in capsys.readouterr().out
+
+
 def test_eval_sft_command_uses_named_split(
     monkeypatch: object,
     capsys: object,
