@@ -241,21 +241,23 @@ uv run play-sts2-run --resume
 
 ## 确定性战斗场景
 
-`src/play_sts2/scenario/` 可以从任意残局重置出一场已核对的战斗。场景显式保存
-局种子、原总层数、遭遇、进阶、牌组、遗物、药水和生命；`BattleResetter` 会清理
-旧局、结算初始事件、装载配置，等待开场效果结束后设置生命，并返回可直接传给
-`BattleRunner.run()` 的状态。首次结果中的 `snapshot` 可作为后续 GRPO rollout 的
-入口核对基准。
+`src/play_sts2/scenario/` 可以在同一个长期存活的游戏进程中，从任意残局重置出一场
+已核对的战斗。场景显式保存局种子、原总层数、遭遇、进阶、牌组（含升级与附魔）、
+遗物、带空槽位置的药水栏和当前/最大生命。`BattleResetter` 会清理旧局，跳过 Neow
+奖励直接装载并进入战斗，等待开场效果结束后设置生命，再返回可直接传给
+`BattleRunner.run()` 的状态。首次结果中的 `snapshot` 同时保存模型实际收到的中文
+system/user 输入与合法动作域，可作为后续 GRPO rollout 的入口核对基准。
 
 真实游戏的复现测试使用：
 
 ```bash
-uv run pytest e2e/test_battle_scenario.py --run-e2e
+uv run pytest e2e/scenario --run-e2e
 ```
 
-该测试在隔离 HOME 中重复创建同一场景，比较敌人组成与 HP、初始手牌和意图，
-并比较固定空过一回合后的第二回合手牌与意图。不同模型动作轨迹无需保持后续
-手牌顺序一致。场景使用的 `scenariofight` 和 `loadout` 都受
+这些测试在隔离 HOME 中重复创建同一场景，比较实际中文模型输入、敌人组成、
+初始手牌和意图，并覆盖附魔数值与药水空槽位置；固定空过一回合的测试还比较
+第二回合状态。不同模型动作轨迹无需保持后续手牌顺序一致。场景使用的
+`scenariofight` 和 `loadout` 都受
 `STS2_ENABLE_DEBUG_ACTIONS=1` 保护；这种调试局不得录入人类轨迹、SFT 数据或
 正式评测结果。
 

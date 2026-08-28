@@ -145,6 +145,13 @@ def _render_combat(state: Mapping[str, Any]) -> str:
             )
         )
 
+    relic_ui_states = _format_relic_ui_states(
+        (state.get("run") or {}).get("relics") or []
+    )
+    if relic_ui_states:
+        lines.append("遗物UI:")
+        lines.extend(f"  {relic_state}" for relic_state in relic_ui_states)
+
     lines.append("敌人:")
     lines.extend(_format_enemy(enemy) for enemy in combat.get("enemies") or [])
     lines.append("手牌:")
@@ -579,12 +586,31 @@ def _format_card(card: Mapping[str, Any]) -> str:
     rules = _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
     if rules:
         parts.append(rules)
+    highlight = _format_card_highlight(card)
+    if highlight:
+        parts.append(highlight)
     if card.get("selected"):
         parts.append("(已选择)")
     if card.get("playable") is False:
         reason = _clean_text(card.get("unplayable_reason"))
         parts.append(f"(不可使用{f': {reason}' if reason else ''})")
     return " ".join(part for part in parts if part)
+
+
+def _format_card_highlight(card: Mapping[str, Any]) -> str:
+    """把游戏手牌 UI 的金红高亮翻译为通用语义。
+
+    Args:
+        card (Mapping[str, Any]): Mod 返回的手牌描述。
+
+    Returns:
+        str: 红光优先于金光；没有特殊高亮时为空。
+    """
+    if card.get("should_glow_red") is True:
+        return "〔红光：不利条件生效〕"
+    if card.get("playable") is True and card.get("should_glow_gold") is True:
+        return "〔金光：有利条件满足〕"
+    return ""
 
 
 def _card_name(card: Mapping[str, Any]) -> str:
@@ -758,7 +784,48 @@ def _format_visible_pile(
         return []
     if not lines:
         return [f"{name}（{total}张）: 内容不可见"]
-    return [f"{name}（{total}张）: {lines[0]}", *(f"  {line}" for line in lines[1:])]
+    return [f"{name}（{total}张）:", *(f"  {line}" for line in lines)]
+
+
+def _format_relic_ui_states(
+    relics: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """渲染游戏实际显示的遗物计数、激活和禁用状态。
+
+    Args:
+        relics (Sequence[Mapping[str, Any]]): 当前玩家持有的遗物。
+
+    Returns:
+        list[str]: 仅包含存在动态 UI 状态的遗物行。
+    """
+    lines = []
+    status_names = {
+        "active": "已高亮",
+        "disabled": "已禁用",
+    }
+    for fallback_index, relic in enumerate(relics):
+        states = []
+        counter_value = relic.get("counter_value")
+        if (
+            relic.get("show_counter") is True
+            and isinstance(counter_value, int)
+            and not isinstance(counter_value, bool)
+        ):
+            states.append(f"计数 {counter_value}")
+        status = _clean_text(relic.get("status"))
+        normalized_status = status.lower()
+        if normalized_status in status_names:
+            states.append(status_names[normalized_status])
+        elif normalized_status and normalized_status != "normal":
+            states.append(f"状态 {status}")
+        if relic.get("is_used_up") is True:
+            states.append("已耗尽")
+        if not states:
+            continue
+        index = relic.get("index", fallback_index)
+        name = _clean_text(relic.get("name")) or "未知遗物"
+        lines.append(f"[{index}] {name}〔{'；'.join(states)}〕")
+    return lines
 
 
 def _visible_pile_line(entry: Any) -> str:

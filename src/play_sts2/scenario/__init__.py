@@ -6,6 +6,7 @@ from .models import (
     CardSnapshot,
     EnemySnapshot,
     IntentSnapshot,
+    ModelInputSnapshot,
     ScenarioResetResult,
 )
 from .resetter import BattleResetError, BattleResetter
@@ -23,6 +24,7 @@ __all__ = [
     "CardSnapshot",
     "EnemySnapshot",
     "IntentSnapshot",
+    "ModelInputSnapshot",
     "ScenarioResetResult",
     "ScenarioVerificationError",
     "capture_battle_snapshot",

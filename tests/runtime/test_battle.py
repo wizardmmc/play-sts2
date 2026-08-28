@@ -90,7 +90,9 @@ class PendingBattleGame:
         self.state_calls += 1
         if self.state_calls == 1:
             return _combat_state(turn=2, available_actions=[])
-        return _combat_state(turn=2)
+        state = _combat_state(turn=2)
+        state["combat"]["player"]["energy"] = 2
+        return state
 
 
 class FinishingBattleGame:
@@ -256,8 +258,10 @@ def test_battle_runner_uses_stateless_steps_and_waits_for_pending_action() -> No
     assert game.state_calls == 2
     assert tuple(message.role for message in provider.requests[1]) == ("system", "user")
     assert "对话历史" not in provider.requests[1][0].content
-    assert "【当前回合】2" in provider.requests[1][0].content
+    assert provider.requests[1][0].content == provider.requests[0][0].content
+    assert "【当前回合】" not in provider.requests[1][0].content
     assert provider.requests[1][-1].content.startswith("玩家:")
+    assert "能量2" in provider.requests[1][-1].content
     assert "角色:" not in provider.requests[1][-1].content
 
 

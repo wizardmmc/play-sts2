@@ -60,8 +60,7 @@ def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -
     assert "ACTION: end_turn" in battle_text
     assert battle_text.count("【遗物】") == 2
     assert battle_text.count("- [0] 破损核心: 战斗开始时生成1个闪电充能球。") == 2
-    assert battle_text.count("【当前回合】1") == 2
-    assert "【当前回合】\n" not in battle_text
+    assert "【当前回合】" not in battle_text
     assert "角色:" not in battle_text
     assert "牌组 " not in battle_text
     assert "遗物效果:" not in battle_text

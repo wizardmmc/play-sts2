@@ -572,10 +572,13 @@ def test_build_observation_renders_combat_decision() -> None:
     )
     assert "对一个敌人造成20点伤害。" in observation.text
     assert "本回合已打出: 卡牌 3 | 攻击 1 | 技能 2" in observation.text
-    assert "抽牌堆（4张）: 打击*2(1费) 造成6点伤害。" in observation.text
-    assert "电击(1费) 生成1个闪电充能球。" in observation.text
-    assert "弃牌堆（2张）: 防御*2(1费) 获得5点格挡。" in observation.text
-    assert "消耗牌堆（1张）: 白噪声(1费) 加入一张能力牌。" in observation.text
+    assert (
+        "抽牌堆（4张）:\n"
+        "  打击*2(1费) 造成6点伤害。\n"
+        "  电击(1费) 生成1个闪电充能球。" in observation.text
+    )
+    assert "弃牌堆（2张）:\n  防御*2(1费) 获得5点格挡。" in observation.text
+    assert "消耗牌堆（1张）:\n  白噪声(1费) 加入一张能力牌。" in observation.text
     assert "遗物效果:" not in observation.text
     assert "危险: 预计承受6点未格挡伤害，足以致命。" in observation.text
     assert observation.text.endswith(
@@ -585,6 +588,158 @@ def test_build_observation_renders_combat_decision() -> None:
         "- discard_potion(option_index)\n"
         "- end_turn"
     )
+
+
+def test_combat_observation_renders_generic_card_and_relic_ui_state() -> None:
+    """游戏提供的高亮与遗物 UI 状态按通用字段进入战斗观测。
+
+    Raises:
+        AssertionError: Harness 丢失金红高亮、计数、激活或禁用状态。
+
+    Returns:
+        None: 此测试只核对与具体卡牌、遗物 ID 无关的展示契约。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "turn": 1,
+        "available_actions": ["play_card", "end_turn"],
+        "run": {
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "双截棍",
+                    "show_counter": True,
+                    "counter_value": 9,
+                    "status": "Active",
+                    "is_used_up": False,
+                },
+                {
+                    "index": 1,
+                    "name": "翼靴",
+                    "show_counter": True,
+                    "counter_value": 2,
+                    "status": "Disabled",
+                    "is_used_up": True,
+                },
+                {
+                    "index": 2,
+                    "name": "普通遗物",
+                    "show_counter": False,
+                    "status": "Normal",
+                    "is_used_up": False,
+                },
+            ],
+            "potions": [],
+        },
+        "combat": {
+            "player": {
+                "current_hp": 70,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 3,
+                "stars": 0,
+            },
+            "enemies": [],
+            "hand": [
+                {
+                    "index": 0,
+                    "name": "正面条件牌",
+                    "energy_cost": 0,
+                    "star_cost": 0,
+                    "resolved_rules_text": "造成5点伤害。",
+                    "target_type": "AnyEnemy",
+                    "playable": True,
+                    "should_glow_gold": True,
+                    "should_glow_red": False,
+                },
+                {
+                    "index": 1,
+                    "name": "负面限制牌",
+                    "energy_cost": 1,
+                    "star_cost": 0,
+                    "resolved_rules_text": "不能被打出。",
+                    "target_type": "Self",
+                    "playable": False,
+                    "unplayable_reason": "unplayable",
+                    "should_glow_gold": False,
+                    "should_glow_red": True,
+                },
+            ],
+            "draw_count": 0,
+            "discard_count": 0,
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "遗物UI:\n  [0] 双截棍〔计数 9；已高亮〕" in observation.text
+    assert "  [1] 翼靴〔计数 2；已禁用；已耗尽〕" in observation.text
+    assert "普通遗物" not in observation.text
+    assert (
+        "[0]正面条件牌(0费)<AnyEnemy> 造成5点伤害。 "
+        "〔金光：有利条件满足〕" in observation.text
+    )
+    assert (
+        "[1]负面限制牌(1费) 不能被打出。 "
+        "〔红光：不利条件生效〕 (不可使用: unplayable)" in observation.text
+    )
+
+
+def test_combat_observation_does_not_invent_missing_relic_counter() -> None:
+    """遗物声明显示计数但没有数值时，不把缺失值伪装成零。
+
+    Raises:
+        AssertionError: Harness 输出了未由 Mod 提供的计数值。
+
+    Returns:
+        None: 此测试验证计数缺失与其他 UI 状态相互独立。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
+        "run": {
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "缺失计数",
+                    "show_counter": True,
+                    "status": "Normal",
+                },
+                {
+                    "index": 1,
+                    "name": "仅有高亮",
+                    "show_counter": True,
+                    "counter_value": None,
+                    "status": "Active",
+                },
+            ],
+            "potions": [],
+        },
+        "combat": {
+            "player": {
+                "current_hp": 70,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 3,
+                "stars": 0,
+            },
+            "enemies": [],
+            "hand": [],
+            "draw_count": 0,
+            "discard_count": 0,
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "缺失计数" not in observation.text
+    assert "[1] 仅有高亮〔已高亮〕" in observation.text
+    assert "计数 0" not in observation.text
+    assert "计数 None" not in observation.text
 
 
 def test_combat_observation_translates_every_recorded_intent_type() -> None:
@@ -687,6 +842,7 @@ def test_build_observation_renders_complete_strategic_map_context() -> None:
                     "index": 0,
                     "name": "破损核心",
                     "description": "生成1个闪电充能球。",
+                    "stack_count": 2,
                 }
             ],
             "deck": [
@@ -776,7 +932,7 @@ def test_build_observation_renders_complete_strategic_map_context() -> None:
     assert "【当前状态】" in observation.text
     assert "HP 60/75 | 金币110 | 第2层" in observation.text
     assert "药水栏 1/2: [0] - [1] 火焰药水（造成20点伤害。）" in observation.text
-    assert "遗物: 破损核心（生成1个闪电充能球。）" in observation.text
+    assert "遗物: 破损核心×2（生成1个闪电充能球。）" in observation.text
     assert "牌组 3 张（升级1）" in observation.text
     assert "- 打击 x2（1费攻击）" in observation.text
     assert "- 电击+ x1（0费技能）" in observation.text

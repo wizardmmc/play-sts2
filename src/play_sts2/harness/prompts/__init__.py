@@ -8,7 +8,12 @@ from typing import Any
 from ..ownership import HarnessLayer
 
 _MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
-_RESOURCE_PATTERN = re.compile(r"res://\S+?\.png")
+_RESOURCE_ICON_PATTERN = re.compile(
+    r"(?:\[img\])?(res://[^\[\]\s]+?\.[A-Za-z0-9]+)(?:\[/img\])?",
+    re.IGNORECASE,
+)
+_ENERGY_TOKEN = "\ue000"
+_STAR_TOKEN = "\ue001"
 
 
 def system_prompt(
@@ -32,9 +37,7 @@ def system_prompt(
     prompt_file = resources.files(__package__).joinpath(f"{layer.value}.txt")
     prompt = prompt_file.read_text(encoding="utf-8").rstrip()
     if layer is HarnessLayer.BATTLE and state is not None:
-        prompt = (
-            f"{prompt}\n\n【当前回合】{state.get('turn', 0)}\n\n{_render_relics(state)}"
-        )
+        prompt = f"{prompt}\n\n{_render_relics(state)}"
     return prompt
 
 
@@ -67,7 +70,7 @@ def _render_relics(state: Mapping[str, Any]) -> str:
 
 
 def _clean_text(value: Any) -> str:
-    """移除游戏富文本标记和资源路径。
+    """翻译资源图标并移除其余游戏富文本标记和资源路径。
 
     Args:
         value (Any): Mod 返回的可空文本值。
@@ -75,8 +78,49 @@ def _clean_text(value: Any) -> str:
     Returns:
         str: 适合直接进入模型提示词的单行文本。
     """
-    text = _RESOURCE_PATTERN.sub("", str(value or ""))
-    return " ".join(_MARKUP_PATTERN.sub("", text).split())
+    text = _RESOURCE_ICON_PATTERN.sub(_replace_resource_icon, str(value or ""))
+    text = _MARKUP_PATTERN.sub("", text)
+    text = _expand_resource_tokens(text, _ENERGY_TOKEN, "能量")
+    text = _expand_resource_tokens(text, _STAR_TOKEN, "星能")
+    return " ".join(text.split())
+
+
+def _replace_resource_icon(match: re.Match[str]) -> str:
+    """把通用资源图标替换为等待计数展开的内部标记。
+
+    Args:
+        match (re.Match[str]): 含完整 ``[img]`` 标记和资源路径的匹配。
+
+    Returns:
+        str: 能量、星能内部标记；未知图片转换为明确的缺失语义标记。
+    """
+    filename = match.group(1).rsplit("/", 1)[-1].casefold()
+    stem = filename.rsplit(".", 1)[0]
+    if stem.endswith("_energy_icon"):
+        return _ENERGY_TOKEN
+    if stem == "star_icon":
+        return _STAR_TOKEN
+    return f"〔未知图标: {stem}〕"
+
+
+def _expand_resource_tokens(text: str, token: str, resource_name: str) -> str:
+    """把显式数值或连续图标转换为带数量的资源文本。
+
+    Args:
+        text (str): 已移除富文本标签、仍含内部资源标记的文本。
+        token (str): 当前资源的单字符内部标记。
+        resource_name (str): 输出使用的中文资源名称。
+
+    Returns:
+        str: ``4 + 图标`` 和连续图标均转换为明确数量后的文本。
+    """
+    return re.sub(
+        rf"(?:(\d+)\s*点?\s*)?({token}+)",
+        lambda match: (
+            f"{match.group(1) or len(match.group(2))}点{resource_name}"
+        ),
+        text,
+    )
 
 
 __all__ = ["system_prompt"]

@@ -26,6 +26,21 @@ def test_battle_scenario_rejects_empty_relics() -> None:
             encounter_id="CULTISTS_NORMAL",
             deck=("ZAP",),
             relics=(),
+            current_hp=70,
+            max_hp=70,
+        )
+
+
+def test_battle_scenario_requires_complete_hp_pair() -> None:
+    """精确战斗入口必须显式固定当前与最大生命值。"""
+    with pytest.raises(ValueError, match="当前和最大生命值"):
+        BattleScenario(
+            character_id="DEFECT",
+            seed="ABCDEF1234",
+            floor=7,
+            encounter_id="CULTISTS_NORMAL",
+            deck=("ZAP",),
+            relics=("CRACKED_CORE",),
         )
 
 
@@ -101,6 +116,76 @@ def test_verify_battle_scenario_distinguishes_upgrade_levels() -> None:
         verify_battle_scenario(scenario, state)
 
 
+def test_verify_battle_scenario_preserves_card_enchantment() -> None:
+    """附魔 ID 与层数必须同时进入牌组核对和战斗快照。"""
+    scenario = BattleScenario(
+        character_id="DEFECT",
+        seed="ABCDEF1234",
+        floor=7,
+        encounter_id="CULTISTS_NORMAL",
+        deck=("CHARGE_BATTERY@NIMBLE:2",),
+        relics=("CRACKED_CORE", "ORICHALCUM:m"),
+        potions=("FIRE_POTION",),
+        potion_slots=3,
+        current_hp=41,
+        max_hp=70,
+        ascension=2,
+    )
+    state = _combat_state()
+    enchanted = {
+        "index": 0,
+        "card_id": "CHARGE_BATTERY",
+        "upgraded": False,
+        "upgrade_level": 0,
+        "enchantment_id": "NIMBLE",
+        "enchantment_amount": 2,
+    }
+    state["run"]["deck"] = [dict(enchanted)]
+    state["combat"]["hand"] = [dict(enchanted)]
+
+    snapshot = verify_battle_scenario(scenario, state)
+
+    assert snapshot.hand[0].enchantment_id == "NIMBLE"
+    assert snapshot.hand[0].enchantment_amount == 2
+
+    state["run"]["deck"][0]["enchantment_id"] = None
+    state["run"]["deck"][0]["enchantment_amount"] = None
+    with pytest.raises(ScenarioVerificationError, match="牌组不一致"):
+        verify_battle_scenario(scenario, state)
+
+
+def test_verify_battle_scenario_preserves_sparse_potion_slots() -> None:
+    """空槽属于药水动作索引，必须逐槽核对而不是压缩。"""
+    scenario = BattleScenario(
+        character_id="DEFECT",
+        seed="ABCDEF1234",
+        floor=7,
+        encounter_id="CULTISTS_NORMAL",
+        deck=("ZAP+1", "STRIKE_DEFECTx2"),
+        relics=("CRACKED_CORE", "ORICHALCUM:m"),
+        potions=(None, "FIRE_POTION", None),
+        potion_slots=3,
+        current_hp=41,
+        max_hp=70,
+        ascension=2,
+    )
+    state = _combat_state()
+    state["run"]["potions"] = [
+        {"index": 0, "potion_id": None, "occupied": False},
+        {"index": 1, "potion_id": "FIRE_POTION", "occupied": True},
+        {"index": 2, "potion_id": None, "occupied": False},
+    ]
+
+    verify_battle_scenario(scenario, state)
+
+    state["run"]["potions"][0], state["run"]["potions"][1] = (
+        state["run"]["potions"][1],
+        state["run"]["potions"][0],
+    )
+    with pytest.raises(ScenarioVerificationError, match="药水栏不一致"):
+        verify_battle_scenario(scenario, state)
+
+
 def test_verify_battle_scenario_rejects_different_initial_hand() -> None:
     """对照基准快照时拒绝不同的初始手牌。
 
@@ -127,6 +212,33 @@ def test_verify_battle_scenario_rejects_different_initial_hand() -> None:
     changed = _combat_state()
     changed["combat"]["hand"].reverse()
 
+    with pytest.raises(ScenarioVerificationError, match="初始战斗快照不一致"):
+        verify_battle_scenario(scenario, changed, expected_snapshot=baseline)
+
+
+def test_verify_battle_scenario_compares_actual_chinese_model_input() -> None:
+    """入口基准覆盖模型真正看到的中文观测，而不是继续枚举内部字段。"""
+    scenario = BattleScenario(
+        character_id="DEFECT",
+        seed="ABCDEF1234",
+        floor=7,
+        encounter_id="CULTISTS_NORMAL",
+        deck=("ZAP+1", "STRIKE_DEFECTx2"),
+        relics=("CRACKED_CORE", "ORICHALCUM:m"),
+        potions=("FIRE_POTION",),
+        potion_slots=3,
+        current_hp=41,
+        max_hp=70,
+        ascension=2,
+    )
+    baseline = verify_battle_scenario(scenario, _combat_state())
+
+    assert "玩家: HP 41/70 | 格挡0" in baseline.model_input.user
+    assert "可执行动作:" in baseline.model_input.user
+    assert "【遗物】" in baseline.model_input.system
+
+    changed = _combat_state()
+    changed["combat"]["player"]["block"] = 1
     with pytest.raises(ScenarioVerificationError, match="初始战斗快照不一致"):
         verify_battle_scenario(scenario, changed, expected_snapshot=baseline)
 

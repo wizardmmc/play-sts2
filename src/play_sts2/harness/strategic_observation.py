@@ -193,9 +193,9 @@ def _render_relics(relics: Sequence[Mapping[str, Any]]) -> str:
     for relic in relics:
         name = _clean_text(relic.get("name")) or "未知遗物"
         description = _clean_text(relic.get("description"))
-        stack = relic.get("stack")
-        if stack is not None:
-            name = f"{name}×{stack}"
+        stack_count = relic.get("stack_count", relic.get("stack"))
+        if isinstance(stack_count, int) and stack_count > 1:
+            name = f"{name}×{stack_count}"
         values.append(f"{name}（{description}）" if description else name)
     return f"遗物: {', '.join(values) if values else '无'}"
 

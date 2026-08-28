@@ -107,9 +107,7 @@ class ScriptedClient:
                     "character_id": "DEFECT",
                     "ascension": 0,
                     "floor": 0,
-                    "potions": [
-                        {"index": 0, "potion_id": "BLOCK_POTION", "occupied": True}
-                    ],
+                    "potions": [],
                 },
             }
         elif action == "choose_event_option":
@@ -193,14 +191,12 @@ def test_reset_replaces_stale_run_and_returns_verified_battle() -> None:
         ("select_character", {"option_index": 4}),
         ("set_seed", {"game_seed": "ABCDEF1234"}),
         ("embark", {}),
-        ("choose_event_option", {"option_index": 0}),
-        ("discard_potion", {"option_index": 0}),
         (
             "run_console_command",
             {
                 "command": (
                     "loadout cards=ZAP+1,STRIKE_DEFECTx2 "
-                    "relics=CRACKED_CORE potion_slots=1"
+                    "relics=CRACKED_CORE potions=_ potion_slots=1"
                 )
             },
         ),

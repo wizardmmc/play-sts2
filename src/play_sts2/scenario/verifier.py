@@ -4,16 +4,20 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..harness import ObservationError, build_observation, system_prompt
 from .models import (
     BattleScenario,
     BattleSnapshot,
     CardSnapshot,
     EnemySnapshot,
     IntentSnapshot,
+    ModelInputSnapshot,
 )
 
 _CARD_TOKEN = re.compile(
     r"^(?P<id>[A-Z0-9_]+)(?:\+(?P<upgrade>[1-9][0-9]*))?"
+    r"(?:@(?P<enchantment>[A-Z0-9_]+)"
+    r"(?::(?P<enchantment_amount>[1-9][0-9]*))?)?"
     r"(?:x(?P<count>[1-9][0-9]*))?$"
 )
 
@@ -91,6 +95,8 @@ def _verify_run(scenario: BattleScenario, run: Mapping[str, Any]) -> None:
         (
             card.get("card_id"),
             _integer(card.get("upgrade_level"), "牌组升级等级"),
+            _optional_text(card.get("enchantment_id"), "牌组附魔 ID"),
+            _optional_integer(card.get("enchantment_amount"), "牌组附魔层数"),
         )
         for card in _mapping_items(run.get("deck"), "牌组")
     )
@@ -108,12 +114,28 @@ def _verify_run(scenario: BattleScenario, run: Mapping[str, Any]) -> None:
     potion_slots = _mapping_items(run.get("potions"), "药水栏")
     if scenario.potion_slots is not None:
         _expect(len(potion_slots), scenario.potion_slots, "药水栏容量")
-    actual_potions = tuple(
-        potion.get("potion_id")
-        for potion in potion_slots
-        if potion.get("occupied") is True or potion.get("potion_id") is not None
-    )
-    _expect(actual_potions, scenario.potions, "药水")
+        actual_potions = tuple(
+            (
+                _integer(potion.get("index"), "药水栏索引"),
+                _optional_text(potion.get("potion_id"), "药水 ID"),
+            )
+            for potion in potion_slots
+        )
+        expected_slots = scenario.potions + (None,) * (
+            scenario.potion_slots - len(scenario.potions)
+        )
+        _expect(
+            actual_potions,
+            tuple(enumerate(expected_slots)),
+            "药水栏",
+        )
+    else:
+        actual_potions = tuple(
+            potion.get("potion_id")
+            for potion in potion_slots
+            if potion.get("occupied") is True or potion.get("potion_id") is not None
+        )
+        _expect(actual_potions, scenario.potions, "药水")
 
     if scenario.current_hp is not None:
         _expect(run.get("current_hp"), scenario.current_hp, "当前生命值")
@@ -145,6 +167,12 @@ def _capture_snapshot(
             index=_integer(card.get("index"), "手牌索引"),
             card_id=_text(card.get("card_id"), "手牌 ID"),
             upgrade_level=_integer(card.get("upgrade_level"), "手牌升级等级"),
+            enchantment_id=_optional_text(
+                card.get("enchantment_id"), "手牌附魔 ID"
+            ),
+            enchantment_amount=_optional_integer(
+                card.get("enchantment_amount"), "手牌附魔层数"
+            ),
         )
         for card in _mapping_items(combat.get("hand"), "手牌")
     )
@@ -164,7 +192,21 @@ def _capture_snapshot(
     )
     if not enemies:
         raise ScenarioVerificationError("战斗中没有敌人")
-    return BattleSnapshot(turn=turn, enemies=enemies, hand=hand)
+    try:
+        observation = build_observation(state)
+    except ObservationError as exc:
+        raise ScenarioVerificationError("战斗入口无法生成模型观测") from exc
+    model_input = ModelInputSnapshot(
+        system=system_prompt(observation.layer, state),
+        user=observation.text,
+        available_actions=observation.available_actions,
+    )
+    return BattleSnapshot(
+        turn=turn,
+        enemies=enemies,
+        hand=hand,
+        model_input=model_input,
+    )
 
 
 def _intent_snapshot(intent: Mapping[str, Any]) -> IntentSnapshot:
@@ -192,7 +234,9 @@ def _intent_snapshot(intent: Mapping[str, Any]) -> IntentSnapshot:
     )
 
 
-def _expand_deck(tokens: Sequence[str]) -> tuple[tuple[str, int], ...]:
+def _expand_deck(
+    tokens: Sequence[str],
+) -> tuple[tuple[str, int, str | None, int | None], ...]:
     """把紧凑的 ``loadout`` 牌组 token 展开为有序牌列表。
 
     Args:
@@ -202,14 +246,23 @@ def _expand_deck(tokens: Sequence[str]) -> tuple[tuple[str, int], ...]:
         ScenarioVerificationError: token 未满足场景模型的语法约束。
 
     Returns:
-        tuple[tuple[str, int], ...]: 有序的卡牌 ID 与升级等级。
+        tuple[tuple[str, int, str | None, int | None], ...]: 有序的卡牌 ID、
+            升级等级、附魔 ID 与附魔层数。
     """
-    cards: list[tuple[str, int]] = []
+    cards: list[tuple[str, int, str | None, int | None]] = []
     for token in tokens:
         match = _CARD_TOKEN.fullmatch(token)
         if match is None:
             raise ScenarioVerificationError(f"牌组 token 无效: {token}")
-        card = (match.group("id"), int(match.group("upgrade") or 0))
+        enchantment = match.group("enchantment")
+        card = (
+            match.group("id"),
+            int(match.group("upgrade") or 0),
+            enchantment,
+            int(match.group("enchantment_amount") or 1)
+            if enchantment is not None
+            else None,
+        )
         cards.extend((card,) * int(match.group("count") or 1))
     return tuple(cards)
 

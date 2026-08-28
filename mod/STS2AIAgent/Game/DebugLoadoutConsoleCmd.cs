@@ -17,15 +17,18 @@ namespace STS2AIAgent.Game;
 
 /// <summary>
 /// 仅用于开发的场景命令，以原子方式布置战斗入口状态：
-///   loadout cards=ZAP+1,COOLHEADEDx2 [relics=ORICHALCUM:m,...] [relics_obtain=ID,...]
-///          [potions=ID,...] [potion_slots=5] [hp=65/82]
+///   loadout cards=ZAP+1,CHARGE_BATTERY@NIMBLE:2 [relics=ORICHALCUM:m,...]
+///          [relics_obtain=ID,...]
+///          [potions=_,ID,_] [potion_slots=3] [hp=65/82]
 /// 卡牌后缀 "+N" 表示创建时已经升级 N 次；超过 MaxUpgradeLevel 会被拒绝。
+/// "@ENCHANTMENT[:AMOUNT]" 使用游戏原生 CardCmd.Enchant 恢复附魔，层数默认 1。
 /// 遗物后缀 ":m" 表示以玩具箱蜡制副本的形式授予，并处于融化耗尽状态。
 /// "relics=" 使用存档读写同款的底层操作静默替换遗物，不触发拾取效果，
 /// 因而不会触发 WAR_PAINT 随机升级、TOY_BOX 生成蜡制遗物、融化遗物复活，
 /// 也不会改动遗物随机袋。"relics_obtain=" 保留 RelicCmd.Obtain 的拾取语义，
 /// 用于测试拾取效果，并与 "relics=" 互斥。
-/// "potion_slots=" 设置药水栏容量；静默授予不会触发 POTION_BELT 的容量加成。
+/// "potions=" 使用 "_" 保留空槽位置；药水栏会被静默逐槽替换，不触发
+/// 获得/丢弃钩子、历史记录或 POTION_BELT 的容量加成。
 /// "hp=" 直接设置战斗内外的当前生命值和可选最大生命值。应用任何改动之前，
 /// 所有标识和值都会通过 ModelDb 和当前玩家状态完成校验，避免错误输入留下
 /// 只应用一半的局面。该命令只用于构建可控的测试和训练入口状态。
@@ -33,14 +36,21 @@ namespace STS2AIAgent.Game;
 public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
 {
     private static readonly Regex CardToken = new(
-        @"^(?<id>[A-Z0-9_]+?)(?:\+(?<up>[1-9][0-9]*))?(?:x(?<count>[1-9][0-9]*))?$",
+        @"^(?<id>[A-Z0-9_]+?)(?:\+(?<up>[1-9][0-9]*))?" +
+        @"(?:@(?<enchant>[A-Z0-9_]+)(?::(?<enchantAmount>[1-9][0-9]*))?)?" +
+        @"(?:x(?<count>[1-9][0-9]*))?$",
         RegexOptions.Compiled);
     private static readonly Regex RelicToken = new(@"^(?<id>[A-Z0-9_]+?)(?::m)?$", RegexOptions.Compiled);
     private static readonly Regex HpToken = new(@"^(?<cur>[1-9][0-9]*)(?:/(?<max>[1-9][0-9]*))?$", RegexOptions.Compiled);
 
     private const int MaxPotionSlots = 10;
 
-    private sealed record CardSpec(CardModel Template, int UpgradeLevel, int Count);
+    private sealed record CardSpec(
+        CardModel Template,
+        int UpgradeLevel,
+        EnchantmentModel? Enchantment,
+        int EnchantmentAmount,
+        int Count);
     private sealed record RelicSpec(RelicModel Template, bool Melted);
     private sealed record HpSpec(int Current, int? Max);
 
@@ -48,17 +58,17 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         IReadOnlyList<CardSpec> Cards,
         IReadOnlyList<RelicSpec>? Relics,
         IReadOnlyList<RelicModel>? RelicsObtain,
-        IReadOnlyList<PotionModel> Potions,
+        IReadOnlyList<PotionModel?>? Potions,
         int? PotionSlots,
         HpSpec? Hp);
 
     public override string CmdName => "loadout";
 
     public override string Args =>
-        "cards=<ID[+N][xN],...> [relics=<ID[:m],...>] [relics_obtain=<ID,...>] [potions=<ID,...>] [potion_slots=<n>] [hp=<cur>[/max]]";
+        "cards=<ID[+N][@ENCHANTMENT[:AMOUNT]][xN],...> [relics=<ID[:m],...>] [relics_obtain=<ID,...>] [potions=<ID|_,...>] [potion_slots=<n>] [hp=<cur>[/max]]";
 
     public override string Description =>
-        "Replaces run deck (with upgrades); inertly sets relics (with melted wax); sizes potion belt; adds potions; sets HP (dev-only, atomic).";
+        "Replaces run deck (with upgrades and enchantments); inertly sets relics (with melted wax); sizes potion belt; adds potions; sets HP (dev-only, atomic).";
 
     public override bool IsNetworked => true;
 
@@ -143,7 +153,7 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         {
             return new CmdResult(success: false, obtainError);
         }
-        IReadOnlyList<PotionModel>? potions = null;
+        IReadOnlyList<PotionModel?>? potions = null;
         if (potionsSpec != null && !TryParsePotions(potionsSpec, out potions, out var potionsError))
         {
             return new CmdResult(success: false, potionsError);
@@ -157,6 +167,13 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
                     success: false, $"potion_slots must be an int in 1-{MaxPotionSlots}, got '{potionSlotsSpec}'.");
             }
             potionSlots = slots;
+        }
+        var targetPotionSlots = potionSlots ?? player.PotionSlots.Count;
+        if (potions != null && potions.Count > targetPotionSlots)
+        {
+            return new CmdResult(
+                success: false,
+                $"potions contains {potions.Count} slots but target belt has {targetPotionSlots}.");
         }
         HpSpec? hp = null;
         if (hpSpec != null)
@@ -179,7 +196,7 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         }
 
         var spec = new LoadoutSpec(cards ?? Array.Empty<CardSpec>(), relics, relicsObtain,
-            potions ?? Array.Empty<PotionModel>(), potionSlots, hp);
+            potions, potionSlots, hp);
         var task = ApplyAsync(player, spec);
         return new CmdResult(task, success: true, Describe(spec));
     }
@@ -209,8 +226,24 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
                 unknown.Add($"{entry}+{upgrade} (max upgrade level {template.MaxUpgradeLevel})");
                 continue;
             }
+            EnchantmentModel? enchantment = null;
+            var enchantmentAmount = 0;
+            if (match.Groups["enchant"].Success)
+            {
+                var enchantmentId = match.Groups["enchant"].Value.ToUpperInvariant();
+                enchantment = ModelDb.DebugEnchantments.FirstOrDefault(
+                    candidate => candidate.Id.Entry == enchantmentId);
+                if (enchantment == null)
+                {
+                    unknown.Add($"{entry}@{enchantmentId}");
+                    continue;
+                }
+                enchantmentAmount = match.Groups["enchantAmount"].Success
+                    ? int.Parse(match.Groups["enchantAmount"].Value)
+                    : 1;
+            }
             var count = match.Groups["count"].Success ? int.Parse(match.Groups["count"].Value) : 1;
-            parsed.Add(new CardSpec(template, upgrade, count));
+            parsed.Add(new CardSpec(template, upgrade, enchantment, enchantmentAmount, count));
         }
         return Collect(parsed, unknown, "cards", out cards, out error);
     }
@@ -260,12 +293,17 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         return Collect(parsed, unknown, "relics", out relics, out error);
     }
 
-    private static bool TryParsePotions(string spec, out IReadOnlyList<PotionModel>? potions, out string? error)
+    private static bool TryParsePotions(string spec, out IReadOnlyList<PotionModel?>? potions, out string? error)
     {
-        var parsed = new List<PotionModel>();
+        var parsed = new List<PotionModel?>();
         var unknown = new List<string>();
         foreach (var token in Split(spec))
         {
+            if (token == "_")
+            {
+                parsed.Add(null);
+                continue;
+            }
             var entry = token.ToUpperInvariant();
             var template = ModelDb.AllPotions.FirstOrDefault(potion => potion.Id.Entry == entry);
             if (template == null)
@@ -318,7 +356,10 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
             {
                 ApplyPotionSlots(player, slots);
             }
-            await ApplyPotions(player, spec.Potions);
+            if (spec.Potions != null)
+            {
+                ApplyPotions(player, spec.Potions);
+            }
             if (spec.Hp != null)
             {
                 await ApplyHp(player, spec.Hp);
@@ -336,24 +377,42 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         {
             return;
         }
-        foreach (var existing in PileType.Deck.GetPile(player).Cards.ToList())
-        {
-            await CardPileCmd.RemoveFromDeck(existing, showPreview: false);
-        }
         var runState = RunManager.Instance.DebugOnlyGetState()
             ?? throw new InvalidOperationException("No run state available for loadout.");
+        var prepared = new List<(CardModel Card, EnchantmentModel? Enchantment, int Amount)>();
         foreach (var card in cards)
         {
             for (var i = 0; i < card.Count; i++)
             {
                 var mutable = runState.CreateCard(card.Template, player);
-                await CardPileCmd.Add(mutable, PileType.Deck, skipVisuals: true);
                 for (var up = 0; up < card.UpgradeLevel; up++)
                 {
                     // 使用 None 预览样式可避免无头场景创建升级特效节点；该 API
-                    // 同时写入牌堆的 UpgradedCards 历史，与真实锻造行为一致。
+                    // 在入牌堆前完成升级，避免无效附魔在清空原牌组后才被发现。
                     CardCmd.Upgrade(mutable, CardPreviewStyle.None);
                 }
+                var enchantment = card.Enchantment?.ToMutable();
+                if (enchantment != null && !enchantment.CanEnchant(mutable))
+                {
+                    throw new InvalidOperationException(
+                        $"Cannot enchant {mutable.Id.Entry} with {enchantment.Id.Entry}.");
+                }
+                prepared.Add((mutable, enchantment, card.EnchantmentAmount));
+            }
+        }
+        foreach (var existing in PileType.Deck.GetPile(player).Cards.ToList())
+        {
+            await CardPileCmd.RemoveFromDeck(existing, showPreview: false);
+        }
+        foreach (var preparedCard in prepared)
+        {
+            await CardPileCmd.Add(preparedCard.Card, PileType.Deck, skipVisuals: true);
+            if (preparedCard.Enchantment != null)
+            {
+                CardCmd.Enchant(
+                    preparedCard.Enchantment,
+                    preparedCard.Card,
+                    preparedCard.Amount);
             }
         }
     }
@@ -408,16 +467,25 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         }
     }
 
-    private static async Task ApplyPotions(Player player, IReadOnlyList<PotionModel> potions)
+    private static void ApplyPotions(Player player, IReadOnlyList<PotionModel?> potions)
     {
+        foreach (var existing in player.Potions.ToList())
+        {
+            player.DiscardPotionInternal(existing, silent: true);
+        }
         for (var i = 0; i < potions.Count; i++)
         {
-            if (!player.HasOpenPotionSlots)
+            var template = potions[i];
+            if (template == null)
             {
-                Log.Warn($"[STS2AIAgent.loadout] potion belt full; skipped remaining {potions.Count - i} potions");
-                break;
+                continue;
             }
-            await PotionCmd.TryToProcure(potions[i].ToMutable(), player);
+            var result = player.AddPotionInternal(template.ToMutable(), i, silent: true);
+            if (!result.success)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to place potion {template.Id.Entry} at slot {i}.");
+            }
         }
     }
 
@@ -437,7 +505,18 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         if (spec.Cards.Count > 0)
         {
             var upgraded = spec.Cards.Sum(card => card.UpgradeLevel > 0 ? card.Count : 0);
-            parts.Add($"deck={spec.Cards.Sum(card => card.Count)} cards" + (upgraded > 0 ? $" ({upgraded} upgraded)" : ""));
+            var enchanted = spec.Cards.Sum(card => card.Enchantment != null ? card.Count : 0);
+            var details = new List<string>();
+            if (upgraded > 0)
+            {
+                details.Add($"{upgraded} upgraded");
+            }
+            if (enchanted > 0)
+            {
+                details.Add($"{enchanted} enchanted");
+            }
+            parts.Add($"deck={spec.Cards.Sum(card => card.Count)} cards"
+                + (details.Count > 0 ? $" ({string.Join(", ", details)})" : ""));
         }
         if (spec.Relics != null)
         {
@@ -448,9 +527,9 @@ public sealed class DebugLoadoutConsoleCmd : AbstractConsoleCmd
         {
             parts.Add($"relics_obtain={spec.RelicsObtain.Count}");
         }
-        if (spec.Potions.Count > 0)
+        if (spec.Potions != null)
         {
-            parts.Add($"potions={spec.Potions.Count}");
+            parts.Add($"potions={spec.Potions.Count(potion => potion != null)}/{spec.Potions.Count} slots");
         }
         if (spec.PotionSlots is int slots)
         {

@@ -344,7 +344,8 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
         for battle in battles
     )
     assert all(
-        "【当前回合】1" in battle["messages"][0]["content"] for battle in battles
+        "【当前回合】" not in battle["messages"][0]["content"]
+        for battle in battles
     )
     assert all(
         battle["messages"][1]["content"].startswith("玩家:")

@@ -56,19 +56,15 @@ class BattleResetter:
             seed=scenario.seed,
             ascension=scenario.ascension,
         )
-        state = self._settle_opening(state)
-        state = self._clear_potions(state)
         state = self._execute_console(_loadout_command(scenario))
         state = self._execute_console(
             f"scenariofight {scenario.encounter_id} floor={scenario.floor}"
         )
         state = self._await_battle_ready(state)
-        if scenario.current_hp is not None:
-            hp = str(scenario.current_hp)
-            if scenario.max_hp is not None:
-                hp += f"/{scenario.max_hp}"
-            state = self._execute_console(f"loadout hp={hp}")
-            state = self._await_battle_ready(state)
+        state = self._execute_console(
+            f"loadout hp={scenario.current_hp}/{scenario.max_hp}"
+        )
+        state = self._await_battle_ready(state)
         snapshot = verify_battle_scenario(
             scenario,
             state,
@@ -114,73 +110,6 @@ class BattleResetter:
             state = _action_state(result, action)
             if result.get("stable") is not True:
                 state = self._await_cleanup_phase(state, action)
-
-    def _settle_opening(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        """在 Neow 初始事件中选择固定选项，随后交给装载覆盖其奖励。
-
-        Args:
-            state (Mapping[str, Any]): 新局建立后的第一份稳定状态。
-
-        Raises:
-            BattleResetError: 初始事件动作没有返回稳定状态。
-
-        Returns:
-            dict[str, Any]: 初始事件结算后的状态，或原本非事件状态。
-        """
-        if state.get("screen") != "EVENT":
-            return dict(state)
-        actions = state.get("available_actions")
-        if not isinstance(actions, list) or "choose_event_option" not in actions:
-            raise BattleResetError("初始事件没有可选项")
-        result = self._client.execute_action("choose_event_option", option_index=0)
-        settled = _action_state(
-            result,
-            "choose_event_option",
-        )
-        if result.get("stable") is not True:
-            settled = self._await_opening_settled(settled)
-        return settled
-
-    def _clear_potions(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        """清空初始事件可能赠送的药水，避免污染精确装载。
-
-        Args:
-            state (Mapping[str, Any]): 初始事件结算后的状态。
-
-        Raises:
-            BattleResetError: 药水栏形态无效或丢弃动作没有稳定完成。
-
-        Returns:
-            dict[str, Any]: 所有已占用药水槽被清空后的状态。
-        """
-        current = dict(state)
-        run = current.get("run")
-        if not isinstance(run, Mapping):
-            raise BattleResetError("新局状态不可用")
-        potions = run.get("potions")
-        if potions is None:
-            return current
-        if not isinstance(potions, list):
-            raise BattleResetError("药水栏状态不可用")
-        occupied = [
-            potion.get("index")
-            for potion in potions
-            if isinstance(potion, Mapping)
-            and (potion.get("occupied") is True or potion.get("potion_id") is not None)
-        ]
-        if any(
-            isinstance(index, bool) or not isinstance(index, int) for index in occupied
-        ):
-            raise BattleResetError("药水栏索引不可用")
-        for index in sorted(occupied, reverse=True):
-            result = self._client.execute_action("discard_potion", option_index=index)
-            current = _action_state(
-                result,
-                "discard_potion",
-            )
-            if result.get("stable") is not True:
-                current = self._await_potion_discarded(current, index)
-        return current
 
     def _execute_console(self, command: str) -> dict[str, Any]:
         """执行一条开发控制台命令并提取其稳定状态。
@@ -233,73 +162,6 @@ class BattleResetter:
                 time.sleep(0.2)
         raise BattleResetError(f"等待动作状态迁移超时: {action}")
 
-    def _await_opening_settled(
-        self,
-        candidate: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """等待 Neow 初始事件完成并回到可选择节点的地图。
-
-        Args:
-            candidate (Mapping[str, Any]): 事件选项响应携带的首份状态。
-
-        Raises:
-            BattleResetError: 动作超时内没有回到可操作地图。
-
-        Returns:
-            dict[str, Any]: 已允许选择地图节点的稳定新局状态。
-        """
-        deadline = time.monotonic() + self._client.action_timeout
-        state = dict(candidate)
-        while time.monotonic() < deadline:
-            actions = state.get("available_actions")
-            if (
-                state.get("screen") == "MAP"
-                and isinstance(actions, list)
-                and "choose_map_node" in actions
-            ):
-                return state
-            state = self._client.state()
-            if time.monotonic() < deadline:
-                time.sleep(0.2)
-        raise BattleResetError("等待初始事件结算超时")
-
-    def _await_potion_discarded(
-        self,
-        candidate: Mapping[str, Any],
-        option_index: int,
-    ) -> dict[str, Any]:
-        """等待指定药水槽变为空槽。
-
-        Args:
-            candidate (Mapping[str, Any]): 丢弃响应携带的首份状态。
-            option_index (int): 正在等待清空的药水槽索引。
-
-        Raises:
-            BattleResetError: 动作超时内目标药水槽仍被占用。
-
-        Returns:
-            dict[str, Any]: 目标药水槽已经清空的游戏状态。
-        """
-        deadline = time.monotonic() + self._client.action_timeout
-        state = dict(candidate)
-        while time.monotonic() < deadline:
-            run = state.get("run")
-            potions = run.get("potions") if isinstance(run, Mapping) else None
-            if isinstance(potions, list) and not any(
-                isinstance(potion, Mapping)
-                and potion.get("index") == option_index
-                and (
-                    potion.get("occupied") is True
-                    or potion.get("potion_id") is not None
-                )
-                for potion in potions
-            ):
-                return state
-            state = self._client.state()
-            if time.monotonic() < deadline:
-                time.sleep(0.2)
-        raise BattleResetError(f"等待药水槽清空超时: {option_index}")
-
     def _await_battle_ready(
         self,
         candidate: Mapping[str, Any],
@@ -344,7 +206,14 @@ def _loadout_command(scenario: BattleScenario) -> str:
     parts = ["loadout", f"cards={','.join(scenario.deck)}"]
     if scenario.relics:
         parts.append(f"relics={','.join(scenario.relics)}")
-    if scenario.potions:
+    if scenario.potion_slots is not None:
+        potion_slots = scenario.potions + (None,) * (
+            scenario.potion_slots - len(scenario.potions)
+        )
+        parts.append(
+            "potions=" + ",".join(potion or "_" for potion in potion_slots)
+        )
+    elif scenario.potions:
         parts.append(f"potions={','.join(scenario.potions)}")
     if scenario.potion_slots is not None:
         parts.append(f"potion_slots={scenario.potion_slots}")

@@ -55,7 +55,7 @@ namespace STS2AIAgent.Game;
 
 internal static class GameStateService
 {
-    private const int StateVersion = 11;
+    private const int StateVersion = 12;
     private const int AgentViewVersion = 4;
     private static readonly TimeSpan CombatActionSnapshotStableDelay = TimeSpan.FromMilliseconds(200);
     private static string? _lastCombatActionReadinessSignature;
@@ -4489,6 +4489,8 @@ internal static class GameStateService
             name = card.Title,
             upgraded = card.IsUpgraded,
             upgrade_level = card.CurrentUpgradeLevel,
+            enchantment_id = card.Enchantment?.Id.Entry,
+            enchantment_amount = card.Enchantment?.Amount,
             target_type = card.TargetType.ToString(),
             requires_target = CardRequiresTarget(card),
             target_index_space = targetIndexSpace,
@@ -4500,6 +4502,8 @@ internal static class GameStateService
             rules_text = GetCardRulesText(card),
             resolved_rules_text = resolvedRulesText,
             dynamic_values = dynamicValues,
+            should_glow_gold = card.ShouldGlowGold,
+            should_glow_red = card.ShouldGlowRed,
             playable = targetSupported && reason == UnplayableReason.None,
             unplayable_reason = targetSupported
                 ? GetUnplayableReasonCode(reason)
@@ -4915,7 +4919,12 @@ internal static class GameStateService
             relic_id = relic.Id.Entry,
             name = relic.Title.GetFormattedText(),
             description = GetDynamicFormattedTextProperty(relic, "DynamicDescription", "Description"),
-            stack = GetReflectedNullableIntProperty(relic, "Amount"),
+            stack = relic.StackCount > 1 ? relic.StackCount : null,
+            stack_count = relic.StackCount,
+            show_counter = relic.ShowCounter,
+            counter_value = relic.ShowCounter ? relic.DisplayAmount : null,
+            status = relic.Status.ToString(),
+            is_used_up = relic.IsUsedUp,
             is_melted = relic.IsMelted
         };
     }
@@ -5251,6 +5260,8 @@ internal static class GameStateService
             name = card.Title,
             upgraded = card.IsUpgraded,
             upgrade_level = card.CurrentUpgradeLevel,
+            enchantment_id = card.Enchantment?.Id.Entry,
+            enchantment_amount = card.Enchantment?.Amount,
             card_type = card.Type.ToString(),
             rarity = card.Rarity.ToString(),
             costs_x = card.EnergyCost.CostsX,
@@ -6620,6 +6631,10 @@ internal sealed class CombatHandCardPayload
 
     public int upgrade_level { get; init; }
 
+    public string? enchantment_id { get; init; }
+
+    public int? enchantment_amount { get; init; }
+
     public string target_type { get; init; } = string.Empty;
 
     public bool requires_target { get; init; }
@@ -6641,6 +6656,10 @@ internal sealed class CombatHandCardPayload
     public string resolved_rules_text { get; init; } = string.Empty;
 
     public CardDynamicValuePayload[] dynamic_values { get; init; } = Array.Empty<CardDynamicValuePayload>();
+
+    public bool should_glow_gold { get; init; }
+
+    public bool should_glow_red { get; init; }
 
     public bool playable { get; init; }
 
@@ -6838,6 +6857,10 @@ internal sealed class DeckCardPayload
 
     public int upgrade_level { get; init; }
 
+    public string? enchantment_id { get; init; }
+
+    public int? enchantment_amount { get; init; }
+
     public string card_type { get; init; } = string.Empty;
 
     public string rarity { get; init; } = string.Empty;
@@ -6914,6 +6937,16 @@ internal sealed class RunRelicPayload
     public string? description { get; init; }
 
     public int? stack { get; init; }
+
+    public int stack_count { get; init; }
+
+    public bool show_counter { get; init; }
+
+    public int? counter_value { get; init; }
+
+    public string status { get; init; } = string.Empty;
+
+    public bool is_used_up { get; init; }
 
     public bool is_melted { get; init; }
 }

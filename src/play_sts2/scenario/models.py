@@ -4,7 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-_CARD_TOKEN = re.compile(r"^[A-Z0-9_]+(?:\+[1-9][0-9]*)?(?:x[1-9][0-9]*)?$")
+_CARD_TOKEN = re.compile(
+    r"^[A-Z0-9_]+(?:\+[1-9][0-9]*)?"
+    r"(?:@[A-Z0-9_]+(?::[1-9][0-9]*)?)?"
+    r"(?:x[1-9][0-9]*)?$"
+)
 _RELIC_TOKEN = re.compile(r"^[A-Z0-9_]+(?::m)?$")
 _MODEL_ID = re.compile(r"^[A-Z0-9_]+$")
 _GAME_SEED = re.compile(r"^[0-9ABCDEFGHJKLMNPQRSTUVWXYZ]{10}$")
@@ -22,9 +26,11 @@ class BattleScenario:
         seed (str): 新局使用的游戏种子。
         floor (int): 原战斗的总层数，用于确定遭遇 RNG。
         encounter_id (str): 待进入的遭遇稳定 ID。
-        deck (tuple[str, ...]): ``loadout`` 语法表示的完整牌组。
+        deck (tuple[str, ...]): ``loadout`` 语法表示的完整牌组；附魔使用
+            ``CARD@ENCHANTMENT[:AMOUNT]``。
         relics (tuple[str, ...]): ``loadout`` 语法表示的完整遗物列表。
-        potions (tuple[str, ...]): 按药水栏顺序授予的药水 ID。
+        potions (tuple[str | None, ...]): 按药水栏顺序保存的药水 ID；
+            ``None`` 表示对应位置为空槽。仅提供连续 ID 时，剩余槽默认为空。
         potion_slots (int | None): 可选的药水栏容量。
         current_hp (int | None): 战斗开场效果结算后设置的当前生命值。
         max_hp (int | None): 与当前生命值一起设置的最大生命值。
@@ -37,7 +43,7 @@ class BattleScenario:
     encounter_id: str
     deck: tuple[str, ...]
     relics: tuple[str, ...]
-    potions: tuple[str, ...] = ()
+    potions: tuple[str | None, ...] = ()
     potion_slots: int | None = None
     current_hp: int | None = None
     max_hp: int | None = None
@@ -66,19 +72,27 @@ class BattleScenario:
             not _RELIC_TOKEN.fullmatch(relic) for relic in self.relics
         ):
             raise ValueError("遗物列表不能为空，且必须使用 loadout token 语法")
-        if any(not _MODEL_ID.fullmatch(potion) for potion in self.potions):
+        if any(
+            potion is not None and not _MODEL_ID.fullmatch(potion)
+            for potion in self.potions
+        ):
             raise ValueError("药水必须使用稳定 ID")
         if self.potion_slots is not None and not 1 <= self.potion_slots <= 10:
             raise ValueError("药水栏容量必须在 1 到 10 之间")
+        if self.potion_slots is not None and len(self.potions) > self.potion_slots:
+            raise ValueError("药水数量不能超过药水栏容量")
+        if any(potion is None for potion in self.potions) and (
+            self.potion_slots is None or len(self.potions) != self.potion_slots
+        ):
+            raise ValueError("包含空槽时必须提供等长的药水栏容量")
         if not 0 <= self.ascension <= 20:
             raise ValueError("进阶等级必须在 0 到 20 之间")
-        if self.current_hp is not None and self.current_hp < 1:
+        if self.current_hp is None or self.max_hp is None:
+            raise ValueError("精确战斗场景必须同时设置当前和最大生命值")
+        if self.current_hp < 1:
             raise ValueError("当前生命值必须大于 0")
-        if self.max_hp is not None:
-            if self.current_hp is None:
-                raise ValueError("设置最大生命值时必须同时设置当前生命值")
-            if self.max_hp < self.current_hp:
-                raise ValueError("最大生命值不能小于当前生命值")
+        if self.max_hp < self.current_hp:
+            raise ValueError("最大生命值不能小于当前生命值")
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,11 +103,15 @@ class CardSnapshot:
         index (int): 当前手牌顺序索引。
         card_id (str): 卡牌稳定 ID。
         upgrade_level (int): 卡牌已经升级的具体次数。
+        enchantment_id (str | None): 卡牌附魔稳定 ID。
+        enchantment_amount (int | None): 附魔层数。
     """
 
     index: int
     card_id: str
     upgrade_level: int
+    enchantment_id: str | None
+    enchantment_amount: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +157,21 @@ class EnemySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelInputSnapshot:
+    """保存战斗模型在一个决策点实际使用的完整输入。
+
+    Args:
+        system (str): 包含动态遗物说明的中文 system prompt。
+        user (str): Harness 渲染的中文战斗观测与动作说明。
+        available_actions (tuple[str, ...]): 输出解析器接受的动作域。
+    """
+
+    system: str
+    user: str
+    available_actions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BattleSnapshot:
     """保存判断战斗入口能否复现所需的 RNG 可见状态。
 
@@ -146,11 +179,13 @@ class BattleSnapshot:
         turn (int): 当前战斗回合。
         enemies (tuple[EnemySnapshot, ...]): 敌人组成、生命与意图。
         hand (tuple[CardSnapshot, ...]): 当前手牌及其顺序。
+        model_input (ModelInputSnapshot): 模型实际收到的中文输入和动作域。
     """
 
     turn: int
     enemies: tuple[EnemySnapshot, ...]
     hand: tuple[CardSnapshot, ...]
+    model_input: ModelInputSnapshot
 
 
 @dataclass(frozen=True, slots=True)
