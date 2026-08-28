@@ -15,7 +15,7 @@ raw/human/ ──→ transcripts/ ──┘
 - `game_knowledge/curated-v0.107.1/`：已核验问法、回答变体和训练反馈补强。新增
   问法直接进入相应类别，不复制 Wiki/Mod 已经能确定的事实。
 - `raw/human/`：人类实际执行的精确动作事实。录制器写入，通常不手工编辑。
-- `raw/human/splits.json`：按 seed 隔离完整局的 train/dev/test 分卷。
+- `raw/human/splits.json`：按 seed 将一局的全部样本整体放入 train/dev/test。
 
 ## 可覆盖重建的派生产物
 
@@ -42,10 +42,14 @@ raw/human/20260827-a0-f17-VX7C7FLRRS/
 事件 ID。Raw 不保存 `messages`、`readable` 或总事件流 `events.jsonl`。字符串事件
 ID 只用于带明确 provenance 的人工确认修正。
 
-`meta.json` 持续记录进阶、最高层、战斗数、战斗/战略动作数、终止原因、完整性
-结论与训练资格。录制中的隐藏目录以及尚无终止原因的目录不会被 dataset builder
-读取；Mod 报告任何 `native_ui_capture_gap` 时，录制仍保留，但整局自动标为
-`training_eligible=false`。`A7L5LAXFYJ` 也因旧录制缺失动作而明确排除。
+`meta.json` 持续记录进阶、最高层、战斗数、战斗/战略动作数、终止原因、单步样本
+训练资格和整局录制完整性。`training_eligible` 与
+`integrity.samples_verified` 表示已有样本能否用于 SFT；`recording_complete`
+表示是否从开局录到 `game_over` 且没有已知采集缺口。流中断只把后者设为
+`false`，不会否定断流前已经验证的样本。Mod 报告任何
+`native_ui_capture_gap` 时，两项都会变为 `false`。录制中的隐藏目录以及尚无终止
+原因的目录不会被 dataset builder 读取；`A7L5LAXFYJ` 也因旧录制缺失动作而明确
+排除。
 
 ## 重建命令
 

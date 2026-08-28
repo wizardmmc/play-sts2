@@ -209,6 +209,7 @@ def test_recorder_stops_when_player_returns_to_menu(tmp_path: Path) -> None:
     assert result.termination_reason == "returned_to_menu"
     metadata = json.loads((result.run_dir / "meta.json").read_text(encoding="utf-8"))
     assert metadata["training_eligible"] is False
+    assert metadata["recording_complete"] is False
     assert metadata["integrity"]["ineligibility_reasons"] == [
         "partial_run: recording_started_after_run_start"
     ]
@@ -260,7 +261,8 @@ def test_recorder_marks_native_capture_gaps_as_training_ineligible(
     assert result is not None
     metadata = json.loads((result.run_dir / "meta.json").read_text(encoding="utf-8"))
     assert metadata["training_eligible"] is False
-    assert metadata["integrity"]["verified"] is False
+    assert metadata["recording_complete"] is False
+    assert metadata["integrity"]["samples_verified"] is False
     assert metadata["integrity"]["ineligibility_reasons"] == [
         "native_ui_capture_gap: play_card: no matching state transition"
     ]
@@ -344,6 +346,10 @@ def test_recorder_publishes_received_actions_after_stream_interruption(
     assert result.termination_reason == "stream_interrupted"
     assert result.event_count == 1
     assert result.run_dir == (tmp_path / "human/20260828-a2-f7-INTERRUPTED-SEED")
+    metadata = json.loads((result.run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert metadata["training_eligible"] is True
+    assert metadata["recording_complete"] is False
+    assert metadata["integrity"]["samples_verified"] is True
     assert not any(
         path.name.startswith(".recording-") for path in result.run_dir.parent.iterdir()
     )

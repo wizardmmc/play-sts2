@@ -91,8 +91,10 @@ uv run play-sts2-train build-sft
 
 产物直接写入 `data/datasets/sft/{train,dev,test}.jsonl`。知识行保留实体来源，
 行为行通过当前 Harness 重新生成观测和规范 `ACTION:`；战斗与战略每个动作
-都是独立 `system/user/assistant` 样本。整局 split 来自
-`data/raw/human/splits.json`，`training_eligible=false` 的局不会进入训练。
+都是独立 `system/user/assistant` 样本。一局的全部样本由
+`data/raw/human/splits.json` 整体分卷，`training_eligible=false` 的局不会进入
+训练；`recording_complete=false` 只表示没有完整结局，不影响已经验证的单步
+SFT 样本。
 
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 

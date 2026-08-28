@@ -90,12 +90,13 @@ def test_human_writer_groups_one_jsonl_per_battle_and_updates_metadata(
     assert saved["strategic_sample_count"] == 1
     assert saved["battle_count"] == 2
     assert saved["max_floor_reached"] == 3
-    assert saved["schema_version"] == 1
+    assert saved["schema_version"] == 2
     assert saved["termination_reason"] == "game_over"
     assert saved["completed_at"] == "2026-08-27T08:05:00Z"
     assert saved["training_eligible"] is True
+    assert saved["recording_complete"] is True
     assert saved["integrity"] == {
-        "verified": True,
+        "samples_verified": True,
         "ineligibility_reasons": [],
     }
 
@@ -132,8 +133,9 @@ def test_human_writer_marks_integrity_failures_as_training_ineligible(
 
     saved = json.loads((writer.run_dir / "meta.json").read_text(encoding="utf-8"))
     assert saved["training_eligible"] is False
+    assert saved["recording_complete"] is False
     assert saved["integrity"] == {
-        "verified": False,
+        "samples_verified": False,
         "ineligibility_reasons": ["native_ui_capture_gap: play_card: no match"],
     }
 

@@ -32,11 +32,15 @@ def test_main_renders_run_to_default_transcript_directory(
     (run_dir / "meta.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "CLI-SEED",
                 "termination_reason": "game_over",
                 "training_eligible": True,
-                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
                 "battle_count": 0,
                 "battle_sample_count": 0,
                 "strategic_sample_count": 1,

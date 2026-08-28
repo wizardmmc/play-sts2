@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 class RawRunIntegrityError(RuntimeError):
@@ -88,7 +88,7 @@ def _read_metadata(path: Path) -> dict[str, Any]:
 
 
 def _validate_metadata(metadata: Mapping[str, Any], run_dir: Path) -> None:
-    """校验当前 raw schema 的发布与准入字段。
+    """校验当前 raw schema 的发布、单步训练准入与整局完整性字段。
 
     Args:
         metadata (Mapping[str, Any]): 已解码的 ``meta.json``。
@@ -101,17 +101,26 @@ def _validate_metadata(metadata: Mapping[str, Any], run_dir: Path) -> None:
         None: 所有必需字段合法时返回。
     """
     if metadata.get("schema_version") != _SCHEMA_VERSION:
-        raise RawRunIntegrityError(f"{run_dir} 的 schema_version 不是 1")
+        raise RawRunIntegrityError(f"{run_dir} 的 schema_version 不是 2")
     reason = metadata.get("termination_reason")
     if not isinstance(reason, str) or not reason.strip():
         raise RawRunIntegrityError(f"{run_dir} 尚未发布完成")
     eligible = metadata.get("training_eligible")
+    recording_complete = metadata.get("recording_complete")
     integrity = metadata.get("integrity")
-    verified = integrity.get("verified") if isinstance(integrity, Mapping) else None
-    if not isinstance(eligible, bool) or not isinstance(verified, bool):
+    samples_verified = (
+        integrity.get("samples_verified") if isinstance(integrity, Mapping) else None
+    )
+    if (
+        not isinstance(eligible, bool)
+        or not isinstance(recording_complete, bool)
+        or not isinstance(samples_verified, bool)
+    ):
         raise RawRunIntegrityError(f"{run_dir} 缺少明确的训练准入或完整性结论")
-    if eligible != verified:
-        raise RawRunIntegrityError(f"{run_dir} 的训练准入与完整性结论冲突")
+    if eligible != samples_verified:
+        raise RawRunIntegrityError(f"{run_dir} 的训练准入与样本校验结论冲突")
+    if recording_complete and not samples_verified:
+        raise RawRunIntegrityError(f"{run_dir} 声称录制完整但样本未通过校验")
     for field in (
         "battle_count",
         "battle_sample_count",

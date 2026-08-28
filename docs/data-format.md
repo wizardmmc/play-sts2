@@ -16,8 +16,9 @@ data/raw/human/20260827-a0-f17-VX7C7FLRRS/
 
 录制期间先写入同一父目录的隐藏临时目录；正常结束或流中断时，根据已经落盘的
 最高层原子改为最终名称。录制器只消费 Mod SSE 中的精确 `action_executed`，不
-轮询 `/state`，也不保存高频通用事件流。Mod 若报告
-`native_ui_capture_gap`，录制器保留已收到的事实，并把整局标记为不可训练。
+轮询 `/state`，也不保存高频通用事件流。流中断前已经验证的单步样本仍可用于
+SFT，但 `recording_complete=false`；Mod 若报告 `native_ui_capture_gap`，录制器
+保留已收到的事实，并把整局标记为不可训练且不完整。
 
 一个战斗文件严格对应一场战斗。战斗与战略 JSONL 的每一行都是动作事实：
 
@@ -39,7 +40,7 @@ data/raw/human/20260827-a0-f17-VX7C7FLRRS/
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "run_id": "KESBVUW71U",
   "source": "human",
   "started_at": "2026-08-27T13:26:57.647Z",
@@ -54,11 +55,17 @@ data/raw/human/20260827-a0-f17-VX7C7FLRRS/
   "strategic_sample_count": 77,
   "termination_reason": "game_over",
   "training_eligible": true,
-  "integrity": {"verified": true, "ineligibility_reasons": []}
+  "recording_complete": true,
+  "integrity": {"samples_verified": true, "ineligibility_reasons": []}
 }
 ```
 
-`data/raw/human/splits.json` 使用 seed 按完整局划分 train/dev/test。构建器只读取
+`training_eligible` 只回答已经落盘的单步样本能否进入 SFT，并与
+`integrity.samples_verified` 保持一致。`recording_complete` 单独回答该局是否从
+开局录到 `game_over` 且没有已知采集缺口；它为 `false` 不会自动排除已经验证的
+单步样本。
+
+`data/raw/human/splits.json` 使用 seed 按局整体划分 train/dev/test。构建器只读取
 非隐藏、已有非空 `termination_reason` 的正式局，并跳过
 `training_eligible=false` 的整局；当前 `A7L5LAXFYJ` 保留用于审计但不训练。
 

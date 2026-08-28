@@ -69,12 +69,16 @@ cost: 1
     (run_dir / "meta.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "RUN-001",
                 "source": "human",
-                "termination_reason": "game_over",
+                "termination_reason": "stream_interrupted",
                 "training_eligible": True,
-                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "recording_complete": False,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
                 "battle_count": 0,
                 "battle_sample_count": 0,
                 "strategic_sample_count": 1,
@@ -247,12 +251,16 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
     (run / "meta.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "RUN-A",
                 "source": "human",
                 "termination_reason": "game_over",
                 "training_eligible": True,
-                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
                 "battle_count": 1,
                 "battle_sample_count": 2,
                 "strategic_sample_count": 0,
@@ -427,11 +435,15 @@ def test_build_sft_dataset_rejects_published_run_with_truncated_samples(
     (run / "meta.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "TRUNCATED",
                 "termination_reason": "game_over",
                 "training_eligible": True,
-                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
                 "battle_count": 0,
                 "battle_sample_count": 0,
                 "strategic_sample_count": 2,

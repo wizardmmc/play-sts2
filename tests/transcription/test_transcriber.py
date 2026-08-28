@@ -261,11 +261,15 @@ def test_render_run_rejects_truncated_published_raw(tmp_path: Path) -> None:
     (run_dir / "meta.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "TRUNCATED",
                 "termination_reason": "game_over",
                 "training_eligible": True,
-                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
                 "battle_count": 0,
                 "battle_sample_count": 0,
                 "strategic_sample_count": 1,
@@ -396,12 +400,16 @@ def _write_meta(
     (run_dir / "meta.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "TEST-SEED",
                 "seed": "TEST-SEED",
                 "termination_reason": "game_over",
                 "training_eligible": True,
-                "integrity": {"verified": True, "ineligibility_reasons": []},
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
                 "battle_count": battle_count,
                 "battle_sample_count": battle_samples,
                 "strategic_sample_count": strategic_samples,

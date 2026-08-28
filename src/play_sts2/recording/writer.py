@@ -12,7 +12,7 @@ from ..harness import HarnessAction, build_observation, format_action
 from .models import RunMetadata
 
 _LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
-_RAW_SCHEMA_VERSION = 1
+_RAW_SCHEMA_VERSION = 2
 _SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -20,7 +20,8 @@ class HumanRunWriter:
     """把一局人类动作直接分片为战斗与战略原始事实。
 
     Writer 在录制期间使用隐藏临时目录，并持续刷新 ``meta.json``。完成或中断时，
-    它根据本地游玩日期、进阶、最高层和 seed 原子改为最终目录名。
+    它根据本地游玩日期、进阶、最高层和 seed 原子改为最终目录名。训练资格描述
+    已落盘单步样本，录制完整性则只在完整到达无已知缺口的 ``game_over`` 时成立。
 
     Args:
         output_root (Path): 原始数据根目录，例如 ``data/raw``。
@@ -281,6 +282,8 @@ class HumanRunWriter:
         Returns:
             None: 元数据原子替换完成后返回。
         """
+        samples_verified = not self._integrity_failures
+        recording_complete = termination_reason == "game_over" and samples_verified
         payload = {
             **self._metadata.to_dict(),
             "schema_version": _RAW_SCHEMA_VERSION,
@@ -292,9 +295,10 @@ class HumanRunWriter:
             "strategic_sample_count": self._strategic_sample_count,
             "termination_reason": termination_reason,
             "completed_at": completed_at,
-            "training_eligible": not self._integrity_failures,
+            "training_eligible": samples_verified,
+            "recording_complete": recording_complete,
             "integrity": {
-                "verified": not self._integrity_failures,
+                "samples_verified": samples_verified,
                 "ineligibility_reasons": list(self._integrity_failures),
             },
         }
