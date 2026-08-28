@@ -2,13 +2,15 @@
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 
 from ..client import GameClient
 from ..inference import OpenAICompatibleProvider
+from ..inference.config import DEFAULT_INFERENCE_CONFIG, load_inference_config
 from .battle import BattleRunner
+from .model_smoke import validate_model_service
 
 _DEFAULT_GAME_URL = "http://127.0.0.1:8080"
-_DEFAULT_MODEL_URL = "http://127.0.0.1:8900"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -22,11 +24,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         int: 战斗正常离场时返回 ``0``。
     """
     args = _parser().parse_args(argv)
+    config = load_inference_config(args.inference_config)
+    profile = config.profile(args.profile)
+    model_url = args.model_url or config.base_url
+    validate_model_service(
+        model_url,
+        artifact_id=config.artifact_id,
+        merged_model=config.merged_model,
+        serving_model=config.serving_model,
+        enable_thinking=profile.enable_thinking,
+    )
     with (
         GameClient(args.game_url) as game,
-        OpenAICompatibleProvider(args.model_url, model=args.model) as provider,
+        OpenAICompatibleProvider(
+            model_url,
+            model=str(config.serving_model.resolve()),
+            enable_thinking=profile.enable_thinking,
+        ) as provider,
     ):
-        result = BattleRunner(game, provider).run()
+        result = BattleRunner(
+            game,
+            provider,
+            max_tokens=profile.max_tokens,
+            temperature=profile.temperature,
+        ).run()
 
     print(f"战斗结束: {result.outcome.value}，执行 {len(result.steps)} 个动作")
     return 0
@@ -40,6 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         description="连接已运行的 STS2 与 Qwen 服务，完成当前一场战斗。",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--game-url",
@@ -48,11 +70,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model-url",
-        default=_DEFAULT_MODEL_URL,
-        help=f"OpenAI-compatible 模型服务地址，默认为 {_DEFAULT_MODEL_URL}",
+        help="覆盖推理配置中的 OpenAI-compatible 服务地址",
     )
     parser.add_argument(
-        "--model",
-        help="服务端要求的模型名称；本地单模型服务通常可以省略",
+        "--inference-config",
+        type=Path,
+        default=DEFAULT_INFERENCE_CONFIG,
+        help=f"推理配置，默认为 {DEFAULT_INFERENCE_CONFIG}",
+    )
+    parser.add_argument(
+        "--profile",
+        help="生成 profile；省略时使用推理配置默认值",
     )
     return parser

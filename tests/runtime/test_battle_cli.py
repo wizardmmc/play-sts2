@@ -1,7 +1,9 @@
 """验证 Qwen 战斗 CLI 的用户可观察行为。"""
 
 import importlib
+import json
 from collections.abc import Sequence
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
@@ -98,7 +100,13 @@ class CliProvider:
         model (str | None): CLI 传给服务端的模型名。
     """
 
-    def __init__(self, base_url: str, *, model: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        model: str | None = None,
+        enable_thinking: bool | None = None,
+    ) -> None:
         """校验 CLI 传入的模型连接参数。
 
         Args:
@@ -112,7 +120,9 @@ class CliProvider:
             None: 此方法只初始化测试 Provider。
         """
         assert base_url == "http://127.0.0.1:8901"
-        assert model == "Qwen/Qwen3.5-4B"
+        assert model is not None
+        assert Path(model).name == "demo-e3-mlx-8bit"
+        assert enable_thinking is True
 
     def __enter__(self) -> Self:
         """进入测试 Provider 上下文。
@@ -161,10 +171,13 @@ class CliProvider:
         """
         assert messages[0].role == "system"
         assert "战斗决策模型" in messages[0].content
+        assert max_tokens == 512
+        assert temperature == 0.2
         return ModelReply("ACTION: end_turn")
 
 
 def test_main_connects_qwen_and_finishes_current_battle(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -181,22 +194,88 @@ def test_main_connects_qwen_and_finishes_current_battle(
         None: 此测试只验证命令入口。
     """
     cli = importlib.import_module("play_sts2.runtime.cli")
-    monkeypatch.setattr(cli, "GameClient", CliGameClient)
+    preflight_calls: list[tuple[str, str, Path, Path]] = []
+
+    def validate(
+        base_url: str,
+        *,
+        artifact_id: str,
+        merged_model: Path,
+        serving_model: Path,
+        enable_thinking: bool,
+    ) -> None:
+        assert enable_thinking is True
+        preflight_calls.append((base_url, artifact_id, merged_model, serving_model))
+
+    def game(base_url: str) -> CliGameClient:
+        assert preflight_calls, "模型身份预检必须发生在连接游戏之前"
+        return CliGameClient(base_url)
+
+    monkeypatch.setattr(cli, "validate_model_service", validate, raising=False)
+    monkeypatch.setattr(cli, "GameClient", game)
     monkeypatch.setattr(cli, "OpenAICompatibleProvider", CliProvider)
+    config_path = _write_inference_config(tmp_path)
 
     exit_code = cli.main(
         [
             "--game-url",
             "http://127.0.0.1:8082",
-            "--model-url",
-            "http://127.0.0.1:8901",
-            "--model",
-            "Qwen/Qwen3.5-4B",
+            "--inference-config",
+            str(config_path),
+            "--profile",
+            "think",
         ]
     )
 
     assert exit_code == 0
+    assert preflight_calls == [
+        (
+            "http://127.0.0.1:8901",
+            "demo-e3",
+            tmp_path / "demo-e3-merged",
+            tmp_path / "demo-e3-mlx-8bit",
+        )
+    ]
     assert capsys.readouterr().out == "战斗结束: cleared，执行 1 个动作\n"
+
+
+def test_battle_cli_rejects_request_model_override() -> None:
+    """战斗入口不允许请求级 model 绕过推理配置。"""
+    cli = importlib.import_module("play_sts2.runtime.cli")
+
+    with pytest.raises(SystemExit):
+        cli._parser().parse_args(["--model", "wrong-model"])
+
+
+def _write_inference_config(tmp_path: Path) -> Path:
+    """写入运行时 CLI 测试使用的双模式配置。"""
+    artifact_id = "demo-e3"
+    config_path = tmp_path / "inference.toml"
+    config_path.write_text(
+        f"""
+artifact_id = "{artifact_id}"
+merged_model = {json.dumps(str(tmp_path / f"{artifact_id}-merged"))}
+serving_model = {json.dumps(str(tmp_path / f"{artifact_id}-mlx-8bit"))}
+default_profile = "no-think"
+
+[server]
+base_url = "http://127.0.0.1:8901"
+port = 8901
+prompt_cache_size = 10
+
+[profiles.no-think]
+enable_thinking = false
+max_tokens = 128
+temperature = 0.0
+
+[profiles.think]
+enable_thinking = true
+max_tokens = 512
+temperature = 0.2
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def _combat_state() -> dict[str, Any]:

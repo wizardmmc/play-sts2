@@ -1,10 +1,16 @@
 """验证本地 MLX 模型的准备、服务和真实协议冒烟边界。"""
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 
 import pytest
+
+_TEMPLATE_FINGERPRINTS = {
+    "disabled": "a" * 64,
+    "enabled": "b" * 64,
+}
 
 
 def test_prepare_model_converts_hf_model_to_mlx_8bit(
@@ -25,6 +31,7 @@ def test_prepare_model_converts_hf_model_to_mlx_8bit(
     """
     from play_sts2.inference import local_model
 
+    _stub_dynamic_template(local_model, monkeypatch)
     source = tmp_path / "merged"
     target = tmp_path / "serving/model-mlx-8bit"
     source.mkdir()
@@ -33,6 +40,7 @@ def test_prepare_model_converts_hf_model_to_mlx_8bit(
         encoding="utf-8",
     )
     (source / "model.safetensors").write_bytes(b"weights")
+    merge_manifest = _write_merge_manifest(source)
     (source / "generation_config.json").write_text(
         json.dumps({"eos_token_id": 248044}),
         encoding="utf-8",
@@ -86,7 +94,12 @@ def test_prepare_model_converts_hf_model_to_mlx_8bit(
             json.dumps(
                 {
                     "model_type": "qwen3_5",
-                    "quantization": {"bits": 8, "group_size": 64},
+                    "eos_token_id": 248046,
+                    "quantization": {
+                        "bits": 8,
+                        "group_size": 64,
+                        "mode": "affine",
+                    },
                 }
             ),
             encoding="utf-8",
@@ -95,7 +108,7 @@ def test_prepare_model_converts_hf_model_to_mlx_8bit(
 
     monkeypatch.setattr(local_model.subprocess, "run", convert)
 
-    result = local_model.prepare_model(source, target)
+    result = local_model.prepare_model(source, target, artifact_id="demo-e3")
 
     assert result == target
     assert json.loads((source / "config.json").read_text(encoding="utf-8")) == {
@@ -105,6 +118,17 @@ def test_prepare_model_converts_hf_model_to_mlx_8bit(
         (source / "generation_config.json").read_text(encoding="utf-8")
     ) == {"eos_token_id": 248044}
     assert (target / "model.safetensors").read_bytes() == b"quantized"
+    assert json.loads(
+        (target / "serving_manifest.json").read_text(encoding="utf-8")
+    ) == {
+        "schema_version": 1,
+        "artifact_id": "demo-e3",
+        "source_model": str(source.resolve()),
+        "source_merge_manifest_sha256": hashlib.sha256(merge_manifest).hexdigest(),
+        "quantization": {"bits": 8, "group_size": 64},
+        "eos_token_id": 248046,
+        "thinking_template_sha256": _TEMPLATE_FINGERPRINTS,
+    }
 
 
 def test_prepare_model_does_not_publish_failed_conversion(
@@ -125,10 +149,12 @@ def test_prepare_model_does_not_publish_failed_conversion(
     """
     from play_sts2.inference import local_model
 
+    _stub_dynamic_template(local_model, monkeypatch)
     source = tmp_path / "merged"
     target = tmp_path / "serving/model-mlx-8bit"
     source.mkdir()
     (source / "config.json").write_text("{}", encoding="utf-8")
+    _write_merge_manifest(source)
     (source / "tokenizer_config.json").write_text(
         json.dumps({"eos_token": "<|im_end|>"}),
         encoding="utf-8",
@@ -156,9 +182,55 @@ def test_prepare_model_does_not_publish_failed_conversion(
     monkeypatch.setattr(local_model.subprocess, "run", fail)
 
     with pytest.raises(subprocess.CalledProcessError):
-        local_model.prepare_model(source, target)
+        local_model.prepare_model(source, target, artifact_id="demo-e3")
 
     assert not target.exists()
+
+
+def test_prepare_model_does_not_replace_destination_created_during_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """初检后竞态创建的空目录也不能被普通 rename 静默替换。"""
+    from play_sts2.inference import local_model
+
+    _stub_dynamic_template(local_model, monkeypatch)
+    source = tmp_path / "merged/demo-e3-merged"
+    target = tmp_path / "serving/demo-e3-mlx-8bit"
+    source.mkdir(parents=True)
+    (source / "config.json").write_text("{}\n", encoding="utf-8")
+    _write_merge_manifest(source)
+    (source / "tokenizer_config.json").write_text(
+        json.dumps({"eos_token": "<|im_end|>"}),
+        encoding="utf-8",
+    )
+    (source / "tokenizer.json").write_text(
+        json.dumps({"added_tokens": [{"id": 3, "content": "<|im_end|>"}]}),
+        encoding="utf-8",
+    )
+
+    def convert(command: list[str], *, check: bool) -> None:
+        assert check is True
+        converted = Path(command[command.index("--mlx-path") + 1])
+        converted.mkdir()
+        (converted / "config.json").write_text(
+            json.dumps(
+                {
+                    "eos_token_id": 3,
+                    "quantization": {"bits": 8, "group_size": 64},
+                }
+            ),
+            encoding="utf-8",
+        )
+        target.mkdir(parents=True)
+
+    monkeypatch.setattr(local_model.subprocess, "run", convert)
+
+    with pytest.raises(FileExistsError):
+        local_model.prepare_model(source, target, artifact_id="demo-e3")
+
+    assert target.is_dir()
+    assert not (target / "serving_manifest.json").exists()
 
 
 def test_serve_model_enables_prefix_cache(
@@ -179,8 +251,37 @@ def test_serve_model_enables_prefix_cache(
     """
     from play_sts2.inference import local_model
 
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
+    _stub_dynamic_template(local_model, monkeypatch)
+    source = tmp_path / "merged/demo-e3-merged"
+    model_dir = tmp_path / "serving/demo-e3-mlx-8bit"
+    source.mkdir(parents=True)
+    model_dir.mkdir(parents=True)
+    merge_manifest = _write_merge_manifest(source)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 3,
+                "quantization": {"bits": 8, "group_size": 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "serving_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_id": "demo-e3",
+                "source_model": str(source.resolve()),
+                "source_merge_manifest_sha256": hashlib.sha256(
+                    merge_manifest
+                ).hexdigest(),
+                "quantization": {"bits": 8, "group_size": 64},
+                "eos_token_id": 3,
+                "thinking_template_sha256": _TEMPLATE_FINGERPRINTS,
+            }
+        ),
+        encoding="utf-8",
+    )
     commands: list[list[str]] = []
 
     def run(command: list[str], *, check: bool) -> None:
@@ -197,8 +298,14 @@ def test_serve_model_enables_prefix_cache(
         commands.append(command)
 
     monkeypatch.setattr(local_model.subprocess, "run", run)
+    monkeypatch.chdir(tmp_path)
+    relative_model_dir = model_dir.relative_to(tmp_path)
 
-    local_model.serve_model(model_dir)
+    local_model.serve_model(
+        relative_model_dir,
+        artifact_id="demo-e3",
+        merged_model=source,
+    )
 
     assert commands == [
         [
@@ -207,10 +314,299 @@ def test_serve_model_enables_prefix_cache(
             "mlx_lm",
             "server",
             "--model",
-            str(model_dir),
+            str(model_dir.resolve()),
             "--port",
             "8900",
             "--prompt-cache-size",
             "10",
         ]
     ]
+
+
+@pytest.mark.parametrize(
+    ("artifact_id", "mutate_source", "message"),
+    [
+        ("wrong-e3", False, "artifact_id 不一致"),
+        ("demo-e3", True, "merge_manifest 摘要不一致"),
+    ],
+)
+def test_serve_model_rejects_stale_or_wrong_artifact_before_starting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_id: str,
+    mutate_source: bool,
+    message: str,
+) -> None:
+    """服务目录身份或合并来源变化时必须在启动子进程前失败。"""
+    from play_sts2.inference import local_model
+
+    source = tmp_path / "merged/demo-e3-merged"
+    model_dir = tmp_path / "serving/demo-e3-mlx-8bit"
+    source.mkdir(parents=True)
+    model_dir.mkdir(parents=True)
+    merge_manifest = _write_merge_manifest(source)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 3,
+                "quantization": {"bits": 8, "group_size": 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "serving_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_id": "demo-e3",
+                "source_model": str(source.resolve()),
+                "source_merge_manifest_sha256": hashlib.sha256(
+                    merge_manifest
+                ).hexdigest(),
+                "quantization": {"bits": 8, "group_size": 64},
+                "eos_token_id": 3,
+                "thinking_template_sha256": _TEMPLATE_FINGERPRINTS,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if mutate_source:
+        (source / "merge_manifest.json").write_text(
+            '{"schema_version": 2}\n', encoding="utf-8"
+        )
+
+    def unexpected_run(_command: list[str], *, check: bool) -> None:
+        raise AssertionError("身份校验失败时不应启动模型服务")
+
+    monkeypatch.setattr(local_model.subprocess, "run", unexpected_run)
+
+    with pytest.raises(local_model.ServingModelIdentityError, match=message):
+        local_model.serve_model(
+            model_dir,
+            artifact_id=artifact_id,
+            merged_model=source,
+        )
+
+
+def test_prepare_model_rejects_merge_manifest_from_different_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """目录被改名不能把 e2 合并结果重新贴成 e3 artifact。"""
+    from play_sts2.inference import local_model
+
+    source = tmp_path / "merged/demo-e3-merged"
+    target = tmp_path / "serving/demo-e3-mlx-8bit"
+    source.mkdir(parents=True)
+    _write_merge_manifest(source, artifact_id="demo-e2")
+    monkeypatch.setattr(
+        local_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("血缘不符时不应启动转换"),
+    )
+
+    with pytest.raises(
+        local_model.ServingModelIdentityError,
+        match="adapter 与 artifact_id 不一致",
+    ):
+        local_model.prepare_model(source, target, artifact_id="demo-e3")
+
+
+def test_serve_model_rejects_actual_quantization_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """清单声称 8-bit、实际 MLX config 为 4-bit 时拒绝启动。"""
+    from play_sts2.inference import local_model
+
+    source = tmp_path / "merged/demo-e3-merged"
+    model_dir = tmp_path / "serving/demo-e3-mlx-8bit"
+    source.mkdir(parents=True)
+    model_dir.mkdir(parents=True)
+    merge_manifest = _write_merge_manifest(source)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 3,
+                "quantization": {"bits": 4, "group_size": 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "serving_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_id": "demo-e3",
+                "source_model": str(source.resolve()),
+                "source_merge_manifest_sha256": hashlib.sha256(
+                    merge_manifest
+                ).hexdigest(),
+                "quantization": {"bits": 8, "group_size": 64},
+                "eos_token_id": 3,
+                "thinking_template_sha256": _TEMPLATE_FINGERPRINTS,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        local_model.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("量化配置不符时不应启动服务"),
+    )
+
+    with pytest.raises(
+        local_model.ServingModelIdentityError,
+        match="量化配置不一致",
+    ):
+        local_model.serve_model(
+            model_dir,
+            artifact_id="demo-e3",
+            merged_model=source,
+        )
+
+
+def test_thinking_template_fingerprints_reject_static_template(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """true/false 渲染相同的静态 no-think 模板不能冒充双模式服务件。"""
+    from play_sts2.inference import local_model
+
+    class StaticTokenizer:
+        has_thinking = True
+        think_start = "<think>"
+        think_end = "</think>"
+
+        def apply_chat_template(self, *_args: object, **kwargs: object) -> object:
+            if kwargs.get("tokenize") is True:
+                return [1, 2, 3]
+            return "<think>\n\n</think>\n"
+
+    monkeypatch.setattr(
+        local_model,
+        "_load_tokenizer",
+        lambda _path: StaticTokenizer(),
+        raising=False,
+    )
+
+    with pytest.raises(
+        local_model.ServingModelIdentityError,
+        match="enable_thinking 没有改变模板渲染",
+    ):
+        local_model._thinking_template_fingerprints(tmp_path)
+
+
+def test_thinking_template_fingerprints_include_token_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文本模板相同但 tokenizer 映射变化时，功能指纹也必须变化。"""
+    from play_sts2.inference import local_model
+
+    class DynamicTokenizer:
+        has_thinking = True
+        think_start = "<think>"
+        think_end = "</think>"
+
+        def __init__(self, offset: int) -> None:
+            self.offset = offset
+
+        def apply_chat_template(self, *_args: object, **kwargs: object) -> object:
+            enabled = kwargs["enable_thinking"] is True
+            if kwargs.get("tokenize") is True:
+                return [self.offset, 1 if enabled else 2]
+            return "<think>\n" if enabled else "<think>\n\n</think>\n"
+
+    tokenizer = DynamicTokenizer(10)
+    monkeypatch.setattr(local_model, "_load_tokenizer", lambda _path: tokenizer)
+    first = local_model._thinking_template_fingerprints(tmp_path)
+    tokenizer.offset = 20
+
+    second = local_model._thinking_template_fingerprints(tmp_path)
+
+    assert first != second
+
+
+def test_repository_qwen_template_has_distinct_thinking_branches() -> None:
+    """本地真实 Qwen tokenizer 的动态模板满足 MLX 双模式契约。"""
+    from play_sts2.inference import local_model
+
+    model_dir = Path("models/base/qwen3.5-4b")
+    if not model_dir.is_dir():
+        pytest.skip("本地 Qwen 基座不存在")
+    pytest.importorskip("mlx_lm")
+
+    fingerprints = local_model._thinking_template_fingerprints(model_dir)
+
+    assert fingerprints["disabled"] != fingerprints["enabled"]
+
+
+@pytest.mark.parametrize(
+    "source_sha256",
+    [
+        {
+            "base/config.json": "not-a-sha256",
+            "adapter/train_manifest.json": "b" * 64,
+            "tokenizer/tokenizer.json": "c" * 64,
+        },
+        {
+            "adapter/train_manifest.json": "b" * 64,
+            "tokenizer/tokenizer.json": "c" * 64,
+        },
+    ],
+)
+def test_merge_identity_rejects_malformed_or_incomplete_source_digests(
+    tmp_path: Path,
+    source_sha256: dict[str, str],
+) -> None:
+    """merge 清单必须用真实 SHA-256 覆盖 base、adapter、tokenizer 三类来源。"""
+    from play_sts2.inference import local_model
+
+    source = tmp_path / "models/merged/demo-e3-merged"
+    source.mkdir(parents=True)
+    (source / "merge_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "adapter": str(tmp_path / "models/adapters/demo-e3"),
+                "output": str(source.resolve()),
+                "source_sha256": source_sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(local_model.ServingModelIdentityError, match="来源摘要"):
+        local_model._validate_merge_model_identity(source, "demo-e3")
+
+
+def _write_merge_manifest(source: Path, *, artifact_id: str = "demo-e3") -> bytes:
+    """写入当前 SFT merge 发布的最小身份字段。"""
+    payload = {
+        "schema_version": 1,
+        "adapter": str(source.parent.parent / "adapters" / artifact_id),
+        "output": str(source.resolve()),
+        "tokenizer_source": str(source.parent.parent / "adapters" / artifact_id),
+        "source_sha256": {
+            "base/config.json": "a" * 64,
+            "adapter/train_manifest.json": "b" * 64,
+            "tokenizer/tokenizer.json": "c" * 64,
+        },
+    }
+    content = (json.dumps(payload, sort_keys=True) + "\n").encode()
+    (source / "merge_manifest.json").write_bytes(content)
+    return content
+
+
+def _stub_dynamic_template(
+    local_model: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """让非 tokenizer 单元测试聚焦各自边界。"""
+    monkeypatch.setattr(
+        local_model,
+        "_thinking_template_fingerprints",
+        lambda _path: dict(_TEMPLATE_FINGERPRINTS),
+        raising=False,
+    )

@@ -171,34 +171,50 @@ LoRA adapter 是训练权重，不是另一套 Provider 实现。
 ## Qwen 战斗闭环
 
 在 Apple Silicon Mac 上先安装独立的本地推理依赖，并把合并后的 Transformers
-BF16 模型一次性转换为 MLX 8-bit：
+BF16 模型一次性转换为 MLX 8-bit。模型身份、目录、服务端口和生成 profile
+统一由 `configs/inference.toml` 管理；完成新一轮训练时先更新其中的
+`artifact_id`、`merged_model` 与 `serving_model`，再执行：
 
 ```bash
 uv sync --group inference
-uv run --group inference play-sts2-model prepare \
-  --source models/merged/sft-clean-20260827-native-r16-e3-merged \
-  --output models/serving/sft-clean-20260827-native-r16-e3-mlx-8bit
+uv run --group inference play-sts2-model prepare
 ```
 
 转换不会修改 `models/merged/` 中的原模型，默认产物写入
-`models/serving/sft-clean-20260827-native-r16-e3-mlx-8bit/`。随后在一个终端启动
-带十个前缀缓存槽的模型服务，并在另一个终端验证模型能够生成合法 Harness 动作：
+配置指定的不可变服务目录。它会解析合并清单中的 adapter/输出血缘，只对小型
+`merge_manifest.json` 取摘要，并随 MLX 产物写入 `serving_manifest.json`，不会
+重复哈希模型权重。服务启动还会核对实际量化/EOS，以及固定对话在 thinking
+开关两侧的渲染文本与 token IDs。随后在一个终端启动模型服务，并在另一个终端
+验证磁盘身份、端口实际加载目录和 Harness 动作协议：
 
 ```bash
 uv run --group inference play-sts2-model serve
 uv run play-sts2-model smoke
+uv run play-sts2-model smoke --profile think
 ```
 
-`play-sts2-battle` 和 `play-sts2-run` 只连接这个模型服务，不直接加载模型。
+默认 `no-think` profile 与 e3 SFT 编码一致；`think` profile 通过每次请求的
+`chat_template_kwargs.enable_thinking=true` 显式启用动态模板分支并使用独立 token
+预算。思考耗尽预算会报告生成截断并保留 reasoning、finish reason 和模型标识，
+不会伪装成响应协议错误或自动降级为 no-think。
+
+`play-sts2-battle` 和 `play-sts2-run` 从同一配置读取服务与默认 profile；两者会
+在连接游戏、改变任何游戏状态之前执行相同的磁盘与 `/v1/models` 身份预检，
+再用配置指定的绝对模型路径完成一次真实的一 token 生成，避免把“端点存活”误当
+成“权重可加载”。此后每次决策请求都内部绑定该路径，并要求 MLX 响应回报完全
+相同的模型标识；服务中途切换模型会立即失败。
 
 让已经加载 Agent Mod 的 STS2 停在一个稳定战斗决策画面，再运行：
 
 ```bash
 uv run play-sts2-battle
+uv run play-sts2-battle --profile think
 ```
 
-模型服务需要名称时可加 `--model Qwen/Qwen3.5-4B`；游戏或模型使用其他端口时，
-分别传入 `--game-url` 和 `--model-url`。`BattleRunner` 每次只提交当前完整状态，
+非默认配置可传 `--inference-config <路径>`，临时覆盖地址仍可用 `--model-url`。
+本地 CLI 不接受请求级 `--model`，避免绕过配置中的服务目录身份；底层通用
+Provider 仍可供其他 OpenAI-compatible 集成显式传入并核对模型名。`BattleRunner` 每次
+只提交当前完整状态，
 非法模型输出最多重试三次，等待异步动作重新进入可决策状态，并在胜利或角色
 死亡时返回。该命令只负责当前战斗，适合战斗调试和后续场景采样。
 

@@ -148,11 +148,19 @@ uv run --group training play-sts2-train eval-sft-knowledge \
 
 ## MLX 服务件
 
-把新合并模型转换到独立目录：
+先把 `configs/inference.toml` 的 `artifact_id`、`merged_model` 与
+`serving_model` 更新为同一轮不可变产物，再把新合并模型转换到独立目录：
 
 ```bash
 uv sync --group inference
-uv run --group inference play-sts2-model prepare \
-  --source models/merged/sft-clean-20260827-native-r16-e3-merged \
-  --output models/serving/sft-clean-20260827-native-r16-e3-mlx-8bit
+uv run --group inference play-sts2-model prepare
 ```
+
+转换会解析合并清单的 adapter/输出血缘，把小型 `merge_manifest.json` 的摘要、
+artifact ID、源目录、量化/EOS 和 thinking 模板功能指纹写入
+`serving_manifest.json`；服务启动前会用实际 MLX config 和固定对话的渲染文本
+及 token IDs 重新校验，不扫描模型权重。默认 `no-think` profile 与 SFT 编码的
+`enable_thinking=false` 保持一致；需要比较动态模板的思考分支时显式使用
+`--profile think`。冒烟与游戏 Runtime 还会在进入游戏前用配置中的绝对服务目录
+执行一次真实生成，并在每次后续请求中固定且核对该模型标识；因此端口重启到旧
+服务或权重无法加载都不会被健康端点掩盖。

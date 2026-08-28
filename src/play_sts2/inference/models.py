@@ -26,9 +26,15 @@ class ModelReply:
         prompt_tokens (int | None): 服务端报告的输入 token 数。
         completion_tokens (int | None): 服务端报告的输出 token 数。
         cached_tokens (int | None): 命中前缀缓存的输入 token 数。
+        reasoning (str | None): 服务端分离返回的思考文本。
+        finish_reason (str | None): 服务端报告的生成停止原因。
+        model (str | None): 服务端报告的实际模型标识。
     """
 
     text: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cached_tokens: int | None = None
+    reasoning: str | None = None
+    finish_reason: str | None = None
+    model: str | None = None

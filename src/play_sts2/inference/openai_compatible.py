@@ -16,6 +16,18 @@ class InferenceProtocolError(RuntimeError):
     """表示推理服务的成功响应不符合约定结构。"""
 
 
+class InferenceModelIdentityError(InferenceProtocolError):
+    """表示推理服务没有按请求确认同一个模型身份。"""
+
+
+class InferenceGenerationTruncated(RuntimeError):
+    """表示服务因 token 上限停止，回复不能安全交给动作解析器。"""
+
+    def __init__(self, reply: ModelReply) -> None:
+        self.reply = reply
+        super().__init__("chat completion generation truncated")
+
+
 class OpenAICompatibleProvider:
     """持有与一个 OpenAI-compatible 推理服务通信的 HTTP 会话。"""
 
@@ -24,6 +36,7 @@ class OpenAICompatibleProvider:
         base_url: str,
         *,
         model: str | None = None,
+        enable_thinking: bool | None = None,
         timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -31,7 +44,10 @@ class OpenAICompatibleProvider:
 
         Args:
             base_url (str): 推理服务根地址。
-            model (str | None): 服务端需要的模型名称；本地服务允许省略。
+            model (str | None): 服务端需要的模型名称；设置后同时要求响应回报
+                完全相同的模型标识。
+            enable_thinking (bool | None): 显式传给支持该扩展的 chat template；
+                ``None`` 表示保持通用 OpenAI-compatible 请求。
             timeout (float): 单次生成请求允许等待的秒数。
             transport (httpx.BaseTransport | None): 可选的 HTTP 传输实现。
 
@@ -44,6 +60,7 @@ class OpenAICompatibleProvider:
             transport=transport,
         )
         self._model = model
+        self._enable_thinking = enable_thinking
 
     def __enter__(self) -> Self:
         """进入持有底层 HTTP 会话的上下文。
@@ -96,6 +113,8 @@ class OpenAICompatibleProvider:
         Raises:
             httpx.HTTPStatusError: 推理服务返回非成功 HTTP 状态码。
             InferenceProtocolError: 成功响应不是合法 JSON 或结构不完整。
+            InferenceModelIdentityError: 响应未确认请求绑定的模型标识。
+            InferenceGenerationTruncated: 服务因 token 上限停止生成。
 
         Returns:
             ModelReply: 服务端生成的原始文本及可选用量信息。
@@ -111,10 +130,22 @@ class OpenAICompatibleProvider:
         }
         if self._model is not None:
             body["model"] = self._model
+        if self._enable_thinking is not None:
+            body["chat_template_kwargs"] = {
+                "enable_thinking": self._enable_thinking,
+            }
 
         response = self._http.post(_CHAT_PATH, json=body)
         response.raise_for_status()
-        return _parse_reply(response)
+        reply = _parse_reply(response)
+        if self._model is not None and reply.model != self._model:
+            raise InferenceModelIdentityError(
+                f"chat completion model 不一致: expected={self._model!r}, "
+                f"actual={reply.model!r}"
+            )
+        if reply.finish_reason == "length":
+            raise InferenceGenerationTruncated(reply)
+        return reply
 
 
 def _parse_reply(response: httpx.Response) -> ModelReply:
@@ -145,7 +176,19 @@ def _parse_reply(response: httpx.Response) -> ModelReply:
     message = choice.get("message")
     if not isinstance(message, Mapping):
         raise InferenceProtocolError("invalid chat completion response")
+    finish_reason = choice.get("finish_reason")
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        raise InferenceProtocolError("invalid chat completion response")
+    reasoning = message.get("reasoning", message.get("reasoning_content"))
+    if reasoning is not None and not isinstance(reasoning, str):
+        raise InferenceProtocolError("invalid chat completion response")
     text = message.get("content")
+    if (
+        text is None
+        and message.get("role") == "assistant"
+        and finish_reason in {"stop", "length"}
+    ):
+        text = ""
     if not isinstance(text, str):
         raise InferenceProtocolError("invalid chat completion response")
 
@@ -159,12 +202,19 @@ def _parse_reply(response: httpx.Response) -> ModelReply:
         details = {}
     if not isinstance(details, Mapping):
         raise InferenceProtocolError("invalid chat completion response")
-    return ModelReply(
+    model = payload.get("model")
+    if model is not None and not isinstance(model, str):
+        raise InferenceProtocolError("invalid chat completion response")
+    reply = ModelReply(
         text=text,
         prompt_tokens=_optional_int(usage, "prompt_tokens"),
         completion_tokens=_optional_int(usage, "completion_tokens"),
         cached_tokens=_optional_int(details, "cached_tokens"),
+        reasoning=reasoning,
+        finish_reason=finish_reason,
+        model=model,
     )
+    return reply
 
 
 def _optional_int(data: Mapping[object, object], field: str) -> int | None:
