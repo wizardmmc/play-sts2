@@ -256,7 +256,9 @@ def test_battle_runner_uses_stateless_steps_and_waits_for_pending_action() -> No
     assert game.state_calls == 2
     assert tuple(message.role for message in provider.requests[1]) == ("system", "user")
     assert "对话历史" not in provider.requests[1][0].content
-    assert "回合 2" in provider.requests[1][-1].content
+    assert "【当前回合】2" in provider.requests[1][0].content
+    assert provider.requests[1][-1].content.startswith("玩家:")
+    assert "角色:" not in provider.requests[1][-1].content
 
 
 def test_battle_runner_retries_temporary_action_window_conflict() -> None:

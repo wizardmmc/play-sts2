@@ -407,7 +407,7 @@ def _behavior_row(
         "messages": [
             {
                 "role": "system",
-                "content": system_prompt(observation.layer),
+                "content": system_prompt(observation.layer, state),
             },
             {"role": "user", "content": observation.text},
             {"role": "assistant", "content": action_line},

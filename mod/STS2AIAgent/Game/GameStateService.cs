@@ -1606,9 +1606,10 @@ internal static class GameStateService
             return cardSelectScreen.GetNodeOrNull<MegaRichTextLabel>("%BottomLabel")?.Text;
         }
 
-        if (currentScreen is NChooseACardSelectionScreen chooseCardScreen)
+        if (currentScreen is NChooseACardSelectionScreen)
         {
-            return SafeReadString(() => chooseCardScreen.GetNodeOrNull<NCommonBanner>("Banner")?.label.Text);
+            // The banner tracks the hovered card's rules, not a stable selection prompt.
+            return null;
         }
 
         if (TryGetCombatHandSelection(currentScreen, out var hand))

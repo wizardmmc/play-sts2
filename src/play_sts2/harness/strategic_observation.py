@@ -39,6 +39,11 @@ _BOSS_NAMES = {
     "VANTOM_BOSS": "墨影幻灵",
     "WATERFALL_GIANT_BOSS": "瀑布巨兽",
 }
+_BOSS_MEMBERS = {
+    "KAISER_CRAB_BOSS": ("碾碎爪", "火箭"),
+    "QUEEN_BOSS": ("女王", "火炬头聚合体"),
+    "THE_KIN_BOSS": ("同族信徒", "同族神官"),
+}
 
 NodeKey = tuple[int, int]
 
@@ -57,6 +62,9 @@ def render_strategic_context(state: Mapping[str, Any]) -> str:
     boss_id = _clean_text(run.get("boss_id")) or "未知"
     boss_name = _BOSS_NAMES.get(boss_id)
     boss = f"{boss_name} ({boss_id})" if boss_name else boss_id
+    boss_members = _BOSS_MEMBERS.get(boss_id)
+    if boss_members:
+        boss += f" | 组成: {'、'.join(boss_members)}"
     lines = [f"【第{act_id}幕】", f"本幕Boss: {boss}", _render_ascension(run)]
     lines.extend(
         (

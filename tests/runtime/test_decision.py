@@ -46,10 +46,13 @@ def test_decision_engine_executes_model_action() -> None:
         assert body["temperature"] == 0.0
         assert body["messages"][0]["role"] == "system"
         assert "战斗决策模型" in body["messages"][0]["content"]
+        assert (
+            "- [0] 破损核心: 战斗开始时生成1个闪电充能球。"
+            in (body["messages"][0]["content"])
+        )
         assert body["messages"][1]["role"] == "user"
         assert (
-            "[0] 打击 | 1 能量 | 造成6点伤害。 | 目标: [1]"
-            in (body["messages"][1]["content"])
+            "[0]打击(1费)<AnyEnemy> 造成6点伤害。" in (body["messages"][1]["content"])
         )
         assert body["messages"][1]["content"].endswith(
             "可执行动作:\n- play_card(card_index, target_index)\n- end_turn"
@@ -545,6 +548,13 @@ def _combat_state() -> dict[str, Any]:
             "current_hp": 70,
             "max_hp": 75,
             "gold": 99,
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "破损核心",
+                    "description": "战斗开始时生成1个闪电充能球。",
+                }
+            ],
             "potions": [],
         },
         "combat": {
@@ -577,6 +587,7 @@ def _combat_state() -> dict[str, Any]:
                     "energy_cost": 1,
                     "star_cost": 0,
                     "resolved_rules_text": "造成6点伤害。",
+                    "target_type": "AnyEnemy",
                     "playable": True,
                     "valid_target_indices": [1],
                 }

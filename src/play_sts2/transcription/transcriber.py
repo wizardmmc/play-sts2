@@ -132,16 +132,22 @@ def _render_file(rows: list[dict[str, Any]], *, title: str) -> str:
     layers = {item[0].layer for item in rendered}
     if len(layers) != 1:
         raise TranscriptError("同一 transcript 文件包含多个 Harness 层")
-    prompt = system_prompt(rendered[0][0].layer)
     sections = [title]
     for index, (observation, action_line) in enumerate(rendered, start=1):
+        state = rows[index - 1].get("before_state")
+        if not isinstance(state, Mapping):
+            raise TranscriptError("Raw 动作缺少 before_state")
+        prompt = system_prompt(observation.layer, state)
+        user_heading = "──── user ────"
+        if observation.layer.value == "battle":
+            user_heading = f"──── user（回合 {state.get('turn', 0)}） ────"
         heading = f"## 决策 {index}"
         if observation.layer.value == "strategic":
             heading += _decision_context(rows[index - 1])
         sections.append(
             f"{heading}\n\n"
             f"──── system ────\n{prompt}\n\n"
-            f"──── user ────\n{observation.text}\n\n"
+            f"{user_heading}\n{observation.text}\n\n"
             f"──── assistant ────\n{action_line}"
         )
     return "\n\n".join(sections) + "\n"

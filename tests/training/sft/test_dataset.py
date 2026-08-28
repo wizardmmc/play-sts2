@@ -263,6 +263,7 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
     state = {
         "screen": "COMBAT",
         "in_combat": True,
+        "turn": 1,
         "available_actions": ["end_turn"],
         "run": {
             "character_name": "故障机器人",
@@ -272,7 +273,13 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
             "current_hp": 70,
             "max_hp": 75,
             "gold": 99,
-            "relics": [],
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "破损核心",
+                    "description": "战斗开始时生成1个闪电充能球。",
+                }
+            ],
             "potions": [],
             "deck": [],
         },
@@ -331,6 +338,20 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
     )
     assert [battle["action"] for battle in battles] == ["end_turn", "end_turn"]
     assert all(battle["screen"] == "COMBAT" for battle in battles)
+    assert all(
+        "- [0] 破损核心: 战斗开始时生成1个闪电充能球。"
+        in battle["messages"][0]["content"]
+        for battle in battles
+    )
+    assert all(
+        "【当前回合】1" in battle["messages"][0]["content"] for battle in battles
+    )
+    assert all(
+        battle["messages"][1]["content"].startswith("玩家:")
+        and "角色:" not in battle["messages"][1]["content"]
+        and "牌组 " not in battle["messages"][1]["content"]
+        for battle in battles
+    )
 
 
 def test_build_sft_dataset_excludes_training_ineligible_runs(tmp_path: Path) -> None:

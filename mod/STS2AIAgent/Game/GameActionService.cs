@@ -2706,7 +2706,7 @@ internal static class GameActionService
         }
 
         var selectedOption = options[request.option_index.Value];
-        var selectedOptionId = selectedOption.OptionId ?? string.Empty;
+        var initialOptionsSignature = BuildRestOptionSignature(options);
         var runState = RunManager.Instance.DebugOnlyGetState();
         var localPlayer = GameStateService.GetLocalPlayer(runState);
         var requiresTarget = GameStateService.RestOptionRequiresTarget(selectedOption, runState, localPlayer);
@@ -2723,25 +2723,13 @@ internal static class GameActionService
         {
             stable = await CompleteRestOptionTargetSelectionAsync(chooseTask, targetPlayer!, TimeSpan.FromSeconds(10));
         }
-        else if (selectedOptionId.Equals("SMITH", StringComparison.OrdinalIgnoreCase))
-        {
-            // SMITH 会保持任务未完成，直至后续选牌结束；一旦能观察到进入选牌页，
-            // 就立即返回。
-            ObserveBackgroundResult(chooseTask, "choose_rest_option");
-            stable = await WaitForRestOptionTransitionAsync(TimeSpan.FromSeconds(10));
-        }
         else
         {
-            stable = await chooseTask;
-            var transitionStable = await WaitForRestOptionTransitionAsync(TimeSpan.FromSeconds(stable ? 2 : 10));
-            if (!stable)
-            {
-                stable = transitionStable;
-            }
-            else
-            {
-                stable = transitionStable || stable;
-            }
+            stable = await WaitForRestOptionTransitionAsync(
+                TimeSpan.FromSeconds(10),
+                chooseTask,
+                initialOptionsSignature);
+            ObserveBackgroundResult(chooseTask, "choose_rest_option");
         }
 
         return new ActionResponsePayload
@@ -2902,10 +2890,16 @@ internal static class GameActionService
     }
 
     /// <summary>
-    /// 选择休息点选项后等待状态变化。进入选牌页（SMITH）、出现继续按钮（HEAL）
-    /// 或选项列表发生变化时，均视为状态已经推进。
+    /// 选择休息点选项后等待任务完成或状态变化。进入后续页面、出现继续按钮、
+    /// 选项列表发生变化或游戏任务完成时，均视为状态已经推进。
     /// </summary>
-    private static async Task<bool> WaitForRestOptionTransitionAsync(TimeSpan timeout)
+    /// <param name="timeout">等待游戏进入可再次观测状态的最长时间。</param>
+    /// <param name="chooseTask">可选的游戏选项任务；完成时与界面转换等价。</param>
+    /// <param name="initialOptionsSignature">执行动作前的选项列表签名。</param>
+    private static async Task<bool> WaitForRestOptionTransitionAsync(
+        TimeSpan timeout,
+        Task<bool>? chooseTask = null,
+        string? initialOptionsSignature = null)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
@@ -2928,19 +2922,50 @@ internal static class GameActionService
             }
 
             var options = RunManager.Instance.RestSiteSynchronizer.GetLocalOptions();
-            if (options.Count == 0 || options.All(static option => !option.IsEnabled))
+            if (options != null)
             {
-                restSiteRoom.Call(NRestSiteRoom.MethodName.ShowProceedButton);
-                ActiveScreenContext.Instance.Update();
+                var optionsChanged = initialOptionsSignature != null
+                    && BuildRestOptionSignature(options) != initialOptionsSignature;
+                if (options.Count == 0 || options.All(static option => !option.IsEnabled))
+                {
+                    restSiteRoom.Call(NRestSiteRoom.MethodName.ShowProceedButton);
+                    ActiveScreenContext.Instance.Update();
 
-                await WaitForNextFrameAsync();
-                proceedButton = restSiteRoom.ProceedButton;
-                return proceedButton != null && GodotObject.IsInstanceValid(proceedButton) && proceedButton.IsEnabled;
+                    await WaitForNextFrameAsync();
+                    proceedButton = restSiteRoom.ProceedButton;
+                    return optionsChanged
+                        || proceedButton != null
+                        && GodotObject.IsInstanceValid(proceedButton)
+                        && proceedButton.IsEnabled;
+                }
+
+                if (optionsChanged)
+                {
+                    return true;
+                }
+            }
+
+            if (chooseTask?.IsCompleted == true)
+            {
+                var taskResult = await chooseTask;
+                if (taskResult)
+                {
+                    return true;
+                }
+
+                chooseTask = null;
             }
         }
 
         return false;
     }
+
+    /// <summary>
+    /// 生成只包含休息选项身份与可用性的稳定签名，用于识别帐篷等连续选择。
+    /// </summary>
+    private static string BuildRestOptionSignature(IEnumerable<RestSiteOption> options) =>
+        string.Join("|", options.Select((option, index) =>
+            $"{index}:{option.OptionId}:{option.IsEnabled}"));
 
     private static async Task<ActionResponsePayload> ExecuteOpenShopInventoryAsync()
     {

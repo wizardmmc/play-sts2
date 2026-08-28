@@ -11,15 +11,22 @@ from .strategic_observation import render_map, render_strategic_context
 
 _MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
 _RESOURCE_PATTERN = re.compile(r"res://\S+?\.png")
+_VISIBLE_PILE_COST_PATTERN = re.compile(r"\s*\[([^\]]+费)\]\s*[：:]\s*")
 _INTENT_NAMES = {
     "Attack": "攻击",
-    "Buff": "强化",
-    "Debuff": "弱化",
+    "Buff": "增强",
+    "CardDebuff": "诅咒卡牌",
+    "DeathBlow": "处决",
+    "Debuff": "削弱",
+    "DebuffStrong": "强力削弱",
     "Defend": "防御",
     "Escape": "逃跑",
-    "Sleep": "睡眠",
-    "StatusCard": "塞入状态牌",
+    "Heal": "治疗",
+    "Hidden": "隐藏",
+    "Sleep": "沉睡",
+    "StatusCard": "塞状态牌",
     "Stun": "眩晕",
+    "Summon": "召唤",
     "Unknown": "未知",
 }
 
@@ -81,55 +88,15 @@ def build_observation(state: Mapping[str, Any]) -> Observation:
     if renderer is None:
         raise ObservationError(f"尚未支持的决策屏幕: {screen}")
 
-    sections = [
-        render_strategic_context(state)
-        if layer is HarnessLayer.STRATEGIC
-        else _render_run(state)
-    ]
+    sections = []
+    if layer is HarnessLayer.STRATEGIC:
+        sections.append(render_strategic_context(state))
     sections.extend((renderer(state), _render_actions(state, actions)))
     return Observation(
         layer=layer,
         text="\n\n".join(section for section in sections if section),
         available_actions=actions,
     )
-
-
-def _render_run(state: Mapping[str, Any]) -> str:
-    """渲染角色、进阶、幕数、楼层和整局资源。
-
-    Args:
-        state (Mapping[str, Any]): Mod 返回的完整当前游戏状态。
-
-    Returns:
-        str: 两行整局摘要。
-    """
-    run = state.get("run") or {}
-    act = int(run.get("act_id", 0)) + 1
-    relic_items = run.get("relics") or []
-    relics = "，".join(_clean_text(relic.get("name")) for relic in relic_items)
-    deck = run.get("deck") or []
-    deck_names = _format_deck_names(deck)
-    summary = (
-        f"角色: {run.get('character_name', '未知')} | "
-        f"进阶: {run.get('ascension', 0)} | 第 {act} 幕 | "
-        f"第 {run.get('floor', 0)} 层\n"
-        f"生命: {run.get('current_hp', 0)}/{run.get('max_hp', 0)} | "
-        f"金币: {run.get('gold', 0)}"
-    )
-    details = [summary, f"遗物: {relics or '无'}"]
-    described_relics = [
-        relic for relic in relic_items if _clean_text(relic.get("description"))
-    ]
-    if described_relics:
-        details.append("遗物效果:")
-        details.extend(
-            f"- [{relic.get('index')}] {_clean_text(relic.get('name'))}: "
-            f"{_clean_text(relic.get('description'))}"
-            for relic in described_relics
-        )
-    if deck:
-        details.append(f"牌组 {len(deck)} 张: {deck_names}")
-    return "\n".join(details)
 
 
 def _render_combat(state: Mapping[str, Any]) -> str:
@@ -144,20 +111,13 @@ def _render_combat(state: Mapping[str, Any]) -> str:
     combat = state.get("combat") or {}
     player = combat.get("player") or {}
     player_parts = [
-        f"生命 {player.get('current_hp', 0)}/{player.get('max_hp', 0)}",
-        f"格挡 {player.get('block', 0)}",
-        f"能量 {player.get('energy', 0)}",
-        f"星能 {player.get('stars', 0)}",
+        f"HP {player.get('current_hp', 0)}/{player.get('max_hp', 0)}",
+        f"格挡{player.get('block', 0)}",
+        f"能量{player.get('energy', 0)}",
+        f"星能{player.get('stars', 0)}",
     ]
-    if player.get("focus") is not None:
-        player_parts.append(f"集中 {player.get('focus')}")
     orbs = player.get("orbs") or []
-    if player.get("orb_capacity") is not None:
-        player_parts.append(f"充能球槽 {len(orbs)}/{player.get('orb_capacity')}")
-    lines = [
-        f"=== 战斗（回合 {state.get('turn', 0)}）===",
-        f"玩家: {' | '.join(player_parts)}",
-    ]
+    lines = [f"玩家: {' | '.join(player_parts)}"]
     if player.get("card_play_counters_reliable") is True:
         lines.append(
             "本回合已打出: "
@@ -165,17 +125,30 @@ def _render_combat(state: Mapping[str, Any]) -> str:
             f"攻击 {player.get('attacks_played_this_turn', 0)} | "
             f"技能 {player.get('skills_played_this_turn', 0)}"
         )
-    powers = _format_powers(player.get("powers") or [])
+    player_buffs = []
+    if player.get("focus") is not None:
+        player_buffs.append(f"集中{player.get('focus')}")
+    power_items = player.get("powers") or []
+    if player.get("focus") is not None:
+        power_items = [power for power in power_items if not _is_focus_power(power)]
+    powers = _format_powers(power_items)
     if powers:
-        lines.append(f"玩家状态: {powers}")
-    if orbs:
-        lines.append("充能球:")
-        lines.extend(_format_orb(orb) for orb in orbs)
+        player_buffs.append(powers)
+    if player_buffs:
+        lines.append(f"    buff: {' | '.join(player_buffs)}")
+    if player.get("orb_capacity") is not None:
+        lines.append(
+            "    "
+            + _format_orbs(
+                orbs,
+                capacity=player.get("orb_capacity"),
+            )
+        )
 
     lines.append("敌人:")
     lines.extend(_format_enemy(enemy) for enemy in combat.get("enemies") or [])
     lines.append("手牌:")
-    lines.extend(_format_card(card) for card in combat.get("hand") or [])
+    lines.extend(f"  {_format_card(card)}" for card in combat.get("hand") or [])
     agent_combat = (state.get("agent_view") or {}).get("combat") or {}
     lines.extend(
         _format_visible_pile(
@@ -254,10 +227,11 @@ def _render_reward(state: Mapping[str, Any]) -> str:
         parts = [f"[{item.get('index')}] {_clean_text(item.get('name'))}"]
         if item.get("claimable") is False:
             parts.append("暂不可领取")
+        name = _clean_text(item.get("name"))
         description = _clean_text(
             item.get("effect_description") or item.get("description")
         )
-        if description:
+        if description and description != name:
             parts.append(description)
         lines.append(" | ".join(parts))
 
@@ -535,19 +509,20 @@ def _render_card_selection(state: Mapping[str, Any]) -> str:
         state (Mapping[str, Any]): 当前选牌状态。
 
     Returns:
-        str: 选择进度及全部卡牌候选。
+        str: 页面提示及全部卡牌候选。
     """
     selection = state.get("selection") or {}
     lines = ["=== 选择卡牌 ==="]
     prompt = _clean_text(selection.get("prompt"))
-    if prompt:
+    cards = selection.get("cards") or []
+    card_rules = {
+        _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
+        for card in cards
+        if isinstance(card, Mapping)
+    }
+    if prompt and prompt not in card_rules:
         lines.append(prompt)
-    lines.append(
-        f"已选 {selection.get('selected_count', 0)} | "
-        f"至少 {selection.get('min_select', 0)} | "
-        f"至多 {selection.get('max_select', 0)}"
-    )
-    lines.extend(_format_card(card) for card in selection.get("cards") or [])
+    lines.extend(_format_card(card) for card in cards)
     return "\n".join(lines)
 
 
@@ -585,7 +560,7 @@ def _render_actions(state: Mapping[str, Any], actions: Sequence[str]) -> str:
 
 
 def _format_card(card: Mapping[str, Any]) -> str:
-    """把一张卡牌格式化为带索引、费用、效果和目标的单行文本。
+    """把一张卡牌格式化为紧凑、稳定的单行文本。
 
     Args:
         card (Mapping[str, Any]): Mod 返回的卡牌描述。
@@ -593,19 +568,23 @@ def _format_card(card: Mapping[str, Any]) -> str:
     Returns:
         str: 模型可据此选择的卡牌文本。
     """
-    parts = [f"[{card.get('index')}] {_card_name(card)}", _format_cost(card)]
+    prefix = f"[{card.get('index')}]{_card_name(card)}"
+    cost = _format_cost(card)
+    if cost:
+        prefix += f"({cost})"
+    target_type = _clean_text(card.get("target_type"))
+    if target_type and target_type != "Self":
+        prefix += f"<{target_type}>"
+    parts = [prefix]
     rules = _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
     if rules:
         parts.append(rules)
     if card.get("selected"):
-        parts.append("已选择")
+        parts.append("(已选择)")
     if card.get("playable") is False:
         reason = _clean_text(card.get("unplayable_reason"))
-        parts.append(f"不可使用{f': {reason}' if reason else ''}")
-    targets = card.get("valid_target_indices") or []
-    if targets:
-        parts.append(f"目标: {list(targets)}")
-    return " | ".join(part for part in parts if part)
+        parts.append(f"(不可使用{f': {reason}' if reason else ''})")
+    return " ".join(part for part in parts if part)
 
 
 def _card_name(card: Mapping[str, Any]) -> str:
@@ -621,24 +600,6 @@ def _card_name(card: Mapping[str, Any]) -> str:
     return f"{name}+" if card.get("upgraded") else name
 
 
-def _format_deck_names(deck: Sequence[Mapping[str, Any]]) -> str:
-    """按首次出现顺序压缩战斗观测中的牌组名称。
-
-    Args:
-        deck (Sequence[Mapping[str, Any]]): 当前完整牌组。
-
-    Returns:
-        str: 例如 ``打击×4，防御×4，电击`` 的紧凑摘要。
-    """
-    counts: dict[str, int] = {}
-    for card in deck:
-        name = _card_name(card)
-        counts[name] = counts.get(name, 0) + 1
-    return "，".join(
-        name if count == 1 else f"{name}×{count}" for name, count in counts.items()
-    )
-
-
 def _format_cost(card: Mapping[str, Any]) -> str:
     """把卡牌的能量与星能费用压缩为一段文本。
 
@@ -650,37 +611,39 @@ def _format_cost(card: Mapping[str, Any]) -> str:
     """
     costs = []
     if card.get("costs_x"):
-        costs.append("X 能量")
+        costs.append("X费")
     elif card.get("energy_cost") is not None and card.get("energy_cost") >= 0:
-        costs.append(f"{card.get('energy_cost')} 能量")
+        costs.append(f"{card.get('energy_cost')}费")
     if card.get("star_costs_x"):
-        costs.append("X 星能")
+        costs.append("X星能")
     elif card.get("star_cost", 0):
-        costs.append(f"{card.get('star_cost')} 星能")
-    return " + ".join(costs)
+        costs.append(f"{card.get('star_cost')}星能")
+    return "+".join(costs)
 
 
 def _format_enemy(enemy: Mapping[str, Any]) -> str:
-    """把一个敌人的生存资源、意图和状态格式化为单行文本。
+    """把一个敌人的生存资源、状态和意图格式化为缩进文本。
 
     Args:
         enemy (Mapping[str, Any]): Mod 返回的敌人描述。
 
     Returns:
-        str: 带目标索引的敌人文本。
+        str: 带目标索引且将状态、意图分行的敌人文本。
     """
-    parts = [
-        f"[{enemy.get('index')}] {_clean_text(enemy.get('name'))}",
-        f"生命 {enemy.get('current_hp', 0)}/{enemy.get('max_hp', 0)}",
-        f"格挡 {enemy.get('block', 0)}",
+    lines = [
+        (
+            f"  敌[{enemy.get('index')}] {_clean_text(enemy.get('name'))}: "
+            f"HP {enemy.get('current_hp', 0)}/{enemy.get('max_hp', 0)} | "
+            f"格挡{enemy.get('block', 0)}"
+        )
     ]
-    intents = "，".join(_format_intent(item) for item in enemy.get("intents") or [])
-    if intents:
-        parts.append(f"意图: {intents}")
     powers = _format_powers(enemy.get("powers") or [])
     if powers:
-        parts.append(f"状态: {powers}")
-    return " | ".join(parts)
+        lines.append(f"    buff: {powers}")
+    intents = "，".join(_format_intent(item) for item in enemy.get("intents") or [])
+    if intents:
+        lines.append(f"    意图:{intents}")
+    return "\n".join(lines)
 
 
 def _format_intent(intent: Mapping[str, Any]) -> str:
@@ -699,10 +662,10 @@ def _format_intent(intent: Mapping[str, Any]) -> str:
         total = intent.get("total_damage", intent.get("label", "?"))
         if hits > 1:
             damage = intent.get("damage", "?")
-            return f"{name} {damage}×{hits}（共 {total}）"
-        return f"{name} {total}"
+            return f"{name}{damage}×{hits}={total}"
+        return f"{name}{total}"
     label = _clean_text(intent.get("label"))
-    return f"{name} {label}" if label else name
+    return f"{name}{label}" if label else name
 
 
 def _format_powers(powers: Sequence[Mapping[str, Any]]) -> str:
@@ -712,14 +675,29 @@ def _format_powers(powers: Sequence[Mapping[str, Any]]) -> str:
         powers (Sequence[Mapping[str, Any]]): Mod 返回的能力描述序列。
 
     Returns:
-        str: 以中文逗号分隔的能力名称与层数。
+        str: 以竖线分隔的能力名称与层数。
     """
     values = []
     for power in powers:
         name = _clean_text(power.get("name"))
         amount = power.get("amount")
-        values.append(f"{name} {amount}" if amount is not None else name)
-    return "，".join(values)
+        values.append(f"{name}{amount}" if amount is not None else name)
+    return " | ".join(values)
+
+
+def _is_focus_power(power: Mapping[str, Any]) -> bool:
+    """判断能力项是否重复表达玩家的结构化集中数值。
+
+    Args:
+        power (Mapping[str, Any]): Mod 返回的单个能力项。
+
+    Returns:
+        bool: 能力 ID 或历史名称表示集中时为 ``True``。
+    """
+    return (
+        power.get("power_id") == "FOCUS_POWER"
+        or _clean_text(power.get("name")) == "集中"
+    )
 
 
 def _format_orb(orb: Mapping[str, Any]) -> str:
@@ -732,8 +710,29 @@ def _format_orb(orb: Mapping[str, Any]) -> str:
         str: 充能球的被动值与激发值。
     """
     return (
-        f"[{orb.get('slot_index')}] {_clean_text(orb.get('name'))} | "
-        f"被动 {orb.get('passive_value', 0)} | 激发 {orb.get('evoke_value', 0)}"
+        f"[{orb.get('slot_index')}]{_clean_text(orb.get('name'))}"
+        f"(被动{orb.get('passive_value', 0)}/激发{orb.get('evoke_value', 0)})"
+    )
+
+
+def _format_orbs(orbs: Sequence[Mapping[str, Any]], *, capacity: Any) -> str:
+    """按 FIFO 顺序渲染全部充能球和下一次激发位置。
+
+    Args:
+        orbs (Sequence[Mapping[str, Any]]): 当前已占用的充能球槽。
+        capacity (Any): 当前充能球总容量。
+
+    Returns:
+        str: 含容量、FIFO 次序与激发值的单行摘要。
+    """
+    ordered = sorted(orbs, key=lambda orb: int(orb.get("slot_index", 0)))
+    if not ordered:
+        return f"充能球(FIFO最旧→最新;下一激发=无): 0/{capacity} (空;无可激发球)"
+    next_index = ordered[0].get("slot_index", 0)
+    values = ",".join(_format_orb(orb) for orb in ordered)
+    return (
+        f"充能球(FIFO最旧→最新;下一激发=[{next_index}]): "
+        f"{len(ordered)}/{capacity} {values}"
     )
 
 
@@ -772,8 +771,10 @@ def _visible_pile_line(entry: Any) -> str:
         str: 清理富文本后的牌堆条目。
     """
     if isinstance(entry, Mapping):
-        return _clean_text(entry.get("line") or entry.get("name"))
-    return _clean_text(entry)
+        line = _clean_text(entry.get("line") or entry.get("name"))
+    else:
+        line = _clean_text(entry)
+    return _VISIBLE_PILE_COST_PATTERN.sub(r"(\1) ", line)
 
 
 def _visible_pile_count(

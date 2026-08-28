@@ -52,7 +52,12 @@ import pytest
                     },
                 },
             },
-            ("=== 商店（库存已打开）===", "[0] 眼部攻击", "45 金币", "删牌: 75 金币"),
+            (
+                "=== 商店（库存已打开）===",
+                "[0]眼部攻击(0费)",
+                "45 金币",
+                "删牌: 75 金币",
+            ),
         ),
         (
             {
@@ -120,7 +125,7 @@ import pytest
                     "cards": [{"index": 0, "name": "防御", "energy_cost": 1}],
                 },
             },
-            ("=== 查看牌组 ===", "查看牌组", "[0] 防御"),
+            ("=== 查看牌组 ===", "查看牌组", "[0]防御(1费)"),
         ),
         (
             {
@@ -229,6 +234,127 @@ def test_shop_observation_explains_that_reopening_does_not_refresh_stock() -> No
     assert observation.available_actions == ("open_shop_inventory", "proceed")
 
 
+def test_reward_observation_does_not_repeat_identical_description() -> None:
+    """奖励名称与描述同值时只展示一次业务信息。
+
+    Raises:
+        AssertionError: 金币或卡牌奖励仍被重复拼接。
+
+    Returns:
+        None: 此测试只验证奖励行去重。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "REWARD",
+        "in_combat": False,
+        "available_actions": ["claim_reward"],
+        "run": {"relics": [], "potions": [], "deck": []},
+        "reward": {
+            "rewards": [
+                {
+                    "index": 0,
+                    "name": "11金币",
+                    "description": "11金币",
+                    "effect_description": "",
+                },
+                {
+                    "index": 1,
+                    "name": "将一张牌添加到你的牌组。",
+                    "description": "将一张牌添加到你的牌组。",
+                    "effect_description": "",
+                },
+            ]
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "[0] 11金币\n" in observation.text
+    assert "[0] 11金币 | 11金币" not in observation.text
+    assert observation.text.count("将一张牌添加到你的牌组。") == 1
+
+
+def test_card_selection_hides_prompt_copied_from_first_card_rules() -> None:
+    """历史 raw 的首张卡说明不能伪装成选牌页面提示。
+
+    Raises:
+        AssertionError: 首张卡牌规则在候选列表之前重复出现。
+
+    Returns:
+        None: 此测试只验证有证据的历史数据降级。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    duplicated_rules = "将一张随机能力牌加入你的手牌。这张牌在本回合内免费打出。 消耗。"
+    state = {
+        "screen": "CARD_SELECTION",
+        "in_combat": False,
+        "available_actions": ["choose_reward_card"],
+        "run": {"relics": [], "potions": [], "deck": []},
+        "selection": {
+            "prompt": duplicated_rules,
+            "cards": [
+                {
+                    "index": 0,
+                    "name": "白噪声",
+                    "energy_cost": 1,
+                    "resolved_rules_text": duplicated_rules,
+                },
+                {
+                    "index": 1,
+                    "name": "引雷针",
+                    "energy_cost": 1,
+                    "resolved_rules_text": (
+                        "获得4点格挡。在下2个回合开始时，生成1个闪电充能球。"
+                    ),
+                },
+            ],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert observation.text.count(duplicated_rules) == 1
+    assert "[0]白噪声(1费)" in observation.text
+
+
+def test_rest_observation_renders_all_relic_added_options() -> None:
+    """帐篷与铲子增加的休息处选项由通用列表完整展示。
+
+    Raises:
+        AssertionError: Harness 把休息处硬编码成休息和锻造两项。
+
+    Returns:
+        None: 此测试刻画已有的通用休息处契约。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "REST",
+        "in_combat": False,
+        "available_actions": ["choose_rest_option"],
+        "run": {
+            "relics": [{"name": "帐篷"}, {"name": "铲子"}],
+            "potions": [],
+            "deck": [],
+        },
+        "rest": {
+            "options": [
+                {"index": 0, "option_id": "HEAL", "title": "休息"},
+                {"index": 1, "option_id": "SMITH", "title": "锻造"},
+                {"index": 2, "option_id": "DIG", "title": "挖掘"},
+                {"index": 3, "option_id": "LEAVE", "title": "离开"},
+            ]
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "[0] 休息" in observation.text
+    assert "[1] 锻造" in observation.text
+    assert "[2] 挖掘" in observation.text
+    assert "[3] 离开" in observation.text
+    assert "- choose_rest_option(option_index)" in observation.text
+
+
 def test_build_observation_renders_combat_decision() -> None:
     """战斗观测展示资源、敌人意图、手牌索引和合法动作。
 
@@ -304,6 +430,14 @@ def test_build_observation_renders_combat_decision() -> None:
                 "attacks_played_this_turn": 1,
                 "skills_played_this_turn": 2,
                 "card_play_counters_reliable": True,
+                "powers": [
+                    {
+                        "name": "集中",
+                        "amount": 2,
+                        "power_id": "FOCUS_POWER",
+                    },
+                    {"name": "敏捷", "amount": 1},
+                ],
                 "orbs": [
                     {
                         "slot_index": 0,
@@ -320,6 +454,7 @@ def test_build_observation_renders_combat_decision() -> None:
                     "current_hp": 30,
                     "max_hp": 48,
                     "block": 0,
+                    "powers": [{"name": "力量", "amount": 2}],
                     "intents": [
                         {
                             "intent_type": "Attack",
@@ -350,6 +485,7 @@ def test_build_observation_renders_combat_decision() -> None:
                     "energy_cost": 1,
                     "star_cost": 0,
                     "resolved_rules_text": "造成[blue]6[/blue]点伤害。",
+                    "target_type": "AnyEnemy",
                     "playable": True,
                     "valid_target_indices": [0],
                 },
@@ -359,6 +495,7 @@ def test_build_observation_renders_combat_decision() -> None:
                     "energy_cost": 1,
                     "star_cost": 0,
                     "resolved_rules_text": "获得5点格挡。",
+                    "target_type": "Self",
                     "playable": True,
                     "valid_target_indices": [],
                 },
@@ -368,6 +505,7 @@ def test_build_observation_renders_combat_decision() -> None:
                     "energy_cost": -1,
                     "star_cost": 0,
                     "resolved_rules_text": "不能被打出。",
+                    "target_type": "Self",
                     "playable": False,
                     "unplayable_reason": "unplayable",
                     "valid_target_indices": [],
@@ -405,31 +543,40 @@ def test_build_observation_renders_combat_decision() -> None:
         "discard_potion",
         "end_turn",
     )
-    assert "角色: 故障机器人 | 进阶: 2 | 第 1 幕 | 第 3 层" in observation.text
+    assert observation.text.startswith("玩家: HP 44/75 | 格挡6 | 能量2 | 星能1")
+    assert "角色:" not in observation.text
+    assert "金币:" not in observation.text
+    assert "遗物:" not in observation.text
+    assert "牌组 2 张" not in observation.text
+    assert "=== 战斗" not in observation.text
+    assert "玩家: HP 44/75 | 格挡6 | 能量2 | 星能1" in observation.text
+    assert "    buff: 集中2 | 敏捷1" in observation.text
+    assert observation.text.count("集中2") == 1
     assert (
-        "玩家: 生命 44/75 | 格挡 6 | 能量 2 | 星能 1 | 集中 2 | "
-        "充能球槽 1/3" in observation.text
+        "    充能球(FIFO最旧→最新;下一激发=[0]): "
+        "1/3 [0]闪电(被动3/激发8)" in observation.text
     )
-    assert "[0] 邪教徒 | 生命 30/48 | 格挡 0 | 意图: 攻击 6" in observation.text
-    assert "[1] 树枝史莱姆 | 生命 8/8 | 格挡 0 | 意图: 塞入状态牌 1" in (
-        observation.text
-    )
-    assert "[0] 打击 | 1 能量 | 造成6点伤害。 | 目标: [0]" in observation.text
-    assert "[2] 凡庸 | 不能被打出。 | 不可使用: unplayable" in observation.text
-    assert "-1 能量" not in observation.text
+    assert "  敌[0] 邪教徒: HP 30/48 | 格挡0" in observation.text
+    assert "    buff: 力量2" in observation.text
+    assert "    意图:攻击6" in observation.text
+    assert "  敌[1] 树枝史莱姆: HP 8/8 | 格挡0" in observation.text
+    assert "    意图:塞状态牌1" in observation.text
+    assert "  [0]打击(1费)<AnyEnemy> 造成6点伤害。" in observation.text
+    assert "  [1]防御(1费) 获得5点格挡。" in observation.text
+    assert "  [2]凡庸 不能被打出。 (不可使用: unplayable)" in observation.text
+    assert "造成6点伤害。 | 目标: [0]" not in observation.text
+    assert "-1费" not in observation.text
     assert (
         "[0] 火焰药水 | 可使用 | 对一个敌人造成20点伤害。 | 目标: [0]"
         in observation.text
     )
     assert "对一个敌人造成20点伤害。" in observation.text
     assert "本回合已打出: 卡牌 3 | 攻击 1 | 技能 2" in observation.text
-    assert "抽牌堆（4张）: 打击*2 [1费]：造成6点伤害。" in observation.text
-    assert "电击 [1费]：生成1个闪电充能球。" in observation.text
-    assert "弃牌堆（2张）: 防御*2 [1费]：获得5点格挡。" in observation.text
-    assert "消耗牌堆（1张）: 白噪声 [1费]：加入一张能力牌。" in observation.text
-    assert "牌组 2 张: 打击，防御" in observation.text
-    assert "遗物: 破损核心" in observation.text
-    assert "[0] 破损核心: 战斗开始时生成1个闪电充能球。" in observation.text
+    assert "抽牌堆（4张）: 打击*2(1费) 造成6点伤害。" in observation.text
+    assert "电击(1费) 生成1个闪电充能球。" in observation.text
+    assert "弃牌堆（2张）: 防御*2(1费) 获得5点格挡。" in observation.text
+    assert "消耗牌堆（1张）: 白噪声(1费) 加入一张能力牌。" in observation.text
+    assert "遗物效果:" not in observation.text
     assert "危险: 预计承受6点未格挡伤害，足以致命。" in observation.text
     assert observation.text.endswith(
         "可执行动作:\n"
@@ -438,6 +585,66 @@ def test_build_observation_renders_combat_decision() -> None:
         "- discard_potion(option_index)\n"
         "- end_turn"
     )
+
+
+def test_combat_observation_translates_every_recorded_intent_type() -> None:
+    """人类 raw 中出现过的非攻击意图全部渲染为中文。
+
+    Raises:
+        AssertionError: 结构化意图枚举直接泄漏为英文。
+
+    Returns:
+        None: 此测试只验证当前录制语料的完整意图词表。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    intent_names = {
+        "Buff": "增强",
+        "Debuff": "削弱",
+        "Defend": "防御",
+        "StatusCard": "塞状态牌",
+        "Summon": "召唤",
+        "Heal": "治疗",
+        "CardDebuff": "诅咒卡牌",
+        "DebuffStrong": "强力削弱",
+        "Sleep": "沉睡",
+        "Stun": "眩晕",
+        "DeathBlow": "处决",
+        "Escape": "逃跑",
+    }
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "turn": 1,
+        "available_actions": ["end_turn"],
+        "run": {"relics": [], "potions": []},
+        "combat": {
+            "player": {
+                "current_hp": 75,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 3,
+                "stars": 0,
+            },
+            "enemies": [
+                {
+                    "index": index,
+                    "name": f"测试敌人{index}",
+                    "current_hp": 10,
+                    "max_hp": 10,
+                    "block": 0,
+                    "intents": [{"intent_type": intent_type}],
+                }
+                for index, intent_type in enumerate(intent_names)
+            ],
+            "hand": [],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    for intent_type, expected in intent_names.items():
+        assert f"意图:{expected}" in observation.text
+        assert f"意图:{intent_type}" not in observation.text
 
 
 def test_build_observation_renders_complete_strategic_map_context() -> None:
@@ -561,7 +768,10 @@ def test_build_observation_renders_complete_strategic_map_context() -> None:
     observation = harness.build_observation(state)
 
     assert "【第0幕】" in observation.text
-    assert "本幕Boss: 同族小队 (THE_KIN_BOSS)" in observation.text
+    assert (
+        "本幕Boss: 同族小队 (THE_KIN_BOSS) | 组成: 同族信徒、同族神官"
+        in observation.text
+    )
     assert "难度3: 精英蜂拥（精英敌人出现更加频繁。）" in observation.text
     assert "【当前状态】" in observation.text
     assert "HP 60/75 | 金币110 | 第2层" in observation.text
@@ -577,6 +787,53 @@ def test_build_observation_renders_complete_strategic_map_context() -> None:
     assert "=== 全图(坐标邻接, 未走层) ===" in observation.text
     assert "(1,3)@敌→(2,2)敌 (2,4)?" in observation.text
     assert "(3,3)火→(4,3)王" in observation.text
+
+
+@pytest.mark.parametrize(
+    ("boss_id", "expected"),
+    [
+        ("KAISER_CRAB_BOSS", "组成: 碾碎爪、火箭"),
+        ("QUEEN_BOSS", "组成: 女王、火炬头聚合体"),
+        ("THE_KIN_BOSS", "组成: 同族信徒、同族神官"),
+    ],
+)
+def test_strategic_context_exposes_multi_monster_boss_encounters(
+    boss_id: str,
+    expected: str,
+) -> None:
+    """十二个遭遇 ID 中的复合遭遇显式覆盖十四个生产 Boss 单位。
+
+    Args:
+        boss_id (str): 游戏 ``run.boss_id`` 返回的遭遇 ID。
+        expected (str): 该遭遇中必须展示的怪物组成。
+
+    Raises:
+        AssertionError: 复合遭遇隐藏了目录中的 Boss 怪物单位。
+
+    Returns:
+        None: 此测试只核对 Boss 遭遇与怪物单位的映射。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "MAP",
+        "in_combat": False,
+        "available_actions": ["choose_map_node"],
+        "run": {
+            "boss_id": boss_id,
+            "relics": [],
+            "potions": [],
+            "deck": [],
+        },
+        "map": {
+            "available_nodes": [
+                {"index": 0, "row": 1, "col": 0, "node_type": "Monster"}
+            ]
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert expected in observation.text
 
 
 def test_build_observation_hides_unverified_historical_card_counters() -> None:
@@ -734,8 +991,7 @@ def test_build_observation_hides_unverified_historical_card_counters() -> None:
             (
                 "=== 选择卡牌 ===",
                 "选择1张牌。",
-                "已选 0 | 至少 0 | 至多 1",
-                "[0] 球状闪电+ | 1 能量 | 造成7点伤害。生成1个闪电充能球。",
+                "[0]球状闪电+(1费) 造成7点伤害。生成1个闪电充能球。",
             ),
             ("choose_reward_card", "skip_reward_cards"),
         ),

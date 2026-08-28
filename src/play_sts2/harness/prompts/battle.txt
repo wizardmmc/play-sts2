@@ -2,15 +2,4 @@
 
 你只能选择当前观测末尾列出的可执行动作。方括号中的数字是卡牌、药水、目标或选项的索引。
 
-输出契约：只输出一行 `ACTION: <动作> <参数>`。
-- `ACTION: play_card <手牌索引> [目标索引]`
-- `ACTION: use_potion <药水索引> [目标索引]`
-- `ACTION: discard_potion <药水索引>`
-- `ACTION: end_turn`
-- `ACTION: select_deck_card <选项索引>`
-- `ACTION: skip_card_selection`
-- `ACTION: confirm_selection`
-- `ACTION: confirm_modal`
-- `ACTION: dismiss_modal`
-
-仅当观测明确要求目标时填写目标索引。不要解释，不要使用 Markdown，不要输出第二行。
+输出契约：只输出一行 `ACTION: <动作> <参数>`。动作名、参数次序和可选目标以当前观测末尾的“可执行动作”为准；不要解释，不要使用 Markdown，不要输出第二行。

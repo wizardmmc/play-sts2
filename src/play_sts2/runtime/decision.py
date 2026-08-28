@@ -136,7 +136,7 @@ class DecisionEngine:
         messages = [
             ChatMessage(
                 role="system",
-                content=system_prompt(observation.layer),
+                content=system_prompt(observation.layer, state),
             ),
             *history,
             ChatMessage(role="user", content=user_content),

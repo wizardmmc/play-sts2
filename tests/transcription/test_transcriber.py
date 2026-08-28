@@ -55,9 +55,16 @@ def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -
     assert "## 规则" not in battle_text
     assert battle_text.count("## 决策") == 2
     assert battle_text.count("──── system ────") == 2
-    assert battle_text.count("──── user ────") == 2
+    assert battle_text.count("──── user（回合 1） ────") == 2
     assert battle_text.count("──── assistant ────") == 2
     assert "ACTION: end_turn" in battle_text
+    assert battle_text.count("【遗物】") == 2
+    assert battle_text.count("- [0] 破损核心: 战斗开始时生成1个闪电充能球。") == 2
+    assert battle_text.count("【当前回合】1") == 2
+    assert "【当前回合】\n" not in battle_text
+    assert "角色:" not in battle_text
+    assert "牌组 " not in battle_text
+    assert "遗物效果:" not in battle_text
     assert "human_play/" not in battle_text
     assert "event 101" not in battle_text
     assert "sample_id" not in strategy_text
@@ -65,6 +72,58 @@ def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -
     assert strategy_text.count("──── user ────") == 1
     assert strategy_text.count("──── assistant ────") == 1
     assert "ACTION: choose_map_node 0" in strategy_text
+
+
+def test_render_run_preserves_all_dynamic_rest_options(tmp_path: Path) -> None:
+    """Transcript 保留微型帐篷与铲子提供的完整休息处选项。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 共享 Harness 或 transcript 丢失动态休息选项。
+
+    Returns:
+        None: 此测试只验证 raw 到可读战略记录的投影。
+    """
+    run_dir = tmp_path / "raw/human/20260827-a1-f2-REST-SEED"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    _write_meta(run_dir, battle_count=0, battle_samples=0, strategic_samples=1)
+    decision = _decision(
+        event_id=104,
+        screen="MAP",
+        action="choose_map_node",
+        option_index=0,
+    )
+    state = decision["before_state"]
+    assert isinstance(state, dict)
+    state["screen"] = "REST"
+    state["available_actions"] = ["choose_rest_option"]
+    state.pop("map")
+    state["rest"] = {
+        "options": [
+            {"index": 0, "option_id": "HEAL", "title": "休息"},
+            {"index": 1, "option_id": "SMITH", "title": "锻造"},
+            {"index": 2, "option_id": "DIG", "title": "挖掘"},
+            {"index": 3, "option_id": "LEAVE", "title": "离开"},
+        ]
+    }
+    decision["action"] = "choose_rest_option"
+    decision["parameters"] = {"option_index": 2}
+    _write_jsonl(run_dir / "strategy/decisions.jsonl", [decision])
+
+    transcription = importlib.import_module("play_sts2.transcription")
+    result = transcription.render_run(run_dir, tmp_path / "transcripts")
+    strategy_text = (result.output_dir / "strategy/decisions.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[0] 休息" in strategy_text
+    assert "[1] 锻造" in strategy_text
+    assert "[2] 挖掘" in strategy_text
+    assert "[3] 离开" in strategy_text
+    assert "ACTION: choose_rest_option 2" in strategy_text
 
 
 def test_render_run_replaces_stale_transcript_tree(tmp_path: Path) -> None:
@@ -252,12 +311,23 @@ def _decision(
             "current_hp": 70,
             "max_hp": 75,
             "gold": 99,
-            "relics": [],
+            "relics": (
+                [
+                    {
+                        "index": 0,
+                        "name": "破损核心",
+                        "description": "战斗开始时生成1个闪电充能球。",
+                    }
+                ]
+                if battle
+                else []
+            ),
             "potions": [],
             "deck": [],
         },
     }
     if battle:
+        state["turn"] = 1
         state["combat"] = {
             "player": {
                 "current_hp": 70,
