@@ -15,7 +15,8 @@ e2 adapter 初始化新的 E3 运行，使用
 
 `sft-cuda.toml` 使用同一数据和 LoRA 配方，但只允许 `cuda` 或 `cuda:N`，基座以
 BF16 加载，LoRA 可训练参数仍强制为 FP32。通过独立的 `sft-cuda` 子命令运行，
-不改变 Mac 默认配置和 `sft` 命令。
+不改变 Mac 默认配置和 `sft` 命令。当前 E3 一轮共有 1,974 个优化步，因此 CUDA
+配置每 500 步覆盖一次 `checkpoint-last`，保证整轮训练期间可以精确续训。
 
 `inference.toml` 是本地模型转换、服务、冒烟和游戏 Runner 共用的唯一模型选择。
 `artifact_id`、合并目录和 MLX 目录必须对应；默认预先指向下一轮 e3，因此 e3
