@@ -142,9 +142,13 @@ uv run play-sts2-knowledge review \
 
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 
-> 当前 `data/datasets/sft/` 仍是 E2 基线，旧训练集和旧知识考试卷还含已废弃的
-> 实机敌人组合题。必须先确定 E3 配比、重新生成知识考试卷并成功执行
-> `play-sts2-train build-sft`，才能运行下面的 E3 正式训练命令。
+当前 E3 数据使用 `configs/sft-e3-mix.toml` 定向混合：远古者不进入训练或验证，
+角色机制与地图怪池重点保留，高频常规动作按上限抽样，低频特殊动作全部保留。
+重新构建命令为：
+
+```bash
+uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
+```
 
 ```bash
 uv sync --group training
@@ -185,9 +189,9 @@ uv run --group training play-sts2-train sft \
 `data/raw/human/splits.json` 明确归属，否则构建失败。训练/验证问题与
 `eval/knowledge` 考试卷完全重合时也会在写文件前失败。
 
-当前磁盘上的 `validation/dev.jsonl` 仍是 E2 行为基线：373 行全部来自
-`human_play`，没有算术题或知识题。上面的知识与算术验证规则描述的是下一次
-确定 E3 配比并执行 `build-sft` 后的目标分卷，不是对当前旧文件的描述。
+当前 E3 分卷共有 1,974 条训练样本、528 条验证样本和 600 条测试样本。验证集
+包括 373 条人类行为、123 条知识问答和 32 条独立数字的算术题；测试集只用于
+最终行为评测，不参与学习率选择。
 
 为完整人类局分配 dev/test 后，可以独立加载 adapter 做确定性生成验证：
 

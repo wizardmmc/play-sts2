@@ -105,6 +105,7 @@ def build_sft_dataset(
     test_run_ids: Collection[str] = (),
     knowledge_probe_root: Path | None = None,
     knowledge_validation_variants: int = 1,
+    mix_config_path: Path | None = None,
 ) -> SftDatasetResult:
     """构建知识与人类行为混合的可读 SFT 数据集。
 
@@ -121,6 +122,7 @@ def build_sft_dataset(
         test_run_ids (Collection[str]): 整局进入测试集的 run ID。
         knowledge_probe_root (Path | None): 可选的独立知识考试卷目录。
         knowledge_validation_variants (int): 每个同答案知识事实留出的问法数量。
+        mix_config_path (Path | None): 可选的知识类别和高频行为上限配方。
 
     Raises:
         DatasetBuildError: 分卷重叠、输入 JSON 无效或 Harness 契约不匹配。
@@ -172,6 +174,22 @@ def build_sft_dataset(
         run_id = str(row["run_id"])
         split = next(name for name, runs in run_splits.items() if run_id in runs)
         splits[split].append(row)
+    mix_manifest = None
+    if mix_config_path is not None:
+        from .mix import apply_sft_mix, load_sft_mix
+
+        mix_config = load_sft_mix(mix_config_path)
+        splits = apply_sft_mix(
+            splits,
+            seed=mix_config.seed,
+            knowledge_limits=mix_config.knowledge_limits,
+            human_train_action_limits=mix_config.human_train_action_limits,
+        )
+        mix_manifest = {
+            "seed": mix_config.seed,
+            "knowledge_limits": mix_config.knowledge_limits,
+            "human_train_action_limits": mix_config.human_train_action_limits,
+        }
     _validate_dataset_identity(splits)
     if knowledge_probe_root is not None:
         _reject_probe_leakage(splits, Path(knowledge_probe_root))
@@ -230,6 +248,8 @@ def build_sft_dataset(
             "test_runs": sorted(run_splits["test"]),
         },
     }
+    if mix_manifest is not None:
+        manifest["mix"] = mix_manifest
     manifest_path = destination / "manifest.json"
     _atomic_write_text(
         manifest_path,

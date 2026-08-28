@@ -551,6 +551,79 @@ def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
     }
 
 
+def test_build_sft_dataset_applies_explicit_mix_recipe(tmp_path: Path) -> None:
+    """正式构建应在分卷后应用 E3 类别上限并记录实际配方。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 远古者进入数据集、卡牌上限失效或 manifest 未记录配方。
+
+    Returns:
+        None: 此测试只构建最小知识数据集。
+    """
+    knowledge = tmp_path / "generated-v0.107.1"
+    (knowledge / "cards").mkdir(parents=True)
+    (knowledge / "ancients").mkdir()
+    for category, count in (("cards", 2), ("ancients", 1)):
+        rows = [
+            {
+                "category": category,
+                "object_id": f"{category}-{index}",
+                "source": "knowledge",
+                "prompt": f"Q: {category}-{index}？\nA:",
+                "completion": f" {category}-{index}。",
+            }
+            for index in range(count)
+        ]
+        (knowledge / category / "rows.jsonl").write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+    human = tmp_path / "human"
+    human.mkdir()
+    mix = tmp_path / "mix.toml"
+    mix.write_text(
+        """seed = 3
+
+[knowledge.train]
+cards = 1
+ancients = 0
+
+[knowledge.dev]
+cards = 0
+ancients = 0
+
+[human.train_max_per_action]
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        result = build_sft_dataset(
+            knowledge_root=knowledge,
+            human_root=human,
+            output_root=tmp_path / "dataset",
+            mix_config_path=mix,
+        )
+    except TypeError as exc:
+        pytest.fail(f"尚未接入 E3 混合配方: {exc}")
+
+    rows = [json.loads(line) for line in result.train_path.read_text().splitlines()]
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert len(rows) == 1
+    assert rows[0]["category"] == "cards"
+    assert manifest["mix"] == {
+        "seed": 3,
+        "knowledge_limits": {
+            "train": {"cards": 1, "ancients": 0},
+            "dev": {"cards": 0, "ancients": 0},
+        },
+        "human_train_action_limits": {},
+    }
+
+
 def test_build_sft_dataset_rejects_unassigned_eligible_run(tmp_path: Path) -> None:
     """可训练的人类局不在归属名册中时不得静默进入训练集。
 

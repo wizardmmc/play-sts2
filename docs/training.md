@@ -22,7 +22,7 @@ SSE 精确人类动作 ─→ combat/strategy ─→ Harness ┘
 构建命令：
 
 ```bash
-uv run play-sts2-train build-sft
+uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
 ```
 
 默认知识入口是 `generated-v0.107.1`。地图怪池由固定版本 Mod 的四张地图模型
@@ -33,9 +33,10 @@ uv run play-sts2-train build-sft
 可训练局如果没有明确归属，构建会失败。审计失败的
 `A7L5LAXFYJ` 在 raw meta 中标记 `training_eligible=false`，保留追溯但不训练。
 
-当前落盘的 `validation/dev.jsonl` 还是 E2 行为基线，共 373 行且来源全部是
-`human_play`；它没有算术或知识类别。知识与算术验证候选只有在确定 E3 混合比例
-并重新执行 `build-sft` 后才会进入新的验证集。
+当前 E3 数据共有 1,974 条训练样本、528 条验证样本和 600 条测试样本。验证集由
+373 条人类行为、123 条知识问答和 32 条独立数字的算术题组成；远古者不进入
+训练或验证。角色机制和地图怪池重点保留，高频常规动作按配置上限抽样，未列出的
+低频动作全部保留。
 
 知识验证集按“同一事实留出一种未见问法”构建，可用于学习率和训练轮数选择，
 不声称实体从未出现。算术验证题改用独立随机种子和新数字生成，不从训练题中
@@ -106,8 +107,8 @@ SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 a
 
 ## 训练
 
-当前落盘数据仍是 E2 基线，旧训练集和旧召回考试卷含已废弃的实机敌人组合题。
-必须先确定 E3 混合比例、重建召回考试卷并成功运行 `build-sft`，再执行正式训练。
+当前落盘数据已按 `configs/sft-e3-mix.toml` 构建为 E3 定向混合。修改候选数据或
+配比后，应重新生成召回考试卷并运行同一混合命令，确认无考试题精确泄漏后再训练。
 
 ```bash
 uv sync --group training

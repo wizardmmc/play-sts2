@@ -156,7 +156,7 @@ data/datasets/sft/
 重建命令为：
 
 ```bash
-uv run play-sts2-train build-sft
+uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
 ```
 
 更简洁的写入边界和常用命令见 `data/README.md`。

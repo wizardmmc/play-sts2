@@ -35,6 +35,7 @@ from .knowledge_evaluation import (
     score_recall_answer,
 )
 from .merge import merge_sft_adapter
+from .mix import SftMixConfig, apply_sft_mix, load_sft_mix
 from .trainer import (
     LORA_TARGET_MODULES,
     ChunkedCrossEntropy,
@@ -61,9 +62,11 @@ __all__ = [
     "OptimizationResult",
     "SftConfig",
     "SftDatasetResult",
+    "SftMixConfig",
     "SftTrainingError",
     "TokenizedSample",
     "adapter_source_files",
+    "apply_sft_mix",
     "attach_lora",
     "build_sft_dataset",
     "chunked_masked_stats",
@@ -76,6 +79,7 @@ __all__ = [
     "evaluate_tokenized_samples",
     "load_knowledge_probes",
     "load_sft_config",
+    "load_sft_mix",
     "load_tokenized_samples",
     "merge_sft_adapter",
     "optimize",

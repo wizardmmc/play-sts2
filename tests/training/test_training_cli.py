@@ -5,6 +5,53 @@ from pathlib import Path
 from play_sts2.training import cli
 
 
+def test_build_sft_command_passes_explicit_mix_recipe(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """数据构建命令应把 E3 混合配方传给构建器。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Raises:
+        AssertionError: CLI 未解析或未传递混合配方。
+
+    Returns:
+        None: 此测试不读取真实训练数据。
+    """
+    calls: list[Path | None] = []
+
+    class Result:
+        """提供 CLI 输出需要的最小构建结果。"""
+
+        output_root = Path("data/datasets/sft")
+        train_count = 10
+        dev_count = 2
+        test_count = 1
+
+    def build(**kwargs: object) -> Result:
+        """记录 CLI 传入的混合配方。
+
+        Args:
+            **kwargs (object): 数据构建关键字参数。
+
+        Returns:
+            Result: 最小构建结果。
+        """
+        calls.append(kwargs.get("mix_config_path"))
+        return Result()
+
+    monkeypatch.setattr(cli, "build_sft_dataset", build)
+
+    result = cli.main(["build-sft", "--mix", "configs/sft-e3-mix.toml"])
+
+    assert result == 0
+    assert calls == [Path("configs/sft-e3-mix.toml")]
+    assert '"train": 10' in capsys.readouterr().out
+
+
 def test_merge_sft_command_uses_config_and_optional_output(
     monkeypatch: object,
     capsys: object,

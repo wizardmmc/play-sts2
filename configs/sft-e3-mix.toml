@@ -1,0 +1,36 @@
+seed = 20260828
+
+[knowledge.train]
+ancients = 0
+arithmetic = 64
+cards = 128
+characters = -1
+enchantments = 12
+encounters = -1
+events = 16
+keywords = 16
+monsters = 64
+potions = 32
+powers = 64
+relics = 64
+
+[knowledge.dev]
+ancients = 0
+arithmetic = 32
+cards = 64
+characters = -1
+enchantments = 8
+encounters = -1
+events = 8
+keywords = 8
+monsters = 32
+potions = 16
+powers = 32
+relics = 32
+
+[human.train_max_per_action]
+play_card = 600
+end_turn = 160
+claim_reward = 100
+choose_map_node = 100
+proceed = 80

@@ -39,9 +39,10 @@ raw/human/ ──→ transcripts/ ──┘
 - `datasets/sft/`：知识与人类动作经当前 Harness 渲染后的训练、验证和测试集；
   路径分别为 `train.jsonl`、`validation/dev.jsonl`、`eval/test.jsonl`。
 
-当前工作区已有的 `datasets/sft/` 仍是旧内容迁移后的基线，包含历史
-`curated_knowledge` 和 `web_wiki` 来源，**不能作为新的 E3 训练输入**。新的 E3
-需要先确定 `generated-v0.107.1`、算术与人类行为的混合比例，再整体重建。
+当前 `datasets/sft/` 已按 `configs/sft-e3-mix.toml` 构建为 E3 定向混合，共
+1,974 条训练样本、528 条验证样本和 600 条测试样本。修改知识候选、算术候选或
+人类行为后，使用 `play-sts2-train build-sft --mix configs/sft-e3-mix.toml`
+整体重建。
 构建器会为每个具有多种问法的同一知识事实留出一种问法到验证集，并拒绝训练/
 验证问题与 `eval/knowledge` 考试卷完全重合。
 
@@ -93,7 +94,7 @@ uv run play-sts2-transcribe \
 重建完整 SFT 数据集：
 
 ```bash
-uv run play-sts2-train build-sft
+uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
 ```
 
 当前行为样本的战斗与战略动作都使用独立的 `system/user/assistant` 三消息结构；

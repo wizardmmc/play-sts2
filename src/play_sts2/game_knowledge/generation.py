@@ -760,7 +760,7 @@ def _character_orb_questions(body: str) -> list[tuple[str, str]]:
         body (str): 角色规范事实 Markdown 正文。
 
     Returns:
-        list[tuple[str, str]]: 每种充能球各一条游戏描述和一条数值问答。
+        list[tuple[str, str]]: 每种充能球各三条描述问法和三条数值问法。
     """
     rows: list[tuple[str, str]] = []
     for matched in re.finditer(r"(?ms)^## 充能球：([^\n]+)\s*\n(.*?)(?=^## |\Z)", body):
@@ -769,12 +769,24 @@ def _character_orb_questions(body: str) -> list[tuple[str, str]]:
         description = re.search(r"(?m)^- 游戏描述：(.+)$", section)
         mechanics = re.search(r"(?m)^- 基础数值与集中：(.+)$", section)
         if description is not None:
-            rows.append((f"游戏如何描述'{name}'充能球？", description.group(1)))
-        if mechanics is not None:
-            rows.append(
+            answer = description.group(1)
+            rows.extend(
                 (
-                    f"实机测得'{name}'充能球的基础数值和集中关系是什么？",
-                    mechanics.group(1),
+                    (f"游戏如何描述'{name}'充能球？", answer),
+                    (f"'{name}'充能球的效果是什么？", answer),
+                    (f"生成'{name}'充能球后，它会提供什么效果？", answer),
+                )
+            )
+        if mechanics is not None:
+            answer = mechanics.group(1)
+            rows.extend(
+                (
+                    (
+                        f"实机测得'{name}'充能球的基础数值和集中关系是什么？",
+                        answer,
+                    ),
+                    (f"'{name}'充能球的被动、激发和集中加成分别怎样？", answer),
+                    (f"集中会如何影响'{name}'充能球的基础数值？", answer),
                 )
             )
     return rows

@@ -1622,7 +1622,13 @@ def test_rebuild_generates_complete_defect_orb_knowledge(tmp_path: Path) -> None
     )
     assert "## 充能球：闪电" in canonical
     assert "## 充能球：等离子" in canonical
-    assert len(rows) == 13
+    assert len(rows) == 33
+    lightning_mechanics = [
+        row
+        for row in rows
+        if "闪电" in row["prompt"] and "被动（回合结束）3，激发8" in row["completion"]
+    ]
+    assert len(lightning_mechanics) == 3
     answers = [row["completion"].strip() for row in rows]
     assert (
         "初始HP75，金币99，每回合能量3，充能球槽3。"

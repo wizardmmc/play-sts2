@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/datasets/sft/eval/knowledge"),
     )
+    build.add_argument(
+        "--mix",
+        type=Path,
+        help="可选的 E3 知识类别与高频行为上限 TOML",
+    )
 
     train = subparsers.add_parser("sft", help="训练 Qwen LoRA adapter")
     train.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
@@ -125,6 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dev_run_ids=args.dev_run,
             test_run_ids=args.test_run,
             knowledge_probe_root=args.knowledge_probes_root,
+            mix_config_path=args.mix,
         )
         output = {
             "output_root": str(result.output_root),
