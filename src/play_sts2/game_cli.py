@@ -64,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
         "--app-path",
         type=Path,
         default=default_app,
-        help="SlayTheSpire2.app 路径；默认读取 STS2_APP_PATH 或 Steam 安装位置",
+        help="SlayTheSpire2.app 路径；默认读取 STS2_APP_PATH 或项目固定副本",
     )
     parser.add_argument(
         "--profile",

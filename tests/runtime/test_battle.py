@@ -263,10 +263,24 @@ class EventDrivenBattleGame:
     """只通过事件等待交付下一决策状态，拒绝主动状态轮询。"""
 
     def __init__(self) -> None:
+        """初始化动作与事件等待记录。
+
+        Returns:
+            None: 此方法只初始化测试替身。
+        """
         self.actions: list[tuple[str, dict[str, int]]] = []
         self.waits: list[tuple[int, float]] = []
 
     def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        """首次返回过渡状态，第二次结束模拟战斗。
+
+        Args:
+            action (str): Harness 提交的战斗动作。
+            **parameters (int): 动作参数，包括期望状态 revision。
+
+        Returns:
+            dict[str, Any]: 过渡战斗状态或最终奖励状态。
+        """
         self.actions.append((action, parameters))
         if len(self.actions) == 1:
             return {
@@ -290,12 +304,26 @@ class EventDrivenBattleGame:
         after_revision: int,
         timeout: float,
     ) -> dict[str, Any]:
+        """返回事件流交付的下一稳定战斗状态。
+
+        Args:
+            after_revision (int): 已消费的最新状态 revision。
+            timeout (float): 事件等待超时秒数。
+
+        Returns:
+            dict[str, Any]: 事件流交付的下一决策状态。
+        """
         self.waits.append((after_revision, timeout))
         state = _combat_state(turn=2, state_revision=3)
         state["combat"]["player"]["energy"] = 2
         return state
 
     def state(self) -> dict[str, Any]:
+        """拒绝事件等待期间的主动状态轮询。
+
+        Raises:
+            AssertionError: 调用方在应使用事件流时轮询了状态。
+        """
         raise AssertionError("事件等待期间不应轮询 /state")
 
 
@@ -303,11 +331,28 @@ class StaleRevisionBattleGame:
     """首次提交时报告观测已过期，随后接受新 revision 的动作。"""
 
     def __init__(self) -> None:
+        """初始化过期观测后的最新战斗状态。
+
+        Returns:
+            None: 此方法只初始化测试替身。
+        """
         self.actions: list[tuple[str, dict[str, int]]] = []
         self.current = _combat_state(turn=2, state_revision=2)
         self.current["combat"]["player"]["energy"] = 2
 
     def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        """首次报告 revision 过期，重试时结束模拟战斗。
+
+        Args:
+            action (str): Harness 提交的战斗动作。
+            **parameters (int): 包含期望状态 revision 的动作参数。
+
+        Raises:
+            httpx.HTTPStatusError: 首次动作使用了过期 revision。
+
+        Returns:
+            dict[str, Any]: 重试成功后的最终奖励状态。
+        """
         self.actions.append((action, parameters))
         if len(self.actions) == 1:
             raise _stale_state(parameters["expected_state_revision"], self.current)

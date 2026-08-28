@@ -100,9 +100,24 @@ def test_openai_provider_posts_messages_and_reads_reply() -> None:
 def test_openai_provider_rejects_unbound_response_model(
     reported_model: str | None,
 ) -> None:
-    """请求绑定模型后，服务必须在响应中确认同一个模型标识。"""
+    """请求绑定模型后，服务必须在响应中确认同一个模型标识。
+
+    Args:
+        reported_model (str | None): 参数化的缺失或错误响应模型标识。
+
+    Returns:
+        None: 此测试只检查响应模型身份绑定。
+    """
 
     def respond(_request: httpx.Request) -> httpx.Response:
+        """返回缺失或错误模型标识的生成响应。
+
+        Args:
+            _request (httpx.Request): 未使用的对话生成请求。
+
+        Returns:
+            httpx.Response: 携带参数化错误身份的模拟响应。
+        """
         payload: dict[str, object] = {
             "choices": [
                 {
@@ -127,9 +142,21 @@ def test_openai_provider_rejects_unbound_response_model(
 
 
 def test_openai_provider_checks_model_identity_before_length_classification() -> None:
-    """错误模型的截断响应不能被 readiness 当作已成功加载目标模型。"""
+    """错误模型的截断响应不能被 readiness 当作已成功加载目标模型。
+
+    Returns:
+        None: 此测试只检查身份错误的诊断优先级。
+    """
 
     def respond(_request: httpx.Request) -> httpx.Response:
+        """返回来自错误模型的截断响应。
+
+        Args:
+            _request (httpx.Request): 未使用的对话生成请求。
+
+        Returns:
+            httpx.Response: 错误模型标识优先于截断诊断的模拟响应。
+        """
         return httpx.Response(
             200,
             json={
@@ -155,9 +182,27 @@ def test_openai_provider_checks_model_identity_before_length_classification() ->
 
 
 def test_openai_provider_can_explicitly_enable_thinking() -> None:
-    """思考 profile 必须通过 MLX 请求参数显式打开，而不是依赖模板默认值。"""
+    """思考 profile 必须通过 MLX 请求参数显式打开，而不是依赖模板默认值。
+
+    Raises:
+        AssertionError: 生成请求未显式携带 thinking 开关。
+
+    Returns:
+        None: 此测试只检查 thinking profile 的请求绑定。
+    """
 
     def respond(request: httpx.Request) -> httpx.Response:
+        """核对 thinking 请求参数并返回合法动作。
+
+        Args:
+            request (httpx.Request): 待检查的对话生成请求。
+
+        Raises:
+            AssertionError: 请求未显式开启 thinking。
+
+        Returns:
+            httpx.Response: 包含推理与合法动作的模拟响应。
+        """
         body = json.loads(request.content)
         assert body["chat_template_kwargs"] == {"enable_thinking": True}
         return httpx.Response(
@@ -189,9 +234,24 @@ def test_openai_provider_can_explicitly_enable_thinking() -> None:
 
 
 def test_openai_provider_classifies_generation_truncated_during_thinking() -> None:
-    """思考耗尽 token 时保留诊断信息并抛出专门错误，不能伪装成协议错误。"""
+    """思考耗尽 token 时保留诊断信息并抛出专门错误，不能伪装成协议错误。
+
+    Raises:
+        AssertionError: 截断异常未保留 reasoning、finish reason 或 token 计数。
+
+    Returns:
+        None: 此测试只检查思考截断的诊断分类。
+    """
 
     def respond(_request: httpx.Request) -> httpx.Response:
+        """返回仅含未完成推理的长度截断响应。
+
+        Args:
+            _request (httpx.Request): 未使用的对话生成请求。
+
+        Returns:
+            httpx.Response: 仅含 reasoning 的长度截断响应。
+        """
         return httpx.Response(
             200,
             json={
@@ -230,9 +290,21 @@ def test_openai_provider_classifies_generation_truncated_during_thinking() -> No
 
 
 def test_openai_provider_preserves_reasoning_only_stopped_reply() -> None:
-    """MLX 正常停止但没有最终文本时，保留 reasoning 并交给 Harness 判空。"""
+    """MLX 正常停止但没有最终文本时，保留 reasoning 并交给 Harness 判空。
+
+    Returns:
+        None: 此测试只检查 reasoning-only 响应的保留契约。
+    """
 
     def respond(_request: httpx.Request) -> httpx.Response:
+        """返回正常停止但没有最终文本的推理响应。
+
+        Args:
+            _request (httpx.Request): 未使用的对话生成请求。
+
+        Returns:
+            httpx.Response: 包含 reasoning 但缺少最终文本的响应。
+        """
         return httpx.Response(
             200,
             json={

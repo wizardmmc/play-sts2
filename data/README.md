@@ -10,10 +10,18 @@ raw/human/ ──→ transcripts/ ──┘
 
 ## 可以手工修改的来源
 
-- `game_knowledge/web_wiki/`：保留网页来源的单实体 Markdown。
-- `game_knowledge/mod_export/`：按游戏版本保存 Mod 实测导出；事实更新应重新导出。
-- `game_knowledge/curated-v0.107.1/`：已核验问法、回答变体和训练反馈补强。新增
-  问法直接进入相应类别，不复制 Wiki/Mod 已经能确定的事实。
+- `game_knowledge/web_wiki/`：保留网页来源的单实体 Markdown；不直接进入当前
+  多问法候选，只允许在离线重建时补充怪物招式与循环。
+- `game_knowledge/mod_export/v0.107.1/`：固定版本的 Mod 原始快照与 canonical
+  Markdown；包含卡牌完整升级、附魔、怪物招式和事件战遭遇。
+- `game_knowledge/generated-v0.107.1/`：从 canonical 知识可重复生成的按实体
+  JSONL 候选；不是 E3 train/dev/test 分卷。
+- `game_knowledge/event_entries/v0.107.1/`：固定版本事件 UI 入场快照；`events/`
+  与 `ancients/` 保存真正进入事件后的已解析文本，状态依赖快照不会被泛化为
+  通用监督问法。
+- `game_knowledge/reports/v0.107.1.md`：特殊对象、补充来源和待补录缺口汇总。
+- `src/play_sts2/game_knowledge/curated/v0.107.1.json`：真正随 Git 和 Python
+  包分发的固定版本事实修正及监督排除清单。
 - `raw/human/`：人类实际执行的精确动作事实。录制器写入，通常不手工编辑。
 - `raw/human/splits.json`：按 seed 将一局的全部样本整体放入 train/dev/test。
 
@@ -22,8 +30,14 @@ raw/human/ ──→ transcripts/ ──┘
 - `transcripts/`：raw 的人类可读投影，不参与训练事实判定。
 - `datasets/sft/`：知识与人类动作经当前 Harness 渲染后的训练、开发和测试集。
 
-不要直接修补派生产物。状态渲染错误应修 Harness；知识事实错误应修来源；新问法
-应加到 curated；人类行为准入由对应局 `meta.json` 的 `training_eligible` 决定。
+当前工作区已有的 `datasets/sft/` 是旧构建产物，仍包含历史
+`curated_knowledge` 和 `web_wiki` 来源，**不能作为新的 E3 训练输入**。新的 E3
+需要先确定 `generated-v0.107.1`、人类行为等来源的混合比例和分卷规则，再改造
+dataset builder 并整体重建该目录。
+
+不要直接修补派生产物。状态渲染错误应修 Harness；知识事实错误应修 Mod 导出器
+或 `src/play_sts2/game_knowledge/curated/v0.107.1.json`；人类行为准入由对应局
+`meta.json` 的 `training_eligible` 决定。
 
 ## 人类 raw 契约
 
@@ -52,6 +66,9 @@ ID 只用于带明确 provenance 的人工确认修正。
 排除。
 
 ## 重建命令
+
+游戏知识应按 `export → rebuild（应用 curated）→ generate-questions → review`
+顺序重建；`generate-questions` 不会创建 E3 分卷。完整参数见项目 README。
 
 重建某一局 transcript：
 

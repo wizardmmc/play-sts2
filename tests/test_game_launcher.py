@@ -8,6 +8,24 @@ from typing import Any
 import pytest
 
 
+def test_default_app_is_project_pinned_v01071_runtime() -> None:
+    """默认启动器不能继续指向会被 Steam 自动更新的安装目录。
+
+    Raises:
+        AssertionError: 默认应用路径未指向项目专用 v0.107.1 副本。
+
+    Returns:
+        None: 此测试只检查启动器的默认路径。
+    """
+    launcher = importlib.import_module("play_sts2.game_launcher")
+
+    expected = (
+        Path(__file__).resolve().parents[1]
+        / ".runtime/SlayTheSpire2-v0.107.1/SlayTheSpire2.app"
+    )
+    assert launcher.DEFAULT_APP == expected
+
+
 class ExitedProcess:
     """模拟已经自行退出但仍需回收的游戏进程。"""
 

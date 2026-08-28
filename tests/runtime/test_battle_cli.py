@@ -186,6 +186,7 @@ def test_main_connects_qwen_and_finishes_current_battle(
     """命令行连接指定游戏与 Qwen 服务并打印战斗结果。
 
     Args:
+        tmp_path (Path): Pytest 提供的隔离临时目录。
         monkeypatch (pytest.MonkeyPatch): 用于替换真实网络客户端。
         capsys (pytest.CaptureFixture[str]): 用于读取命令标准输出。
 
@@ -206,10 +207,36 @@ def test_main_connects_qwen_and_finishes_current_battle(
         serving_model: Path,
         enable_thinking: bool,
     ) -> None:
+        """记录模型身份预检参数并核对 thinking 配置。
+
+        Args:
+            base_url (str): 模型服务基础 URL。
+            artifact_id (str): 期望的训练制品标识。
+            merged_model (Path): 合并后模型目录。
+            serving_model (Path): MLX 服务模型目录。
+            enable_thinking (bool): 是否开启模型思考模式。
+
+        Raises:
+            AssertionError: 当前战斗未启用 thinking profile。
+
+        Returns:
+            None: 此替身只记录身份预检参数。
+        """
         assert enable_thinking is True
         preflight_calls.append((base_url, artifact_id, merged_model, serving_model))
 
     def game(base_url: str) -> CliGameClient:
+        """确保身份预检先于游戏客户端连接。
+
+        Args:
+            base_url (str): 游戏 Mod API 基础 URL。
+
+        Raises:
+            AssertionError: 游戏客户端在模型身份预检前被创建。
+
+        Returns:
+            CliGameClient: 不访问真实游戏的 CLI 客户端替身。
+        """
         assert preflight_calls, "模型身份预检必须发生在连接游戏之前"
         return CliGameClient(base_url)
 

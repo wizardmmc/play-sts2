@@ -15,9 +15,8 @@ from pathlib import Path
 import httpx
 
 DEFAULT_APP = (
-    Path.home()
-    / "Library/Application Support/Steam/steamapps/common"
-    / "Slay the Spire 2/SlayTheSpire2.app"
+    Path(__file__).resolve().parents[2]
+    / ".runtime/SlayTheSpire2-v0.107.1/SlayTheSpire2.app"
 )
 DEFAULT_PORT = 8080
 DEFAULT_PROFILE = Path(__file__).resolve().parents[2] / "e2e/fixtures/profile"

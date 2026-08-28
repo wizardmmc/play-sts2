@@ -15,6 +15,10 @@ def test_main_prepares_artifact_selected_by_config(
 ) -> None:
     """无模型路径参数时，prepare 只使用配置声明的完整 artifact 身份。
 
+    Args:
+        tmp_path (Path): Pytest 提供的隔离配置目录。
+        monkeypatch (pytest.MonkeyPatch): 用于替换真实模型转换实现。
+
     Raises:
         AssertionError: prepare 默认路径仍指向第一轮或复用同一输出目录。
 
@@ -26,6 +30,16 @@ def test_main_prepares_artifact_selected_by_config(
     calls: list[tuple[Path, Path, str]] = []
 
     def prepare(source_arg: Path, target_arg: Path, *, artifact_id: str) -> Path:
+        """记录 prepare 选择的完整模型制品身份。
+
+        Args:
+            source_arg (Path): 合并后模型的输入路径。
+            target_arg (Path): MLX 服务制品的输出路径。
+            artifact_id (str): 完整模型制品标识。
+
+        Returns:
+            Path: 未执行转换的测试目标路径。
+        """
         calls.append((source_arg, target_arg, artifact_id))
         return target_arg
 

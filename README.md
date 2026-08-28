@@ -26,6 +26,15 @@ uv run play-sts2-game
 uv run play-sts2-game --mode headed
 ```
 
+需要在 `8082` 端口打开可见游戏窗口时，直接运行：
+
+```bash
+uv run play-sts2-game --port 8082 --mode headed
+```
+
+`play-sts2-model serve` 只启动模型推理服务，不会启动游戏；模型服务、游戏进程和
+自动决策闭环是三个独立入口，便于分别重启和排查。
+
 命令默认监听 `http://127.0.0.1:8080`，使用
 `e2e/fixtures/profile/` 中不含个人信息的全解锁模板，并在临时 HOME 中关闭
 Steam 与 `UnifiedSavePath`。命令保持前台运行，退出时会结束游戏进程并删除本次
@@ -69,32 +78,51 @@ uv run play-sts2-transcribe data/raw/human/<规范局目录名>
 
 ## 游戏知识与 SFT 数据集
 
-结构化 Wiki 可以迁移为带来源字段的单实体 Markdown：
+结构化 Wiki 可以迁移为带来源字段的单实体 Markdown，但它不再直接进入后续
+知识监督数据：
 
 ```bash
 uv run play-sts2-knowledge import-wiki /path/to/wiki
 ```
 
-当游戏和 Agent Mod 已启动时，也可以直接从当前版本的 `/data/*` 端点实测
-导出。命令会同时保存原始 JSON 快照和可读 Markdown：
+默认游戏路径是项目内忽略版本控制的
+`.runtime/SlayTheSpire2-v0.107.1/SlayTheSpire2.app`，不会跟随 Steam 自动更新。
+游戏和 Agent Mod 启动后，从固定版本的 `/data/*` 端点保存原始 JSON 与可读
+Markdown：
 
 ```bash
 uv run play-sts2-knowledge export
 ```
 
-Web Wiki、Mod 实测与继承的核验问法分别保留来源字段，不会互相冒充。默认把
-`data/game_knowledge/` 和 `data/raw/human/` 构建为统一的可读 messages 数据集：
+随后离线应用版本化 curated 修正、怪物补充和已经真正进入事件页后的 UI
+快照，再生成按实体保存的多问法候选与人工审计报告。curated 在 `rebuild`
+阶段生效，不是 `generated` 之后的独立数据目录：
 
 ```bash
-uv run play-sts2-train build-sft
+uv run play-sts2-knowledge rebuild \
+  data/game_knowledge/mod_export/v0.107.1/raw \
+  --wiki-root data/game_knowledge/web_wiki \
+  --cycles-root /path/to/human-rl/data/cycles \
+  --event-entries-root data/game_knowledge/event_entries/v0.107.1/events
+uv run play-sts2-knowledge generate-questions \
+  data/game_knowledge/mod_export/v0.107.1
+uv run play-sts2-knowledge review \
+  data/game_knowledge/mod_export/v0.107.1
 ```
 
-产物直接写入 `data/datasets/sft/{train,dev,test}.jsonl`。知识行保留实体来源，
-行为行通过当前 Harness 重新生成观测和规范 `ACTION:`；战斗与战略每个动作
-都是独立 `system/user/assistant` 样本。一局的全部样本由
-`data/raw/human/splits.json` 整体分卷，`training_eligible=false` 的局不会进入
-训练；`recording_complete=false` 只表示没有完整结局，不影响已经验证的单步
-SFT 样本。
+多问法产物位于 `data/game_knowledge/generated-v0.107.1/`，仍是知识候选，不会
+自动构建或覆盖 E3 的 train/dev/test；E3 分卷与混合策略另行确定。Wiki 只作为
+怪物招式/循环的明确补充来源，事件变量优先使用同版本实机 UI 快照。
+
+完整链路是：
+
+```text
+Mod raw + 受控补充 → rebuild + curated → canonical mod_export
+→ generated 多问法候选 → E3 混合与分卷 → datasets/sft
+```
+
+历史目录
+`data/game_knowledge/curated-v0.107.1/` 不在该链路中，也不是后续 SFT 的输入。
 
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 

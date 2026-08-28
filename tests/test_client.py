@@ -306,12 +306,30 @@ def test_iter_events_rejects_non_object_payload() -> None:
 
 
 def test_wait_for_state_blocks_on_sse_until_revision_advances() -> None:
-    """用单条 SSE 连接等待新 revision，不重复请求 ``/state``。"""
+    """用单条 SSE 连接等待新 revision，不重复请求 ``/state``。
+
+    Raises:
+        AssertionError: 客户端未复用事件流或返回了过期状态。
+
+    Returns:
+        None: 此测试只检查 SSE 状态等待契约。
+    """
     old_state = {"state_revision": 7, "screen": "COMBAT"}
     new_state = {"state_revision": 8, "screen": "REWARD"}
     requests: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
+        """返回包含旧、新 revision 的单条 SSE 流。
+
+        Args:
+            request (httpx.Request): 客户端发出的事件流请求。
+
+        Raises:
+            AssertionError: 请求方法、路径、超时或 Accept 头不符合契约。
+
+        Returns:
+            httpx.Response: 先交付旧状态、再交付新状态的 SSE 响应。
+        """
         requests.append(request.url.path)
         assert request.method == "GET"
         assert request.url.path == "/events/stream"

@@ -24,6 +24,14 @@ class InferenceGenerationTruncated(RuntimeError):
     """表示服务因 token 上限停止，回复不能安全交给动作解析器。"""
 
     def __init__(self, reply: ModelReply) -> None:
+        """保存被截断的模型回复，供调用方输出诊断信息。
+
+        Args:
+            reply (ModelReply): 已解析但不能安全执行的截断回复。
+
+        Returns:
+            None: 此方法只初始化异常实例。
+        """
         self.reply = reply
         super().__init__("chat completion generation truncated")
 

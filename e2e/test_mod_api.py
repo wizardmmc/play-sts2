@@ -218,7 +218,17 @@ def test_game_mod_pushes_combat_turn_until_exact_ready_boundary(
 def test_game_mod_pushes_combat_rewards_after_victory_without_state_polling(
     running_game: RunningGame,
 ) -> None:
-    """战斗胜利后仅靠页面事件交付已就绪的奖励状态。"""
+    """战斗胜利后仅靠页面事件交付已就绪的奖励状态。
+
+    Args:
+        running_game (RunningGame): 已启动并安装测试 Mod 的固定版本游戏。
+
+    Raises:
+        AssertionError: 奖励页未由事件流交付或发生了额外轮询。
+
+    Returns:
+        None: 此测试只验证战斗胜利后的状态交付契约。
+    """
     scenario = BattleScenario(
         character_id="DEFECT",
         seed="ABCDEF1234",
@@ -253,6 +263,15 @@ def test_game_mod_pushes_combat_rewards_after_victory_without_state_polling(
         stream_requests_before = log_before.count("GET /events/stream")
 
         def wait_for_rewards() -> tuple[dict[str, object], list[dict[str, object]]]:
+            """持续消费状态事件，直到真实奖励页到达。
+
+            Raises:
+                TimeoutError: 事件流未在时限内交付奖励页。
+
+            Returns:
+                tuple[dict[str, object], list[dict[str, object]]]:
+                    最终奖励状态与期间收到的全部状态。
+            """
             deadline = time.monotonic() + 15.0
             delivered_states: list[dict[str, object]] = []
             next_revision = revision

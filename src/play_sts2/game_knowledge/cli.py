@@ -6,14 +6,15 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..client import GameClient
-from .pipeline import export_mod_knowledge, import_web_wiki
+from .generation import generate_question_variants, generate_review_report
+from .pipeline import export_mod_knowledge, import_web_wiki, rebuild_mod_knowledge
 
 
 def build_parser() -> argparse.ArgumentParser:
     """构建知识命令行参数解析器。
 
     Returns:
-        argparse.ArgumentParser: 包含 ``import-wiki`` 与 ``export`` 子命令。
+        argparse.ArgumentParser: 游戏知识在线采样与离线重建命令。
     """
     parser = argparse.ArgumentParser(prog="play-sts2-knowledge")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -39,6 +40,57 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/game_knowledge"),
         help="游戏知识根目录",
     )
+
+    rebuilder = subparsers.add_parser(
+        "rebuild",
+        help="从 v0.107.1 原始快照离线重建 canonical Markdown",
+    )
+    rebuilder.add_argument("raw_root", type=Path, help="固定版本 raw 目录")
+    rebuilder.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/game_knowledge"),
+        help="游戏知识根目录",
+    )
+    rebuilder.add_argument(
+        "--wiki-root",
+        type=Path,
+        help="仅用于补充怪物招式与循环的 Web Wiki 根目录",
+    )
+    rebuilder.add_argument(
+        "--cycles-root",
+        type=Path,
+        help="human-rl 的实跳怪物循环记录目录",
+    )
+    rebuilder.add_argument(
+        "--event-entries-root",
+        type=Path,
+        help="human-rl 已进入事件界面后保存的已解析 UI 快照目录",
+    )
+
+    generator = subparsers.add_parser(
+        "generate-questions",
+        help="生成按实体保存的多问法知识，不划分 E3 数据集",
+    )
+    generator.add_argument("snapshot_root", type=Path, help="固定版本知识快照")
+    generator.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/game_knowledge/generated-v0.107.1"),
+        help="多问法 JSONL 输出目录",
+    )
+
+    reviewer = subparsers.add_parser(
+        "review",
+        help="生成人工可读的缺口与特殊对象审计报告",
+    )
+    reviewer.add_argument("snapshot_root", type=Path, help="固定版本知识快照")
+    reviewer.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/game_knowledge/reports/v0.107.1.md"),
+        help="Markdown 报告路径",
+    )
     return parser
 
 
@@ -52,11 +104,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         int: 成功时返回 ``0``。
     """
     args = build_parser().parse_args(argv)
+    if args.command == "review":
+        report = generate_review_report(args.snapshot_root, args.output)
+        print(json.dumps({"report": str(report)}, ensure_ascii=False))
+        return 0
     if args.command == "import-wiki":
         result = import_web_wiki(args.source, args.output_root)
-    else:
+    elif args.command == "export":
         with GameClient(args.base_url) as client:
             result = export_mod_knowledge(client, args.output_root)
+    elif args.command == "rebuild":
+        result = rebuild_mod_knowledge(
+            args.raw_root,
+            args.output_root,
+            wiki_root=args.wiki_root,
+            cycles_root=args.cycles_root,
+            event_entries_root=args.event_entries_root,
+        )
+    else:
+        result = generate_question_variants(
+            args.snapshot_root,
+            args.output_root,
+        )
     print(
         json.dumps(
             {

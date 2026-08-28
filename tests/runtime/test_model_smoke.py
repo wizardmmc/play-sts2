@@ -14,6 +14,10 @@ def test_smoke_model_verifies_running_artifact_and_generates_legal_action(
 ) -> None:
     """冒烟检查先访问健康端点，再用真实 Harness 契约生成合法动作。
 
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于替换真实磁盘身份检查。
+
     Raises:
         AssertionError: 请求顺序、提示词内容或生成参数不符合约定。
 
@@ -31,6 +35,16 @@ def test_smoke_model_verifies_running_artifact_and_generates_legal_action(
         artifact_id: str,
         merged_model: Path,
     ) -> None:
+        """记录冒烟前完成的服务制品磁盘身份检查。
+
+        Args:
+            model_dir (Path): 待启动的 MLX 服务模型目录。
+            artifact_id (str): 期望的训练制品标识。
+            merged_model (Path): 服务制品声明的合并模型目录。
+
+        Returns:
+            None: 此替身只记录磁盘身份检查参数。
+        """
         disk_checks.append((model_dir, artifact_id, merged_model))
 
     monkeypatch.setattr(model_smoke, "validate_serving_model", validate_disk)
@@ -126,7 +140,18 @@ def test_smoke_model_rejects_different_running_model_before_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """磁盘身份正确但端口仍运行旧模型时，冒烟必须拒绝假绿。"""
+    """磁盘身份正确但端口仍运行旧模型时，冒烟必须拒绝假绿。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于替换真实磁盘身份检查。
+
+    Raises:
+        AssertionError: 身份不符时仍发起了生成请求。
+
+    Returns:
+        None: 此测试只检查运行中模型身份门禁。
+    """
     from play_sts2.inference import ServingModelIdentityError
     from play_sts2.runtime import model_smoke
 
@@ -139,6 +164,17 @@ def test_smoke_model_rejects_different_running_model_before_generation(
     paths: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
+        """声明端口仍加载旧模型并拒绝后续生成。
+
+        Args:
+            request (httpx.Request): 冒烟流程发出的 HTTP 请求。
+
+        Raises:
+            AssertionError: 身份检查失败后仍尝试调用生成端点。
+
+        Returns:
+            httpx.Response: 健康端点或旧模型身份响应。
+        """
         paths.append(request.url.path)
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "ok"})
@@ -171,7 +207,18 @@ def test_validate_model_service_rejects_model_switch_during_readiness_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """声明 e3 后生成响应却来自 e2 时，必须在接触游戏前失败。"""
+    """声明 e3 后生成响应却来自 e2 时，必须在接触游戏前失败。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于替换真实磁盘身份检查。
+
+    Raises:
+        AssertionError: readiness 请求未绑定期望的服务模型。
+
+    Returns:
+        None: 此测试只检查服务期间的模型切换。
+    """
     from play_sts2.inference import InferenceModelIdentityError
     from play_sts2.runtime import model_smoke
 
@@ -183,6 +230,17 @@ def test_validate_model_service_rejects_model_switch_during_readiness_probe(
     )
 
     def respond(request: httpx.Request) -> httpx.Response:
+        """先确认目标模型，再模拟生成阶段切换回旧模型。
+
+        Args:
+            request (httpx.Request): readiness 流程发出的 HTTP 请求。
+
+        Raises:
+            AssertionError: 生成请求未绑定期望的服务模型。
+
+        Returns:
+            httpx.Response: 健康、目标模型列表或旧模型生成响应。
+        """
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "ok"})
         if request.url.path == "/v1/models":

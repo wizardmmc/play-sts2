@@ -191,7 +191,15 @@ def test_prepare_model_does_not_replace_destination_created_during_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """初检后竞态创建的空目录也不能被普通 rename 静默替换。"""
+    """初检后竞态创建的空目录也不能被普通 rename 静默替换。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于注入模拟竞态的转换进程。
+
+    Returns:
+        None: 此测试只检查转换产物的原子发布边界。
+    """
     from play_sts2.inference import local_model
 
     _stub_dynamic_template(local_model, monkeypatch)
@@ -210,6 +218,18 @@ def test_prepare_model_does_not_replace_destination_created_during_conversion(
     )
 
     def convert(command: list[str], *, check: bool) -> None:
+        """模拟转换完成后由竞态方抢先创建目标目录。
+
+        Args:
+            command (list[str]): 待模拟执行的 MLX 转换命令。
+            check (bool): 是否要求子进程成功。
+
+        Raises:
+            AssertionError: 调用方未要求检查转换进程结果。
+
+        Returns:
+            None: 此替身只构造转换结果与竞态目录。
+        """
         assert check is True
         converted = Path(command[command.index("--mlx-path") + 1])
         converted.mkdir()
@@ -337,7 +357,18 @@ def test_serve_model_rejects_stale_or_wrong_artifact_before_starting(
     mutate_source: bool,
     message: str,
 ) -> None:
-    """服务目录身份或合并来源变化时必须在启动子进程前失败。"""
+    """服务目录身份或合并来源变化时必须在启动子进程前失败。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于拦截服务启动进程。
+        artifact_id (str): 参数化的期望制品标识。
+        mutate_source (bool): 是否篡改合并来源清单。
+        message (str): 期望的身份校验错误文本。
+
+    Returns:
+        None: 此测试只检查服务启动前的制品身份门禁。
+    """
     from play_sts2.inference import local_model
 
     source = tmp_path / "merged/demo-e3-merged"
@@ -376,6 +407,18 @@ def test_serve_model_rejects_stale_or_wrong_artifact_before_starting(
         )
 
     def unexpected_run(_command: list[str], *, check: bool) -> None:
+        """在身份校验失败后意外启动服务时立即失败。
+
+        Args:
+            _command (list[str]): 本不应执行的服务启动命令。
+            check (bool): 子进程错误检查标记。
+
+        Raises:
+            AssertionError: 该替身被调用即表明身份门禁失效。
+
+        Returns:
+            None: 该替身始终抛出异常，不会正常返回。
+        """
         raise AssertionError("身份校验失败时不应启动模型服务")
 
     monkeypatch.setattr(local_model.subprocess, "run", unexpected_run)
@@ -470,15 +513,34 @@ def test_thinking_template_fingerprints_reject_static_template(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """true/false 渲染相同的静态 no-think 模板不能冒充双模式服务件。"""
+    """true/false 渲染相同的静态 no-think 模板不能冒充双模式服务件。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于注入静态 tokenizer。
+
+    Returns:
+        None: 此测试只检查 thinking 模板的功能指纹。
+    """
     from play_sts2.inference import local_model
 
     class StaticTokenizer:
+        """模拟不响应 thinking 开关的静态 tokenizer。"""
+
         has_thinking = True
         think_start = "<think>"
         think_end = "</think>"
 
         def apply_chat_template(self, *_args: object, **kwargs: object) -> object:
+            """无论 thinking 开关如何都返回同一模板和 token。
+
+            Args:
+                *_args (object): 未使用的对话模板位置参数。
+                **kwargs (object): 包含 ``tokenize`` 的模板选项。
+
+            Returns:
+                object: 固定的模板文本或 token 序列。
+            """
             if kwargs.get("tokenize") is True:
                 return [1, 2, 3]
             return "<think>\n\n</think>\n"
@@ -501,18 +563,45 @@ def test_thinking_template_fingerprints_include_token_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """文本模板相同但 tokenizer 映射变化时，功能指纹也必须变化。"""
+    """文本模板相同但 tokenizer 映射变化时，功能指纹也必须变化。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离模型目录。
+        monkeypatch (pytest.MonkeyPatch): 用于注入可变 tokenizer。
+
+    Returns:
+        None: 此测试只检查 token ID 是否进入功能指纹。
+    """
     from play_sts2.inference import local_model
 
     class DynamicTokenizer:
+        """模拟文本分支稳定但 token 映射可变化的 tokenizer。"""
+
         has_thinking = True
         think_start = "<think>"
         think_end = "</think>"
 
         def __init__(self, offset: int) -> None:
+            """保存用于构造 token 指纹的偏移量。
+
+            Args:
+                offset (int): 注入 token 序列的可变偏移量。
+
+            Returns:
+                None: 此方法只初始化测试 tokenizer。
+            """
             self.offset = offset
 
         def apply_chat_template(self, *_args: object, **kwargs: object) -> object:
+            """按 thinking 开关和偏移量返回模板或 token。
+
+            Args:
+                *_args (object): 未使用的对话模板位置参数。
+                **kwargs (object): 包含 thinking 和 tokenize 开关的模板选项。
+
+            Returns:
+                object: 对应开关的模板文本或带偏移的 token 序列。
+            """
             enabled = kwargs["enable_thinking"] is True
             if kwargs.get("tokenize") is True:
                 return [self.offset, 1 if enabled else 2]

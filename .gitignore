@@ -13,6 +13,7 @@ htmlcov/
 !/data/README.md
 /models/
 /runs/
+/.runtime/
 
 /mod/**/bin/
 /mod/**/obj/

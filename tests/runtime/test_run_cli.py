@@ -256,6 +256,7 @@ def test_main_starts_new_run_and_plays_to_victory(
     """默认命令从主菜单按参数开局并运行到终局。
 
     Args:
+        tmp_path (Path): Pytest 提供的隔离临时目录。
         monkeypatch (pytest.MonkeyPatch): 用于替换真实网络客户端。
         capsys (pytest.CaptureFixture[str]): 用于读取标准输出。
 
@@ -276,10 +277,36 @@ def test_main_starts_new_run_and_plays_to_victory(
         serving_model: Path,
         enable_thinking: bool,
     ) -> None:
+        """记录模型身份预检参数并核对 no-think 配置。
+
+        Args:
+            base_url (str): 模型服务基础 URL。
+            artifact_id (str): 期望的训练制品标识。
+            merged_model (Path): 合并后模型目录。
+            serving_model (Path): MLX 服务模型目录。
+            enable_thinking (bool): 是否开启模型思考模式。
+
+        Raises:
+            AssertionError: 新局命令未使用 no-think profile。
+
+        Returns:
+            None: 此替身只记录身份预检参数。
+        """
         assert enable_thinking is False
         preflight_calls.append((base_url, artifact_id, merged_model, serving_model))
 
     def game(base_url: str) -> NewRunCliGame:
+        """确保身份预检先于新局游戏客户端连接。
+
+        Args:
+            base_url (str): 游戏 Mod API 基础 URL。
+
+        Raises:
+            AssertionError: 游戏客户端在模型身份预检前被创建。
+
+        Returns:
+            NewRunCliGame: 不访问真实游戏的新局客户端替身。
+        """
         assert preflight_calls, "模型身份预检必须发生在连接游戏之前"
         return NewRunCliGame(base_url)
 

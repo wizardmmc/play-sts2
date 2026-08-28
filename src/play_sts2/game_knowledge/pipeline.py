@@ -8,15 +8,18 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..client import Health
+from .curation import FIXED_GAME_VERSION, curate_entity
 from .markdown import KnowledgeEntry, KnowledgeFormatError, parse_knowledge_entry
 
 _COLLECTIONS = (
     "cards",
     "relics",
     "potions",
+    "enchantments",
     "powers",
     "characters",
     "monsters",
+    "encounters",
     "events",
     "keywords",
 )
@@ -24,15 +27,24 @@ _ENTITY_TYPES = {
     "cards": "card",
     "relics": "relic",
     "potions": "potion",
+    "enchantments": "enchantment",
     "powers": "power",
     "characters": "character",
     "monsters": "monster",
+    "encounters": "encounter",
     "events": "event",
     "keywords": "keyword",
 }
+_FIXED_GAME_VERSION = FIXED_GAME_VERSION
 _LOCAL_MARKER = "<!-- praxis:local -->"
 _MARKUP = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
 _RESOURCE = re.compile(r"res://\S+?\.png")
+_RESOURCE_ICON_RUN = re.compile(
+    r"(?:res://images/packed/sprite_fonts/"
+    r"(?:colorless|necrobinder|defect|ironclad|regent|silent)_energy_icon\.png"
+    r"|res://images/packed/sprite_fonts/star_icon\.png)+"
+)
+_UNRESOLVED_TEXT = re.compile(r"\{[^{}]+\}|\bTODO\b", re.IGNORECASE)
 
 
 class GameDataClient(Protocol):
@@ -137,12 +149,13 @@ def export_mod_knowledge(
         KnowledgeBuildResult: 以游戏版本分隔的 Mod 导出结果。
     """
     health = client.health()
-    game_version = _safe_version(health.game_version)
+    game_version = _fixed_version(health.game_version)
     destination = Path(output_root) / "mod_export" / game_version
     raw_root = destination / "raw"
     raw_root.mkdir(parents=True, exist_ok=True)
     categories: dict[str, int] = {}
     expected: dict[str, set[str]] = {}
+    gaps: list[str] = []
     for collection in _COLLECTIONS:
         entities = client.data_collection(collection)
         (raw_root / f"{collection}.json").write_text(
@@ -151,6 +164,7 @@ def export_mod_knowledge(
         )
         expected[collection] = set()
         for entity in entities:
+            gaps.extend(_entity_gaps(collection, curate_entity(collection, entity)))
             entry = _mod_entry(collection, entity, game_version)
             target = destination / collection / f"{_safe_id(entry.object_id)}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +177,89 @@ def export_mod_knowledge(
         "mod_export",
         categories,
         game_version=game_version,
+        gaps=sorted(set(gaps)),
+    )
+
+
+def rebuild_mod_knowledge(
+    raw_root: Path,
+    output_root: Path,
+    *,
+    wiki_root: Path | None = None,
+    cycles_root: Path | None = None,
+    event_entries_root: Path | None = None,
+) -> KnowledgeBuildResult:
+    """从固定原始快照离线重建 canonical Markdown。
+
+    Wiki 只允许补充怪物的招式与循环；实跳 cycle 只作为待复核观察附在
+    正文中。两者都不会取代 Mod 导出的基础 HP 和身份。
+
+    Args:
+        raw_root (Path): ``mod_export/v0.107.1/raw`` 目录。
+        output_root (Path): ``data/game_knowledge`` 根目录。
+        wiki_root (Path | None): 可选的 Web Wiki 根目录。
+        cycles_root (Path | None): 可选的 human-rl cycle 记录目录。
+        event_entries_root (Path | None): 可选的固定版本实机事件 UI 快照目录。
+
+    Raises:
+        ValueError: 原始快照不属于固定版本。
+        TypeError: 原始集合不是 JSON 数组。
+        KnowledgeFormatError: 实体、Wiki 或补充快照不满足知识格式契约。
+        OSError: 快照或补充来源不可读、产物不可写。
+
+    Returns:
+        KnowledgeBuildResult: 重建目录、条目数量与类别计数。
+    """
+    raw_root = Path(raw_root)
+    if raw_root.name != "raw" or raw_root.parent.name != _FIXED_GAME_VERSION:
+        raise ValueError(f"离线重建只接受 {_FIXED_GAME_VERSION}/raw")
+    destination = Path(output_root) / "mod_export" / _FIXED_GAME_VERSION
+    observations = _load_cycle_observations(cycles_root)
+    event_snapshots = _load_event_snapshots(event_entries_root)
+    categories: dict[str, int] = {}
+    expected: dict[str, set[str]] = {}
+    gaps: list[str] = []
+    for collection in _COLLECTIONS:
+        path = raw_root / f"{collection}.json"
+        if not path.is_file():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise TypeError(f"原始集合必须是 JSON 数组: {path}")
+        entities = [dict(row) for row in payload if isinstance(row, Mapping)]
+        if collection == "monsters":
+            entities = [
+                _supplement_monster(entity, wiki_root, observations)
+                for entity in entities
+            ]
+        elif collection == "events":
+            entities = [
+                _supplement_event(entity, event_snapshots) for entity in entities
+            ]
+        expected[collection] = set()
+        for entity in entities:
+            gaps.extend(_entity_gaps(collection, curate_entity(collection, entity)))
+            entry = _mod_entry(collection, entity, _FIXED_GAME_VERSION)
+            target = destination / collection / f"{_safe_id(entry.object_id)}.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(entry.to_markdown(), encoding="utf-8")
+            expected[collection].add(target.stem)
+        categories[collection] = len(entities)
+    _remove_stale_entries(destination, expected)
+    supplement_sources = []
+    if wiki_root is not None:
+        supplement_sources.append("web_wiki:monster_moves_cycles")
+    if cycles_root is not None:
+        supplement_sources.append("human_rl_cycle_lab:pending_observation")
+    if event_entries_root is not None:
+        supplement_sources.append("game_ui_snapshot:resolved_options")
+    return _write_result(
+        destination,
+        "mod_export",
+        categories,
+        game_version=_FIXED_GAME_VERSION,
+        gaps=sorted(set(gaps)),
+        supplements=supplement_sources,
     )
 
 
@@ -184,6 +281,7 @@ def _mod_entry(
     Returns:
         KnowledgeEntry: 可写入对应类别目录的知识条目。
     """
+    entity = curate_entity(collection, entity)
     object_id = _required_text(entity, "id")
     name = _required_text(entity, "name")
     metadata = {
@@ -221,13 +319,37 @@ def _render_card(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
     metadata["cost"] = (
         "X" if entity.get("is_x_cost") is True else str(entity.get("cost", ""))
     )
+    if entity.get("is_x_star_cost") is True:
+        metadata["star_cost"] = "X"
+    elif entity.get("star_cost") is not None:
+        metadata["star_cost"] = str(entity["star_cost"])
     description = _clean_text(entity.get("description"))
-    lines = ["## 效果", description or "——"]
+    lines = ["## 效果", description or "（缺少已解析效果数据）"]
     upgrade = entity.get("upgrade")
     if isinstance(upgrade, Mapping):
+        changes: list[str] = []
+        base_cost = _display_cost(entity.get("cost"), entity.get("is_x_cost"))
+        upgrade_cost = _display_cost(
+            upgrade.get("cost"),
+            upgrade.get("is_x_cost"),
+        )
+        if upgrade_cost and upgrade_cost != base_cost:
+            changes.append(f"- 费用：{base_cost} → {upgrade_cost}")
+        base_star_cost = _display_cost(
+            entity.get("star_cost"),
+            entity.get("is_x_star_cost"),
+        )
+        upgrade_star_cost = _display_cost(
+            upgrade.get("star_cost"),
+            upgrade.get("is_x_star_cost"),
+        )
+        if upgrade_star_cost and upgrade_star_cost != base_star_cost:
+            changes.append(f"- 星能费用：{base_star_cost} → {upgrade_star_cost}")
         upgrade_description = _clean_text(upgrade.get("description"))
         if upgrade_description and upgrade_description != description:
-            lines.extend(("## 升级", upgrade_description))
+            changes.append(f"- 效果：{upgrade_description}")
+        if changes:
+            lines.extend(("## 升级", *changes))
     return "\n".join(lines)
 
 
@@ -269,6 +391,33 @@ def _render_potion(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
     return f"## 效果\n{_clean_text(entity.get('description')) or '——'}"
 
 
+def _render_enchantment(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
+    """渲染附魔的单层效果、可叠加性与卡面附加文本。
+
+    Args:
+        entity (Mapping[str, Any]): Mod 导出的附魔实体。
+        metadata (dict[str, str]): 将写入 Markdown frontmatter 的基础字段。
+
+    Returns:
+        str: 包含附魔属性、效果和可选卡面附加文本的 Markdown。
+    """
+    metadata.update(
+        _scalar_fields(
+            entity,
+            {
+                "is_stackable": "stackable",
+                "show_amount": "show_amount",
+                "sample_amount": "sample_amount",
+            },
+        )
+    )
+    lines = ["## 效果", _clean_text(entity.get("description")) or "——"]
+    extra = _clean_text(entity.get("extra_card_text"))
+    if extra:
+        lines.extend(("", "## 卡面附加", extra))
+    return "\n".join(lines)
+
+
 def _render_power(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
     """渲染能力属性与效果。
 
@@ -282,7 +431,12 @@ def _render_power(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
     metadata.update(
         _scalar_fields(
             entity,
-            {"type": "power_type", "stack_type": "stack_type"},
+            {
+                "type": "power_type",
+                "stack_type": "stack_type",
+                "sample_amount": "sample_amount",
+                "uses_amount": "uses_amount",
+            },
         )
     )
     return f"## 效果\n{_clean_text(entity.get('description')) or '——'}"
@@ -321,7 +475,7 @@ def _render_character(entity: Mapping[str, Any], metadata: dict[str, str]) -> st
 
 
 def _render_monster(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
-    """渲染敌人生命范围与已导出的招式名称。
+    """渲染敌人基础属性、关联遭遇、招式、循环与实跳观察。
 
     Args:
         entity (Mapping[str, Any]): Mod 导出的敌人实体。
@@ -333,21 +487,98 @@ def _render_monster(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
     metadata.update(
         _scalar_fields(
             entity,
-            {"type": "room", "min_hp": "min_hp", "max_hp": "max_hp"},
+            {
+                "type": "room",
+                "min_hp": "min_hp",
+                "max_hp": "max_hp",
+                "act": "act",
+                "hp_ascension": "hp_ascension",
+                "supplement_source": "supplement_source",
+            },
         )
     )
-    moves = entity.get("moves")
-    lines = ["## 招式"]
-    if isinstance(moves, Sequence) and not isinstance(moves, (str, bytes)):
-        for move in moves:
-            if not isinstance(move, Mapping):
+    for source, target in (("innate", "innate"), ("encounters", "encounters")):
+        value = entity.get(source)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            metadata[target] = ",".join(str(item) for item in value)
+    supplement_body = entity.get("supplement_body")
+    if isinstance(supplement_body, str) and supplement_body.strip():
+        lines = [supplement_body.strip()]
+    else:
+        moves = entity.get("moves")
+        lines = ["## 招式"]
+        if isinstance(moves, Sequence) and not isinstance(moves, (str, bytes)):
+            for move in moves:
+                if not isinstance(move, Mapping):
+                    continue
+                move_id = _clean_text(move.get("id"))
+                move_name = _clean_text(move.get("name"))
+                if move_id or move_name:
+                    lines.append(f"- {move_id or '?'}：{move_name or '——'}")
+        if len(lines) == 1:
+            lines.append("（缺少已解析招式数据）")
+    acts = entity.get("acts")
+    if isinstance(acts, Sequence) and not isinstance(acts, (str, bytes)):
+        act_lines = []
+        for act in acts:
+            if not isinstance(act, Mapping):
                 continue
-            move_id = _clean_text(move.get("id"))
-            move_name = _clean_text(move.get("name"))
-            if move_id or move_name:
-                lines.append(f"- {move_id or '?'}：{move_name or '——'}")
-    if len(lines) == 1:
-        lines.append("（无招式数据）")
+            act_id = _clean_text(act.get("id"))
+            act_name = _clean_text(act.get("name"))
+            act_index = act.get("index")
+            if act_id and act_name and isinstance(act_index, int):
+                act_lines.append(f"- Act {act_index}：{act_name}（{act_id}）")
+        if act_lines:
+            lines.extend(("", "## 所在 Act", *act_lines))
+    encounter_ids = _bullet_ids(entity.get("encounters"))
+    if encounter_ids:
+        lines.extend(("", "## 可能关联的遭遇", *encounter_ids))
+    observations = entity.get("cycle_observations")
+    if isinstance(observations, Sequence) and observations:
+        lines.extend(("", "## 实跳观察（待复核）"))
+        for observation in observations:
+            if isinstance(observation, str) and observation:
+                lines.append(f"- {observation}")
+    return "\n".join(lines)
+
+
+def _render_encounter(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
+    """渲染遭遇属性和全部可能出现的敌人。
+
+    Args:
+        entity (Mapping[str, Any]): Mod 导出的遭遇实体。
+        metadata (dict[str, str]): 将写入 frontmatter 的公共字段。
+
+    Returns:
+        str: 遭遇 Markdown 正文。
+    """
+    metadata.update(
+        _scalar_fields(
+            entity,
+            {
+                "room_type": "room",
+                "is_weak": "is_weak",
+                "is_debug": "is_debug",
+                "should_give_rewards": "should_give_rewards",
+                "monster_list_kind": "monster_list_kind",
+            },
+        )
+    )
+    lines = [
+        "## 可能出现的敌人类型",
+        "以下为去重后的可能类型，不表示同时出现或数量。",
+    ]
+    monsters = entity.get("monsters")
+    if isinstance(monsters, Sequence) and not isinstance(monsters, (str, bytes)):
+        for monster in monsters:
+            if not isinstance(monster, Mapping):
+                continue
+            monster_id = _clean_text(monster.get("id"))
+            name = _clean_text(monster.get("name"))
+            if monster_id or name:
+                lines.append(f"- {name or '未知敌人'}（{monster_id or '?'}）")
+    if len(lines) == 2:
+        lines.append("（缺少已解析敌人类型）")
     return "\n".join(lines)
 
 
@@ -361,7 +592,17 @@ def _render_event(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
     Returns:
         str: 事件 Markdown 正文。
     """
-    metadata.update(_scalar_fields(entity, {"type": "event_type", "act": "act"}))
+    metadata.update(
+        _scalar_fields(
+            entity,
+            {
+                "type": "event_type",
+                "act": "act",
+                "supplement_source": "supplement_source",
+                "snapshot_scope": "snapshot_scope",
+            },
+        )
+    )
     lines = ["## 文本", _clean_text(entity.get("description")) or "——", "## 选项"]
     options = entity.get("options")
     if isinstance(options, Sequence) and not isinstance(options, (str, bytes)):
@@ -371,9 +612,11 @@ def _render_event(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
             option_id = _clean_text(option.get("id"))
             title = _clean_text(option.get("title"))
             description = _clean_text(option.get("description"))
-            lines.append(f"- [{option_id}] {title} — {description}".rstrip(" —"))
+            if not option_id or not title or not description:
+                continue
+            lines.append(f"- [{option_id}] {title} — {description}")
     if lines[-1] == "## 选项":
-        lines.append("（无）")
+        lines.append("（缺少已解析选项数据）")
     return "\n".join(lines)
 
 
@@ -394,9 +637,11 @@ _MOD_RENDERERS = {
     "cards": _render_card,
     "relics": _render_relic,
     "potions": _render_potion,
+    "enchantments": _render_enchantment,
     "powers": _render_power,
     "characters": _render_character,
     "monsters": _render_monster,
+    "encounters": _render_encounter,
     "events": _render_event,
     "keywords": _render_keyword,
 }
@@ -450,11 +695,336 @@ def _clean_text(value: object) -> str:
     """
     if not isinstance(value, str):
         return ""
-    text = value.replace(
-        "res://images/packed/sprite_fonts/defect_energy_icon.png", "能量"
+    if _UNRESOLVED_TEXT.search(value):
+        return ""
+    text = _MARKUP.sub("", value)
+
+    def replace_icon_run(match: re.Match[str]) -> str:
+        """把连续能量或星能资源图标转换为可读费用文本。
+
+        Args:
+            match (re.Match[str]): 已知资源图标的连续匹配。
+
+        Returns:
+            str: 与相邻数字或图标数量对应的中文费用单位。
+        """
+        raw = match.group(0)
+        unit = "星能" if "star_icon" in raw else "能量"
+        previous = text[match.start() - 1] if match.start() else ""
+        if previous.isdigit() or previous in {"X", "x"}:
+            return f"点{unit}"
+        return f"{raw.count('res://')}点{unit}"
+
+    text = _RESOURCE_ICON_RUN.sub(replace_icon_run, text)
+    if _RESOURCE.search(text):
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _display_cost(value: object, is_x_cost: object) -> str:
+    """把普通或 X 费用渲染成稳定的短文本。
+
+    Args:
+        value (object): 数字费用或空值。
+        is_x_cost (object): 是否为 X 费用。
+
+    Returns:
+        str: ``X``、数字字符串或空串。
+    """
+    if is_x_cost is True:
+        return "X"
+    return "" if value is None else str(value)
+
+
+def _entity_gaps(collection: str, entity: Mapping[str, Any]) -> list[str]:
+    """收集实体中不能安全写入知识的未解析文本字段。
+
+    Args:
+        collection (str): 实体类别。
+        entity (Mapping[str, Any]): Mod 原始实体。
+
+    Returns:
+        list[str]: 可供 manifest 和审计报告使用的稳定 gap 标识。
+    """
+    object_id = str(entity.get("id") or "?")
+    gaps: list[str] = []
+    # description_raw 是保留给调试的本地化模板，天然含 {Damage} 等占位符；
+    # 只要 Mod 已给出可用的 resolved description，就不应把整批对象误报为缺口。
+    for field in ("description",):
+        value = entity.get(field)
+        if isinstance(value, str) and (
+            _UNRESOLVED_TEXT.search(value) or _unknown_resource(value)
+        ):
+            gaps.append(f"{collection}:{object_id}:{field}:unresolved_text")
+    options = entity.get("options")
+    if isinstance(options, Sequence) and not isinstance(options, (str, bytes)):
+        for index, option in enumerate(options):
+            if not isinstance(option, Mapping):
+                continue
+            option_id = str(option.get("id") or index)
+            for field in ("title", "description"):
+                value = option.get(field)
+                if isinstance(value, str) and (
+                    _UNRESOLVED_TEXT.search(value) or _unknown_resource(value)
+                ):
+                    gaps.append(
+                        f"{collection}:{object_id}:options.{option_id}.{field}:"
+                        "unresolved_text"
+                    )
+    return gaps
+
+
+def _unknown_resource(value: str) -> bool:
+    """判断文本是否含有清洗器尚不理解的资源图标。
+
+    Args:
+        value (str): 游戏富文本。
+
+    Returns:
+        bool: 已知能量/星能图标替换后仍有资源路径时为真。
+    """
+    return bool(_RESOURCE.search(_RESOURCE_ICON_RUN.sub("", value)))
+
+
+def _supplement_monster(
+    entity: dict[str, Any],
+    wiki_root: Path | None,
+    observations: Mapping[str, list[str]],
+) -> dict[str, Any]:
+    """用受控 Wiki 字段和实跳观察补充单个 Mod 怪物。
+
+    Args:
+        entity (dict[str, Any]): Mod 导出的怪物实体副本。
+        wiki_root (Path | None): 只允许读取招式与循环章节的 Wiki 根目录。
+        observations (Mapping[str, list[str]]): 按怪物显示名称索引的实跳摘要。
+
+    Raises:
+        KnowledgeFormatError: Wiki 条目的实体 ID 或来源与目标怪物不匹配。
+        OSError: Wiki 文件存在但无法读取。
+
+    Returns:
+        dict[str, Any]: 附带受控正文和逐项来源的怪物实体。
+    """
+    object_id = str(entity.get("id") or "")
+    name = str(entity.get("name") or "")
+    sources: list[str] = []
+    if wiki_root is not None:
+        wiki_path = Path(wiki_root) / "monsters" / f"{object_id}.md"
+        if wiki_path.is_file():
+            wiki = parse_knowledge_entry(wiki_path.read_text(encoding="utf-8"))
+            if wiki.object_id != object_id or wiki.source != "web_wiki":
+                raise KnowledgeFormatError(f"怪物 Wiki 身份或来源不匹配: {wiki_path}")
+            sections = []
+            for heading in ("招式", "循环"):
+                body = _extract_markdown_section(wiki.body, heading)
+                if body:
+                    sections.extend((f"## {heading}", body))
+            if sections:
+                entity["supplement_body"] = "\n".join(sections)
+                sources.append("web_wiki:monster_moves_cycles")
+    if name in observations:
+        entity["cycle_observations"] = observations[name]
+        sources.append("human_rl_cycle_lab:pending_observation")
+    if sources:
+        entity["supplement_source"] = ";".join(sources)
+    return entity
+
+
+def _extract_markdown_section(body: str, heading: str) -> str:
+    """提取受控 Wiki 正文中的单个二级章节。
+
+    Args:
+        body (str): 不含 frontmatter 的 Markdown 正文。
+        heading (str): 不含 ``##`` 前缀的二级标题。
+
+    Returns:
+        str: 去除首尾空白的章节正文；标题不存在时返回空串。
+    """
+    match = re.search(
+        rf"(?ms)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)",
+        body,
     )
-    text = _RESOURCE.sub("", text)
-    return _MARKUP.sub("", text).strip()
+    return "" if match is None else match.group(1).strip()
+
+
+def _load_cycle_observations(
+    cycles_root: Path | None,
+) -> dict[str, list[str]]:
+    """把 cycle_lab 记录压成不冒充完整循环的观察摘要。
+
+    Args:
+        cycles_root (Path | None): cycle_lab JSON 记录目录；空值表示不加载。
+
+    Returns:
+        dict[str, list[str]]: 按怪物显示名称索引的待复核观察摘要。
+    """
+    if cycles_root is None:
+        return {}
+    result: dict[str, list[str]] = {}
+    for path in sorted(Path(cycles_root).glob("*.json")):
+        if path.name == "manifest.json":
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        encounter_id = str(payload.get("encounter_id") or path.stem)
+        status = str(payload.get("status") or "unknown")
+        for monster in payload.get("monsters") or []:
+            if not isinstance(monster, Mapping):
+                continue
+            name = str(monster.get("name") or "")
+            if not name:
+                continue
+            for band_name, band in (monster.get("bands") or {}).items():
+                if not isinstance(band, Mapping):
+                    continue
+                moves = []
+                for move in band.get("moves") or []:
+                    if not isinstance(move, Mapping):
+                        continue
+                    move_id = str(move.get("move") or "?")
+                    damage = move.get("damage")
+                    hits = move.get("hits")
+                    if damage is not None and hits is not None:
+                        moves.append(f"{move_id}：{damage}×{hits}")
+                    else:
+                        intent = str(move.get("intent_type") or "未知意图")
+                        moves.append(f"{move_id}：{intent}")
+                turns = band.get("turns_observed")
+                closed = "已闭环" if band.get("closed") is True else "未闭环"
+                summary = (
+                    f"{encounter_id}/{band_name}（{turns}回合，{closed}，{status}）："
+                    + " → ".join(moves)
+                )
+                result.setdefault(name, []).append(summary)
+    return result
+
+
+def _load_event_snapshots(
+    event_entries_root: Path | None,
+) -> dict[str, dict[str, Any]]:
+    """读取已经真正进入事件页面后记录的已解析 UI 文本。
+
+    Args:
+        event_entries_root (Path | None): 固定版本事件快照目录；空值表示不加载。
+
+    Returns:
+        dict[str, dict[str, Any]]: 按事件 ID 索引的 UI 事件载荷，包含快照文件名。
+    """
+    if event_entries_root is None:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    event_entries_root = Path(event_entries_root)
+    roots = [event_entries_root]
+    sibling_ancients = event_entries_root.parent / "ancients"
+    if sibling_ancients.is_dir():
+        roots.append(sibling_ancients)
+    paths = sorted(path for root in roots for path in root.glob("*.json"))
+    for path in paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        state = payload.get("state") if isinstance(payload, Mapping) else None
+        event = state.get("event") if isinstance(state, Mapping) else None
+        if not isinstance(event, Mapping):
+            continue
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            continue
+        result[event_id] = {**event, "_snapshot_file": path.name}
+    return result
+
+
+def _supplement_event(
+    entity: dict[str, Any],
+    snapshots: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """以同版本实机 UI 快照替换含运行期变量的初始事件选项。
+
+    Args:
+        entity (dict[str, Any]): Mod 导出的事件实体副本。
+        snapshots (Mapping[str, Mapping[str, Any]]): 按事件 ID 索引的 UI 快照。
+
+    Returns:
+        dict[str, Any]: 已补入可见文本、来源及可选状态范围标记的事件实体。
+    """
+    object_id = str(entity.get("id") or "")
+    snapshot = snapshots.get(object_id)
+    if snapshot is None:
+        return entity
+    raw_description = entity.get("description")
+    description = snapshot.get("description")
+    if isinstance(description, str) and description.strip():
+        entity["description"] = description
+    raw_options = entity.get("options")
+    fallback_ids = [
+        str(option.get("id") or index)
+        for index, option in enumerate(raw_options or [])
+        if isinstance(option, Mapping)
+    ]
+    resolved_options: list[dict[str, str]] = []
+    for index, option in enumerate(snapshot.get("options") or []):
+        if not isinstance(option, Mapping):
+            continue
+        text_key = str(option.get("text_key") or "")
+        option_id = text_key.rpartition(".options.")[2]
+        if not option_id and index < len(fallback_ids):
+            option_id = fallback_ids[index]
+        title = option.get("title")
+        option_description = option.get("description")
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (option_id, title, option_description)
+        ):
+            continue
+        resolved_options.append(
+            {
+                "id": option_id,
+                "title": str(title),
+                "description": str(option_description),
+            }
+        )
+    if resolved_options:
+        entity["options"] = resolved_options
+        entity["supplement_source"] = "game_ui_snapshot:" + str(
+            snapshot.get("_snapshot_file") or ""
+        )
+        if _event_snapshot_is_state_dependent(
+            raw_description, raw_options, resolved_options
+        ):
+            entity["snapshot_scope"] = "single_state"
+    return entity
+
+
+def _event_snapshot_is_state_dependent(
+    raw_description: object,
+    raw_options: object,
+    resolved_options: Sequence[Mapping[str, str]],
+) -> bool:
+    """判断一次实机事件快照能否安全代表固定版本的通用选项。
+
+    Args:
+        raw_description (object): Mod 导出的初始事件描述模板。
+        raw_options (object): Mod 导出的初始事件选项模板。
+        resolved_options (Sequence[Mapping[str, str]]): 实机快照中的完整选项。
+
+    Returns:
+        bool: 模板集合不同或原始文本含运行期变量时为真。
+    """
+    if not isinstance(raw_options, Sequence) or isinstance(raw_options, (str, bytes)):
+        return True
+    raw_rows = [option for option in raw_options if isinstance(option, Mapping)]
+    if not raw_rows:
+        return True
+    raw_ids = {str(option.get("id") or "") for option in raw_rows}
+    resolved_ids = {str(option.get("id") or "") for option in resolved_options}
+    if raw_ids != resolved_ids:
+        return True
+    candidate_texts = [raw_description]
+    candidate_texts.extend(
+        option.get(field) for option in raw_rows for field in ("title", "description")
+    )
+    return any(
+        isinstance(value, str)
+        and (_UNRESOLVED_TEXT.search(value) or _unknown_resource(value))
+        for value in candidate_texts
+    )
 
 
 def _required_text(entity: Mapping[str, Any], field: str) -> str:
@@ -513,6 +1083,27 @@ def _safe_version(game_version: str) -> str:
     return game_version
 
 
+def _fixed_version(game_version: str) -> str:
+    """规范化并锁定本项目唯一允许的游戏知识版本。
+
+    Args:
+        game_version (str): Mod 健康检查返回的版本。
+
+    Raises:
+        KnowledgeFormatError: 游戏版本不是固定的 ``v0.107.1``。
+
+    Returns:
+        str: 固定目录名 ``v0.107.1``。
+    """
+    safe = _safe_version(game_version)
+    normalized = safe if safe.startswith("v") else f"v{safe}"
+    if normalized != _FIXED_GAME_VERSION:
+        raise KnowledgeFormatError(
+            f"知识导出只接受固定游戏版本 {_FIXED_GAME_VERSION}，实际为 {game_version}"
+        )
+    return normalized
+
+
 def _remove_stale_entries(
     destination: Path,
     expected: Mapping[str, set[str]],
@@ -546,6 +1137,8 @@ def _write_result(
     categories: dict[str, int],
     *,
     game_version: str | None = None,
+    gaps: Sequence[str] = (),
+    supplements: Sequence[str] = (),
 ) -> KnowledgeBuildResult:
     """写入最小知识清单并返回构建结果。
 
@@ -554,6 +1147,8 @@ def _write_result(
         source (str): 所有条目共享的来源类别。
         categories (dict[str, int]): 各类别的实体数量。
         game_version (str | None): Mod 实测来源的可选游戏版本。
+        gaps (Sequence[str]): 未解析但保留在原始快照中的字段记录。
+        supplements (Sequence[str]): 受控补充来源的简短说明。
 
     Returns:
         KnowledgeBuildResult: 写盘目录和实体计数。
@@ -567,6 +1162,10 @@ def _write_result(
     }
     if game_version is not None:
         manifest["game_version"] = game_version
+    if gaps:
+        manifest["gaps"] = list(gaps)
+    if supplements:
+        manifest["supplements"] = list(supplements)
     (destination / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
