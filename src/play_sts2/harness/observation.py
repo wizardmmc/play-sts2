@@ -516,11 +516,14 @@ def _render_unknown_proceed(_state: Mapping[str, Any]) -> str:
 def _render_card_selection(state: Mapping[str, Any]) -> str:
     """渲染奖励、事件或战斗机制要求的选牌状态。
 
+    战斗层选牌会保留当前完整战斗观测，使从弃牌堆取回卡牌等决策仍能看到
+    剩余能量、手牌、敌人和牌堆；战略层只展示战略上下文与候选牌。
+
     Args:
         state (Mapping[str, Any]): 当前选牌状态。
 
     Returns:
-        str: 页面提示及全部卡牌候选。
+        str: 当前层所需上下文、页面提示及全部卡牌候选。
     """
     selection = state.get("selection") or {}
     lines = ["=== 选择卡牌 ==="]
@@ -534,7 +537,10 @@ def _render_card_selection(state: Mapping[str, Any]) -> str:
     if prompt and prompt not in card_rules:
         lines.append(prompt)
     lines.extend(_format_card(card) for card in cards)
-    return "\n".join(lines)
+    selection_text = "\n".join(lines)
+    if state_layer(state) is HarnessLayer.BATTLE:
+        return f"{_render_combat(state)}\n\n{selection_text}"
+    return selection_text
 
 
 def _render_actions(state: Mapping[str, Any], actions: Sequence[str]) -> str:

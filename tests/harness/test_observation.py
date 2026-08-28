@@ -317,6 +317,92 @@ def test_card_selection_hides_prompt_copied_from_first_card_rules() -> None:
     assert "[0]白噪声(1费)" in observation.text
 
 
+def test_combat_card_selection_keeps_current_combat_context() -> None:
+    """全息影像选弃牌时保留决定候选牌价值所需的当前战斗状态。"""
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "CARD_SELECTION",
+        "in_combat": True,
+        "turn": 3,
+        "available_actions": ["select_deck_card", "skip_card_selection"],
+        "run": {"relics": [], "potions": []},
+        "combat": {
+            "player": {
+                "current_hp": 41,
+                "max_hp": 75,
+                "block": 4,
+                "energy": 1,
+                "stars": 0,
+            },
+            "enemies": [
+                {
+                    "index": 0,
+                    "name": "邪教徒",
+                    "current_hp": 19,
+                    "max_hp": 48,
+                    "block": 0,
+                    "intents": [{"intent_type": "Attack", "total_damage": 6}],
+                }
+            ],
+            "hand": [
+                {
+                    "index": 0,
+                    "name": "防御",
+                    "energy_cost": 1,
+                    "resolved_rules_text": "获得5点格挡。",
+                }
+            ],
+            "draw_count": 3,
+            "discard_count": 2,
+        },
+        "agent_view": {
+            "combat": {
+                "draw": [{"line": "打击 [1费]：造成6点伤害。"}],
+                "discard": [
+                    {"line": "冷静头脑 [1费]：生成1个冰霜充能球。"},
+                    {"line": "电击+ [0费]：生成1个闪电充能球。"},
+                ],
+                "exhaust": [],
+            }
+        },
+        "selection": {
+            "kind": "deck_card_select",
+            "prompt": "选择一张牌加入你的手牌",
+            "cards": [
+                {
+                    "index": 0,
+                    "name": "冷静头脑",
+                    "energy_cost": 1,
+                    "resolved_rules_text": "生成1个冰霜充能球。抽1张牌。",
+                },
+                {
+                    "index": 1,
+                    "name": "电击",
+                    "upgraded": True,
+                    "energy_cost": 0,
+                    "resolved_rules_text": "生成1个闪电充能球。",
+                },
+            ],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert observation.layer is harness.HarnessLayer.BATTLE
+    assert "玩家: HP 41/75 | 格挡4 | 能量1 | 星能0" in observation.text
+    assert "敌[0] 邪教徒: HP 19/48 | 格挡0" in observation.text
+    assert "手牌:\n  [0]防御(1费) 获得5点格挡。" in observation.text
+    assert "弃牌堆（2张）" in observation.text
+    assert "=== 选择卡牌 ===\n选择一张牌加入你的手牌" in observation.text
+    assert "[0]冷静头脑(1费)" in observation.text
+    assert "[1]电击+(0费)" in observation.text
+    assert observation.text.endswith(
+        "可执行动作:\n"
+        "- select_deck_card(option_index)\n"
+        "- skip_card_selection"
+    )
+
+
 def test_rest_observation_renders_all_relic_added_options() -> None:
     """帐篷与铲子增加的休息处选项由通用列表完整展示。
 
