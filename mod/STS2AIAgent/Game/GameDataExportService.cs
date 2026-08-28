@@ -30,6 +30,7 @@ internal static class GameDataExportService
     {
         return collection.Trim().ToLowerInvariant() switch
         {
+            "acts" => ExportActs(),
             "cards" => ExportCards(),
             "relics" => ExportRelics(),
             "monsters" => ExportMonsters(),
@@ -42,6 +43,48 @@ internal static class GameDataExportService
             "keywords" => ExportKeywords(),
             _ => throw new KeyNotFoundException($"Unknown data collection: {collection}")
         };
+    }
+
+    /// <summary>
+    /// 导出每张地图的前期弱遭遇、常规遭遇、精英和 Boss 池。
+    /// </summary>
+    /// <returns>按幕序与稳定 ID 排序的地图知识数组。</returns>
+    private static object ExportActs()
+    {
+        return ModelDb.Acts
+            .OrderBy(act => act.Index)
+            .ThenBy(act => act.Id.Entry, StringComparer.Ordinal)
+            .Select(act => new
+            {
+                id = act.Id.Entry,
+                name = act.Title.GetFormattedText(),
+                index = act.Index + 1,
+                is_default = act.IsDefault,
+                weak_encounters = BuildEncounterReferences(act.AllWeakEncounters),
+                regular_encounters = BuildEncounterReferences(act.AllRegularEncounters),
+                elite_encounters = BuildEncounterReferences(act.AllEliteEncounters),
+                boss_encounters = BuildEncounterReferences(act.AllBossEncounters)
+            })
+            .ToArray();
+    }
+
+    /// <summary>
+    /// 把遭遇模型序列转换为稳定 ID 与本地化名称引用。
+    /// </summary>
+    /// <param name="encounters">同一地图、同一房间等级的遭遇模型。</param>
+    /// <returns>按稳定 ID 排序且去重的遭遇引用数组。</returns>
+    private static object[] BuildEncounterReferences(IEnumerable<EncounterModel> encounters)
+    {
+        return encounters
+            .GroupBy(encounter => encounter.Id.Entry, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(encounter => encounter.Id.Entry, StringComparer.Ordinal)
+            .Select(encounter => (object)new
+            {
+                id = encounter.Id.Entry,
+                name = encounter.Title.GetFormattedText()
+            })
+            .ToArray();
     }
 
     /// <summary>

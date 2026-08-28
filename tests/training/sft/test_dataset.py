@@ -111,6 +111,9 @@ cost: 1
         output_root=tmp_path / "dataset",
     )
 
+    assert result.train_path == tmp_path / "dataset/train.jsonl"
+    assert result.dev_path == tmp_path / "dataset/validation/dev.jsonl"
+    assert result.test_path == tmp_path / "dataset/eval/test.jsonl"
     rows = [
         json.loads(line)
         for output_file in (result.train_path, result.dev_path)
@@ -139,7 +142,17 @@ cost: 1
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["splits"] == {"train": 1, "dev": 1, "test": 0}
     assert manifest["sources"] == {"human_play": 1, "web_wiki": 1}
+    assert manifest["sources_by_split"] == {
+        "train": {"web_wiki": 1},
+        "dev": {"human_play": 1},
+        "test": {},
+    }
     assert manifest["human"]["dev_runs"] == ["RUN-001"]
+    assert set(manifest["files"]) == {
+        "train.jsonl",
+        "validation/dev.jsonl",
+        "eval/test.jsonl",
+    }
 
 
 def test_build_sft_dataset_preserves_mod_game_version(tmp_path: Path) -> None:
@@ -322,6 +335,10 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+    (human / "splits.json").write_text(
+        json.dumps({"train": ["RUN-A"], "dev": [], "test": []}),
+        encoding="utf-8",
+    )
 
     result = build_sft_dataset(
         knowledge_root=knowledge,
@@ -410,6 +427,296 @@ def test_build_sft_dataset_excludes_training_ineligible_runs(tmp_path: Path) -> 
     )
 
     assert result.train_count == 0
+
+
+def test_build_sft_dataset_holds_out_one_question_form_for_validation(
+    tmp_path: Path,
+) -> None:
+    """同一知识对象有多种问法时，固定留出一种进入验证集。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 问法没有按对象留出，或相同问题同时出现在训练和验证集。
+
+    Returns:
+        None: 此测试只检查知识问法分卷契约。
+    """
+    knowledge = tmp_path / "generated-v0.107.1/cards"
+    knowledge.mkdir(parents=True)
+    rows = [
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 电击的费用是多少？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 打出电击需要几点能量？\nA:",
+            "completion": " 1点能量。",
+        },
+    ]
+    (knowledge / "ZAP.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    human = tmp_path / "raw/human"
+    human.mkdir(parents=True)
+
+    result = build_sft_dataset(
+        knowledge_root=knowledge.parent,
+        human_root=human,
+        output_root=tmp_path / "dataset",
+    )
+
+    train = [json.loads(line) for line in result.train_path.read_text().splitlines()]
+    validation = [json.loads(line) for line in result.dev_path.read_text().splitlines()]
+    assert result.train_count == 1
+    assert result.dev_count == 1
+    assert train[0]["object_id"] == validation[0]["object_id"] == "ZAP"
+    assert train[0]["messages"][0] != validation[0]["messages"][0]
+
+
+def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
+    tmp_path: Path,
+) -> None:
+    """独立 seed 生成的算术验证题应进入验证目录而不是训练集。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 算术行的显式 train/dev 用途被自动问法留出覆盖。
+
+    Returns:
+        None: 此测试只检查算术候选的分卷提示。
+    """
+    knowledge = tmp_path / "generated-v0.107.1/arithmetic"
+    (knowledge / "train").mkdir(parents=True)
+    (knowledge / "validation").mkdir()
+    common = {
+        "category": "arithmetic",
+        "object_id": "block_math",
+        "source": "synthetic_arithmetic",
+        "completion": " 所以HP是18。",
+    }
+    (knowledge / "train/cot.jsonl").write_text(
+        json.dumps(
+            {
+                **common,
+                "split": "train",
+                "prompt": "Q: 训练算术题。请写出计算过程。\nA:",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (knowledge / "validation/cot.jsonl").write_text(
+        json.dumps(
+            {
+                **common,
+                "split": "dev",
+                "prompt": "Q: 验证算术题。请写出计算过程。\nA:",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    human = tmp_path / "raw/human"
+    human.mkdir(parents=True)
+
+    result = build_sft_dataset(
+        knowledge_root=knowledge.parent,
+        human_root=human,
+        output_root=tmp_path / "dataset",
+    )
+
+    train = json.loads(result.train_path.read_text(encoding="utf-8"))
+    validation = json.loads(result.dev_path.read_text(encoding="utf-8"))
+    assert train["messages"][0]["content"].startswith("Q: 训练")
+    assert validation["messages"][0]["content"].startswith("Q: 验证")
+    assert train["source"] == validation["source"] == "synthetic_arithmetic"
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["sources_by_split"] == {
+        "train": {"synthetic_arithmetic": 1},
+        "dev": {"synthetic_arithmetic": 1},
+        "test": {},
+    }
+
+
+def test_build_sft_dataset_rejects_unassigned_eligible_run(tmp_path: Path) -> None:
+    """可训练的人类局不在归属名册中时不得静默进入训练集。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 未分配整局没有触发构建失败。
+
+    Returns:
+        None: 此测试只检查整局 fail-closed 分卷。
+    """
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    human = tmp_path / "raw/human"
+    run = human / "UNASSIGNED"
+    (run / "combat").mkdir(parents=True)
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "turn": 1,
+        "available_actions": ["end_turn"],
+        "run": {
+            "character_name": "故障机器人",
+            "ascension": 0,
+            "act_id": 0,
+            "floor": 1,
+            "current_hp": 75,
+            "max_hp": 75,
+            "gold": 99,
+            "relics": [],
+            "potions": [],
+            "deck": [],
+        },
+        "combat": {
+            "player": {
+                "current_hp": 75,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 3,
+                "stars": 0,
+                "focus": 0,
+                "powers": [],
+                "orbs": [],
+            },
+            "enemies": [],
+            "hand": [],
+            "draw_count": 0,
+            "discard_count": 0,
+        },
+    }
+    (run / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_id": "UNASSIGNED",
+                "termination_reason": "game_over",
+                "training_eligible": True,
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                },
+                "battle_count": 1,
+                "battle_sample_count": 1,
+                "strategic_sample_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "combat/battle-f001-01.jsonl").write_text(
+        json.dumps(
+            {
+                "event_id": 1,
+                "observed_at": "2026-08-28T00:00:00Z",
+                "before_state": state,
+                "action": "end_turn",
+                "parameters": {},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (human / "splits.json").write_text(
+        json.dumps({"train": [], "dev": [], "test": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DatasetBuildError, match="未分配.*UNASSIGNED"):
+        build_sft_dataset(
+            knowledge_root=knowledge,
+            human_root=human,
+            output_root=tmp_path / "dataset",
+        )
+
+
+def test_build_sft_dataset_rejects_probe_prompt_in_training(tmp_path: Path) -> None:
+    """训练问题与知识考试卷完全相同时必须拒绝发布数据集。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 被训练集污染的 probe 没有触发失败。
+
+    Returns:
+        None: 此测试只检查跨集合问题泄漏。
+    """
+    knowledge = tmp_path / "generated-v0.107.1/cards"
+    knowledge.mkdir(parents=True)
+    knowledge_rows = [
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 电击的费用是多少？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "DEFEND",
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 防御能提供多少格挡？\nA:",
+            "completion": " 5点格挡。",
+        },
+    ]
+    (knowledge / "cards.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in knowledge_rows),
+        encoding="utf-8",
+    )
+    probes = tmp_path / "eval/knowledge"
+    probes.mkdir(parents=True)
+    probe_rows = [
+        {
+            "kind": "form_holdout",
+            "category": "cards",
+            "object_id": "ZAP",
+            "prompt": "电击的费用是多少？",
+            "reference": "1点能量。",
+        },
+        {
+            "kind": "form_holdout",
+            "category": "cards",
+            "object_id": "DEFEND",
+            "prompt": "防御能提供多少格挡？",
+            "reference": "5点格挡。",
+        },
+    ]
+    (probes / "probes_recall.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in probe_rows),
+        encoding="utf-8",
+    )
+    human = tmp_path / "raw/human"
+    human.mkdir(parents=True)
+
+    with pytest.raises(
+        DatasetBuildError,
+        match="2 个 probe.*电击的费用.*防御能提供多少格挡",
+    ):
+        build_sft_dataset(
+            knowledge_root=knowledge.parent,
+            human_root=human,
+            output_root=tmp_path / "dataset",
+            knowledge_probe_root=probes,
+        )
 
 
 def test_build_sft_dataset_rejects_published_run_with_truncated_samples(

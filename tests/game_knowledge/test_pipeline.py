@@ -120,6 +120,36 @@ class EmptyGameDataClient(FakeGameDataClient):
         return []
 
 
+class ActGameDataClient(FakeGameDataClient):
+    """提供地图及其遭遇池的固定版本导出替身。"""
+
+    def data_collection(self, collection: str) -> list[dict[str, object]]:
+        """返回一张密林地图及其弱、常规、精英和 Boss 池。
+
+        Args:
+            collection (str): Mod 游戏数据集合名称。
+
+        Returns:
+            list[dict[str, object]]: 地图集合或父类提供的卡牌集合。
+        """
+        if collection == "acts":
+            return [
+                {
+                    "id": "OVERGROWTH",
+                    "name": "密林",
+                    "index": 1,
+                    "is_default": True,
+                    "weak_encounters": [{"id": "SLIMES_WEAK", "name": "史莱姆"}],
+                    "regular_encounters": [{"id": "INKLETS_NORMAL", "name": "墨宝"}],
+                    "elite_encounters": [
+                        {"id": "BYRDONIS_ELITE", "name": "多尼斯异鸟"}
+                    ],
+                    "boss_encounters": [{"id": "THE_KIN_BOSS", "name": "同族"}],
+                }
+            ]
+        return super().data_collection(collection)
+
+
 class RichGameDataClient(FakeGameDataClient):
     """补充事件、遭遇和占位文本的真实协议边界。"""
 
@@ -195,6 +225,72 @@ class WrongVersionGameDataClient(FakeGameDataClient):
             protocol_version="2026-03-11-v1",
             game_version="0.108.0",
             status="ready",
+        )
+
+
+def _required_act_rows() -> list[dict[str, object]]:
+    """返回固定版本四张地图及其四类非空遭遇池。
+
+    Returns:
+        list[dict[str, object]]: 可供离线重建测试使用的完整地图集合。
+    """
+    names = {
+        "OVERGROWTH": "密林",
+        "UNDERDOCKS": "暗港",
+        "HIVE": "巢穴",
+        "GLORY": "荣耀",
+    }
+    return [
+        {
+            "id": act_id,
+            "name": name,
+            "index": index,
+            "is_default": True,
+            "weak_encounters": [{"id": f"{act_id}_WEAK", "name": "弱敌"}],
+            "regular_encounters": [{"id": f"{act_id}_NORMAL", "name": "普通敌人"}],
+            "elite_encounters": [{"id": f"{act_id}_ELITE", "name": "精英敌人"}],
+            "boss_encounters": [{"id": f"{act_id}_BOSS", "name": "首领"}],
+        }
+        for index, (act_id, name) in enumerate(names.items(), start=1)
+    ]
+
+
+def _write_required_act_markdown(snapshot: Path) -> None:
+    """给多问法单元测试写入固定四张地图的最小完整规范事实。
+
+    Args:
+        snapshot (Path): ``mod_export/v0.107.1`` 测试快照根目录。
+
+    Returns:
+        None: 四个地图 Markdown 写入完成后返回。
+    """
+    acts = snapshot / "acts"
+    acts.mkdir(parents=True, exist_ok=True)
+    for row in _required_act_rows():
+        object_id = str(row["id"])
+        name = str(row["name"])
+        sections = []
+        for heading, field in (
+            ("弱遭遇池", "weak_encounters"),
+            ("常规遭遇池", "regular_encounters"),
+            ("精英遭遇池", "elite_encounters"),
+            ("Boss 遭遇池", "boss_encounters"),
+        ):
+            encounter = row[field][0]
+            sections.append(f"## {heading}\n- {encounter['name']}（{encounter['id']}）")
+        (acts / f"{object_id}.md").write_text(
+            f"""---
+id: {object_id}
+name: {name}
+type: act
+source: mod_export
+game_version: v0.107.1
+index: {row["index"]}
+is_default: true
+---
+{"\n\n".join(sections)}
+""",
+            encoding="utf-8",
         )
 
 
@@ -336,6 +432,29 @@ def test_export_mod_knowledge_keeps_real_fake_merchant_encounter_and_gaps(
     ]
 
 
+def test_export_mod_knowledge_preserves_act_encounter_pools(tmp_path: Path) -> None:
+    """固定版本导出应保存地图级普通、精英与 Boss 遭遇池。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 原始地图集合或 canonical Markdown 丢失任一池。
+
+    Returns:
+        None: 此测试只检查地图知识导出契约。
+    """
+    result = export_mod_knowledge(ActGameDataClient(), tmp_path / "knowledge")
+
+    acts = json.loads((result.output_root / "raw/acts.json").read_text())
+    act = (result.output_root / "acts/OVERGROWTH.md").read_text()
+    assert acts[0]["name"] == "密林"
+    assert "## 弱遭遇池\n- 史莱姆（SLIMES_WEAK）" in act
+    assert "## 常规遭遇池\n- 墨宝（INKLETS_NORMAL）" in act
+    assert "## 精英遭遇池\n- 多尼斯异鸟（BYRDONIS_ELITE）" in act
+    assert "## Boss 遭遇池\n- 同族（THE_KIN_BOSS）" in act
+
+
 def test_export_mod_knowledge_rejects_any_version_except_v01071(
     tmp_path: Path,
 ) -> None:
@@ -369,6 +488,7 @@ def test_generate_question_variants_uses_curated_facts_without_web_wiki(
         None: 此测试只检查知识问法产物。
     """
     snapshot = tmp_path / "knowledge/mod_export/v0.107.1"
+    _write_required_act_markdown(snapshot)
     (snapshot / "cards").mkdir(parents=True)
     (snapshot / "cards/DUALCAST.md").write_text(
         """---
@@ -469,7 +589,8 @@ supplement_source: web_wiki:monster_moves_cycles;human_rl_cycle_lab:pending_obse
         .splitlines()
         if line.strip()
     ]
-    assert result.entry_count == len(rows) + len(power_rows) + len(monster_rows)
+    assert result.entry_count == len(rows) + len(power_rows) + len(monster_rows) + 32
+    assert result.categories["encounters"] == 32
     assert len(rows) >= 5
     assert len({row["prompt"] for row in rows}) == len(rows)
     assert all(row["source"] != "web_wiki" for row in rows)
@@ -586,7 +707,9 @@ def test_generate_review_report_lists_suspicious_objects_and_missing_fields(
     assert "明确标注已移除" in report
     assert "真实遗物模型，与同名辅助 MonsterModel 区分；保留" in report
     assert "TEST_SUBJECT" in report
-    assert "当前版本非调试、可奖励 Boss 遭遇；保留并进入监督问法" in report
+    assert (
+        "当前版本非调试、可奖励 Boss 遭遇；raw 保留，不生成现场可见的组合题" in report
+    )
     assert "当前版本图鉴可见 Boss 且招式完整；保留并进入监督问法" in report
     assert "FAKE_MERCHANT_EVENT_ENCOUNTER" in report
     assert "用户确认真实存在，保留" in report
@@ -611,6 +734,7 @@ def test_rebuild_mod_knowledge_applies_curated_facts_and_monster_supplements(
     raw = snapshot / "raw"
     raw.mkdir(parents=True)
     payloads = {
+        "acts": _required_act_rows(),
         "cards": [
             {
                 "id": "DUALCAST",
@@ -892,6 +1016,7 @@ def test_generate_question_variants_disambiguates_same_named_cards(
         None: 此测试只检查生成问法的全局唯一性。
     """
     snapshot = tmp_path / "mod_export/v0.107.1"
+    _write_required_act_markdown(snapshot)
     cards = snapshot / "cards"
     cards.mkdir(parents=True)
     for object_id, character, effect in (
@@ -1059,7 +1184,71 @@ should_give_rewards: true
 ## 可能出现的敌人类型
 - 实验体 #C8（TEST_SUBJECT）
 """,
+        "encounters/OBSERVED_COMPOSITIONS.md": """---
+id: OBSERVED_COMPOSITIONS
+name: 实机敌人组合目录
+type: encounter
+source: mod_export
+game_version: v0.107.1
+supplement_source: human_rl:data/entries/encounters/*.json
+---
+## 覆盖概览
+共有2种不同敌人组合：单个敌人1种、2名敌人1种。
+
+## 单个敌人组合
+下水道蚌。
+
+## 2名敌人组合
+啃咬机×2。
+""",
+        "acts/OVERGROWTH.md": """---
+id: OVERGROWTH
+name: 密林
+type: act
+source: mod_export
+game_version: v0.107.1
+index: 1
+is_default: true
+---
+## 弱遭遇池
+- 史莱姆（SLIMES_WEAK）
+
+## 常规遭遇池
+- 墨宝（INKLETS_NORMAL）
+
+## 精英遭遇池
+- 多尼斯异鸟（BYRDONIS_ELITE）
+
+## Boss 遭遇池
+- 同族（THE_KIN_BOSS）
+""",
     }
+    for object_id, name, index in (
+        ("UNDERDOCKS", "暗港", 2),
+        ("HIVE", "巢穴", 3),
+        ("GLORY", "荣耀", 4),
+    ):
+        fixtures[f"acts/{object_id}.md"] = f"""---
+id: {object_id}
+name: {name}
+type: act
+source: mod_export
+game_version: v0.107.1
+index: {index}
+is_default: true
+---
+## 弱遭遇池
+- 弱敌（{object_id}_WEAK）
+
+## 常规遭遇池
+- 普通敌人（{object_id}_NORMAL）
+
+## 精英遭遇池
+- 精英敌人（{object_id}_ELITE）
+
+## Boss 遭遇池
+- 首领（{object_id}_BOSS）
+"""
     for relative, content in fixtures.items():
         path = snapshot / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1090,15 +1279,109 @@ should_give_rewards: true
     test_subject = (output / "monsters/TEST_SUBJECT.jsonl").read_text(encoding="utf-8")
     assert "首领" in test_subject
     assert "Boss。" not in test_subject
-    assert (output / "encounters/TEST_SUBJECT_BOSS.jsonl").is_file()
+    monster_rows = [json.loads(line) for line in test_subject.splitlines()]
+    hp_answers = [
+        row["completion"] for row in monster_rows if row["completion"] == " 100。"
+    ]
+    assert len(hp_answers) == 2
+    assert not (output / "encounters/TEST_SUBJECT_BOSS.jsonl").exists()
+    assert not (output / "encounters/OBSERVED_COMPOSITIONS.jsonl").exists()
+    assert not (output / "acts/OVERGROWTH.jsonl").exists()
     encounter_rows = [
         json.loads(line)
-        for line in (output / "encounters/TEST_SUBJECT_BOSS.jsonl")
+        for line in (output / "encounters/OVERGROWTH.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert all("敌人组成" not in row["prompt"] for row in encounter_rows)
-    assert all("不表示同时出现或数量" in row["completion"] for row in encounter_rows)
+    assert len(encounter_rows) == 8
+    assert {row["category"] for row in encounter_rows} == {"encounters"}
+    assert all(
+        sum(
+            row["completion"] == candidate["completion"] for candidate in encounter_rows
+        )
+        == 2
+        for row in encounter_rows
+    )
+    assert any("全部怪池" in row["prompt"] for row in encounter_rows)
+    assert any("普通怪池" in row["prompt"] for row in encounter_rows)
+    assert any("精英怪池" in row["prompt"] for row in encounter_rows)
+    assert any("Boss池" in row["prompt"] for row in encounter_rows)
+
+
+def test_question_generation_rejects_incomplete_map_catalog_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    """地图规范事实不完整时不得发布部分怪池或清理旧产物。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离知识目录。
+
+    Raises:
+        AssertionError: 单张地图仍被生成，或失败前删除了已有候选。
+
+    Returns:
+        None: 此测试只验证多问法生成器的发布前完整性门槛。
+    """
+    snapshot = tmp_path / "mod_export/v0.107.1"
+    acts = snapshot / "acts"
+    acts.mkdir(parents=True)
+    (acts / "OVERGROWTH.md").write_text(
+        """---
+id: OVERGROWTH
+name: 密林
+type: act
+source: mod_export
+game_version: v0.107.1
+index: 1
+is_default: true
+---
+## 弱遭遇池
+- 弱敌（WEAK）
+## 常规遭遇池
+- 普通敌人（NORMAL）
+## 精英遭遇池
+- 精英敌人（ELITE）
+## Boss 遭遇池
+- 首领（BOSS）
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "generated-v0.107.1"
+    existing = output / "encounters/GLORY.jsonl"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="固定四张地图"):
+        game_knowledge.generate_question_variants(snapshot, output)
+
+    assert existing.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_question_generation_rejects_missing_map_catalog_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    """地图目录完全缺失时也不得清理已经存在的怪池候选。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离知识目录。
+
+    Raises:
+        AssertionError: 无地图输入仍被发布，或既有地图候选被删除。
+
+    Returns:
+        None: 此测试覆盖完整地图目录缺失的发布边界。
+    """
+    snapshot = tmp_path / "mod_export/v0.107.1"
+    snapshot.mkdir(parents=True)
+    output = tmp_path / "generated-v0.107.1"
+    existing = output / "encounters/GLORY.jsonl"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="固定四张地图"):
+        game_knowledge.generate_question_variants(snapshot, output)
+
+    assert existing.read_text(encoding="utf-8") == "existing\n"
 
 
 def test_rebuild_rejects_mismatched_monster_wiki_identity(tmp_path: Path) -> None:
@@ -1116,6 +1399,10 @@ def test_rebuild_rejects_mismatched_monster_wiki_identity(tmp_path: Path) -> Non
     knowledge = tmp_path / "knowledge"
     raw = knowledge / "mod_export/v0.107.1/raw"
     raw.mkdir(parents=True)
+    (raw / "acts.json").write_text(
+        json.dumps(_required_act_rows(), ensure_ascii=False),
+        encoding="utf-8",
+    )
     (raw / "monsters.json").write_text(
         json.dumps(
             [
@@ -1153,3 +1440,230 @@ source: web_wiki
             knowledge,
             wiki_root=knowledge / "web_wiki",
         )
+
+
+def test_rebuild_requires_all_four_complete_act_pools(tmp_path: Path) -> None:
+    """离线重建缺少固定四张地图或任一怪池时必须失败。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 缺失地图集合或空怪池仍被发布。
+
+    Returns:
+        None: 此测试只检查地图知识的 fail-closed 边界。
+    """
+    raw = tmp_path / "knowledge/mod_export/v0.107.1/raw"
+    raw.mkdir(parents=True)
+
+    with pytest.raises(game_knowledge.KnowledgeFormatError, match="acts.json"):
+        game_knowledge.rebuild_mod_knowledge(raw, tmp_path / "knowledge")
+
+    incomplete = _required_act_rows()
+    incomplete[0]["boss_encounters"] = []
+    (raw / "acts.json").write_text(
+        json.dumps(incomplete, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(game_knowledge.KnowledgeFormatError, match="boss_encounters"):
+        game_knowledge.rebuild_mod_knowledge(raw, tmp_path / "knowledge")
+
+
+def test_rebuild_generates_complete_defect_orb_knowledge(tmp_path: Path) -> None:
+    """故障机器人应包含初始配置和五种充能球的完整机制知识。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离知识目录。
+
+    Raises:
+        AssertionError: 名称解析、充能球机制或生成问答未达到固定契约。
+
+    Returns:
+        None: 此测试覆盖受控充能球补录到多问法生成的完整链路。
+    """
+    knowledge = tmp_path / "knowledge"
+    raw = knowledge / "mod_export/v0.107.1/raw"
+    raw.mkdir(parents=True)
+    payloads = {
+        "acts": _required_act_rows(),
+        "cards": [
+            {"id": "STRIKE_DEFECT", "name": "打击", "description": "造成6点伤害。"},
+            {"id": "DEFEND_DEFECT", "name": "防御", "description": "获得5点格挡。"},
+            {"id": "ZAP", "name": "电击", "description": "生成1个闪电充能球。"},
+            {
+                "id": "DUALCAST",
+                "name": "双重释放",
+                "description": "激发最旧的充能球两次。",
+            },
+        ],
+        "relics": [
+            {
+                "id": "CRACKED_CORE",
+                "name": "破损核心",
+                "description": "战斗开始时生成1个闪电。",
+            }
+        ],
+        "characters": [
+            {
+                "id": "DEFECT",
+                "name": "故障机器人",
+                "description": "故障机器人使用充能球持续产生效果，并可激发它们取得更强效果。",
+                "starting_hp": 75,
+                "starting_gold": 99,
+                "max_energy": 3,
+                "orb_slots": 3,
+                "starting_deck": [
+                    "STRIKE_DEFECT",
+                    "STRIKE_DEFECT",
+                    "STRIKE_DEFECT",
+                    "STRIKE_DEFECT",
+                    "DEFEND_DEFECT",
+                    "DEFEND_DEFECT",
+                    "DEFEND_DEFECT",
+                    "DEFEND_DEFECT",
+                    "ZAP",
+                    "DUALCAST",
+                ],
+                "starting_relics": ["CRACKED_CORE"],
+                "starting_potions": [],
+            }
+        ],
+    }
+    for category, rows in payloads.items():
+        (raw / f"{category}.json").write_text(
+            json.dumps(rows, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    supplement = knowledge / "supplements/v0.107.1/characters/defect_orbs.json"
+    supplement.parent.mkdir(parents=True)
+    supplement.write_text(
+        json.dumps(
+            {
+                "captured_at_utc": "2026-08-27T00:00:00Z",
+                "game_version": "0.107.1",
+                "mod_version": "0.8.0",
+                "provenance": "fixed-version-mod-snapshot",
+                "orbs": [
+                    {
+                        "id": "LIGHTNING_ORB",
+                        "name": "闪电",
+                        "description": "充能球：对随机敌人造成伤害。",
+                        "passive_base": 3,
+                        "evoke_base": 8,
+                        "trigger": "turn_end",
+                        "focus_effect": "数值为基值,集中每+1被动与激发各+1",
+                    },
+                    {
+                        "id": "FROST_ORB",
+                        "name": "冰霜",
+                        "description": "充能球：获得格挡。",
+                        "passive_base": 2,
+                        "evoke_base": 5,
+                        "trigger": "turn_end",
+                        "focus_effect": "数值为基值,集中每+1被动与激发各+1",
+                    },
+                    {
+                        "id": "DARK_ORB",
+                        "name": "黑暗",
+                        "description": "充能球：激发时对生命最低的敌人造成伤害，每回合提高伤害。",
+                        "passive_base": 6,
+                        "evoke_base": None,
+                        "trigger": "turn_end",
+                        "focus_effect": "数值为基值,集中每+1仅被动+1,激发不变",
+                    },
+                    {
+                        "id": "GLASS_ORB",
+                        "name": "玻璃",
+                        "description": "充能球：对所有敌人造成伤害，伤害随回合降低。",
+                        "passive_base": 4,
+                        "evoke_base": 8,
+                        "trigger": "turn_end",
+                        "focus_effect": "集中每+1使被动伤害+1,激发伤害+2",
+                    },
+                    {
+                        "id": "PLASMA_ORB",
+                        "name": "等离子",
+                        "description": "充能球：获得能量。",
+                        "passive_base": 1,
+                        "evoke_base": 2,
+                        "trigger": "turn_start",
+                        "focus_effect": "不受集中影响",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = game_knowledge.rebuild_mod_knowledge(raw, knowledge)
+    canonical = (result.output_root / "characters/DEFECT.md").read_text(
+        encoding="utf-8"
+    )
+    generated = tmp_path / "generated-v0.107.1"
+    game_knowledge.generate_question_variants(result.output_root, generated)
+    rows = [
+        json.loads(line)
+        for line in (generated / "characters/DEFECT.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert "- 打击（STRIKE_DEFECT）" in canonical
+    assert "- 破损核心（CRACKED_CORE）" in canonical
+    assert (
+        "supplement_source: supplements/v0.107.1/characters/defect_orbs.json"
+        in canonical
+    )
+    assert (
+        "supplement_origin: human_rl:data/mod_information/snapshots/"
+        "v0.107.1/orbs.json" in canonical
+    )
+    assert "## 充能球：闪电" in canonical
+    assert "## 充能球：等离子" in canonical
+    assert len(rows) == 13
+    answers = [row["completion"].strip() for row in rows]
+    assert (
+        "初始HP75，金币99，每回合能量3，充能球槽3。"
+        "初始遗物：破损核心。初始牌组（10张）："
+        "打击×4、防御×4、电击、双重释放。"
+    ) in answers
+    assert "闪电、冰霜、黑暗、玻璃、等离子。" in answers
+    assert any("被动（回合结束）3，激发8" in answer for answer in answers)
+    assert any("仅被动+1，激发不变" in answer for answer in answers)
+    assert all("激发0" not in answer for answer in answers)
+    assert any("被动（回合开始）1，激发2" in answer for answer in answers)
+    assert any("不受集中影响" in answer for answer in answers)
+
+    original_supplement = json.loads(supplement.read_text(encoding="utf-8"))
+    invalid_values = (("DARK_ORB", 0), ("LIGHTNING_ORB", None))
+    for orb_id, evoke_base in invalid_values:
+        invalid_supplement = json.loads(json.dumps(original_supplement))
+        next(orb for orb in invalid_supplement["orbs"] if orb["id"] == orb_id)[
+            "evoke_base"
+        ] = evoke_base
+        supplement.write_text(
+            json.dumps(invalid_supplement, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        with pytest.raises(game_knowledge.KnowledgeFormatError, match="evoke_base"):
+            game_knowledge.rebuild_mod_knowledge(raw, knowledge)
+    supplement.write_text(
+        json.dumps(original_supplement, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    (raw / "relics.json").write_text("[]\n", encoding="utf-8")
+    with pytest.raises(game_knowledge.KnowledgeFormatError, match="无法解析显示名"):
+        game_knowledge.rebuild_mod_knowledge(raw, knowledge)
+    (raw / "relics.json").write_text(
+        json.dumps(payloads["relics"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    supplement.unlink()
+    with pytest.raises(
+        game_knowledge.KnowledgeFormatError, match="缺少故障机器人充能球"
+    ):
+        game_knowledge.rebuild_mod_knowledge(raw, knowledge)

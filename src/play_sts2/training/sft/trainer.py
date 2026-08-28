@@ -11,12 +11,13 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .dataset import validate_sft_dataset
+from .dataset import dataset_split_path, validate_sft_dataset
 from .encoding import (
     IGNORE_LABEL,
     SftConfig,
@@ -26,6 +27,7 @@ from .encoding import (
     load_tokenized_samples,
 )
 from .provenance import (
+    adapter_source_files,
     model_source_files,
     sha256_files,
     snapshot_files,
@@ -58,6 +60,94 @@ class OptimizationResult:
     optimizer_steps: int
     samples_seen: int
     mean_loss: float
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationCheckpoint:
+    """保存精确恢复优化循环所需的全部动态状态。
+
+    Args:
+        optimizer_steps (int): 已完成的优化器更新次数。
+        samples_seen (int): 已参与训练的累计样本数。
+        loss_sum (float): 已见样本未缩放 loss 的累计值。
+        epoch_index (int): 下一次恢复所在的零基 epoch 索引。
+        order (tuple[int, ...]): 当前 epoch 的确定性样本顺序；空元组表示需洗牌。
+        next_begin (int): 当前顺序中下一组样本的起始位置。
+        random_state (object): Python 洗牌随机数生成器状态。
+        torch_rng_state (Any): PyTorch CPU 随机数生成器状态。
+        device_rng_state (Any | None): MPS 等训练设备的随机数状态。
+        optimizer_state (dict[str, Any]): AdamW 参数、动量和步数状态。
+    """
+
+    optimizer_steps: int
+    samples_seen: int
+    loss_sum: float
+    epoch_index: int
+    order: tuple[int, ...]
+    next_begin: int
+    random_state: object
+    torch_rng_state: Any
+    device_rng_state: Any | None
+    optimizer_state: dict[str, Any]
+
+    def to_payload(self) -> dict[str, Any]:
+        """转换为可由 ``torch.save`` 保存的稳定字典。
+
+        Returns:
+            dict[str, Any]: 带格式版本的完整训练状态。
+        """
+        return {
+            "format_version": 1,
+            "optimizer_steps": self.optimizer_steps,
+            "samples_seen": self.samples_seen,
+            "loss_sum": self.loss_sum,
+            "epoch_index": self.epoch_index,
+            "order": self.order,
+            "next_begin": self.next_begin,
+            "random_state": self.random_state,
+            "torch_rng_state": self.torch_rng_state,
+            "device_rng_state": self.device_rng_state,
+            "optimizer_state": self.optimizer_state,
+        }
+
+    @classmethod
+    def from_payload(cls, value: Mapping[str, Any]) -> OptimizationCheckpoint:
+        """校验并恢复 ``torch.load`` 读取的训练状态。
+
+        Args:
+            value (Mapping[str, Any]): checkpoint 中的训练状态字典。
+
+        Raises:
+            SftTrainingError: 格式版本、数值或样本顺序无效。
+
+        Returns:
+            OptimizationCheckpoint: 已类型化的恢复状态。
+        """
+        try:
+            order = tuple(int(index) for index in value["order"])
+            checkpoint = cls(
+                optimizer_steps=int(value["optimizer_steps"]),
+                samples_seen=int(value["samples_seen"]),
+                loss_sum=float(value["loss_sum"]),
+                epoch_index=int(value["epoch_index"]),
+                order=order,
+                next_begin=int(value["next_begin"]),
+                random_state=value["random_state"],
+                torch_rng_state=value["torch_rng_state"],
+                device_rng_state=value.get("device_rng_state"),
+                optimizer_state=dict(value["optimizer_state"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SftTrainingError("checkpoint 训练状态字段无效") from exc
+        if (
+            value.get("format_version") != 1
+            or checkpoint.optimizer_steps < 0
+            or checkpoint.samples_seen < 0
+            or checkpoint.epoch_index < 0
+            or checkpoint.next_begin < 0
+        ):
+            raise SftTrainingError("checkpoint 训练状态版本或数值无效")
+        return checkpoint
 
 
 class ChunkedCrossEntropy:
@@ -149,6 +239,31 @@ class ChunkedCrossEntropy:
         return (losses * keep).sum(), keep.sum()
 
 
+def _require_fp32_trainable_parameters(model: Any) -> None:
+    """要求全部可训练参数使用 FP32，避免 LoRA 被基座精度连带降级。
+
+    Args:
+        model (Any): 提供 ``named_parameters`` 的 PyTorch 模型。
+
+    Raises:
+        SftTrainingError: 任一可训练参数不是 ``torch.float32``。
+
+    Returns:
+        None: 所有可训练参数均为 FP32 时返回。
+    """
+    import torch
+
+    invalid = [
+        f"{name}={str(parameter.dtype).removeprefix('torch.')}"
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.dtype != torch.float32
+    ]
+    if invalid:
+        preview = "，".join(invalid[:8])
+        suffix = "……" if len(invalid) > 8 else ""
+        raise SftTrainingError(f"可训练参数必须使用 FP32：{preview}{suffix}")
+
+
 def optimize(
     model: Any,
     samples: Sequence[TokenizedSample],
@@ -163,8 +278,9 @@ def optimize(
     warmup_steps: int = 0,
     logits_chunk_size: int = 2048,
     checkpoint_steps: int = 0,
-    checkpoint: Callable[[int], None] | None = None,
+    checkpoint: Callable[[OptimizationCheckpoint], None] | None = None,
     max_steps: int | None = None,
+    resume_from: OptimizationCheckpoint | None = None,
 ) -> OptimizationResult:
     """用 batch=1、梯度累积和可选分块 CE 执行可靠训练。
 
@@ -181,8 +297,10 @@ def optimize(
         warmup_steps (int): 线性学习率预热的优化步数。
         logits_chunk_size (int): Qwen 词表投影的序列分块长度。
         checkpoint_steps (int): checkpoint 的优化步间隔；零为关闭。
-        checkpoint (Callable[[int], None] | None): 接收当前步数的保存回调。
+        checkpoint (Callable[[OptimizationCheckpoint], None] | None): 接收精确训练
+            状态的保存回调。
         max_steps (int | None): 可选优化步上限，主要用于真实模型冒烟。
+        resume_from (OptimizationCheckpoint | None): 可选的精确恢复状态。
 
     Raises:
         SftTrainingError: 输入无效、模型无可训练参数或出现非有限数值。
@@ -200,16 +318,23 @@ def optimize(
 
     if not samples:
         raise SftTrainingError("训练样本为空")
+    model.to(device)
     parameters = [
         parameter for parameter in model.parameters() if parameter.requires_grad
     ]
     if not parameters:
         raise SftTrainingError("模型没有可训练参数")
+    _require_fp32_trainable_parameters(model)
     torch.manual_seed(seed)
     randomizer = random.Random(seed)
-    model.to(device)
     model.train()
     optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
+    if resume_from is not None:
+        _validate_optimization_checkpoint(resume_from, len(samples), epochs)
+        optimizer.load_state_dict(resume_from.optimizer_state)
+        randomizer.setstate(resume_from.random_state)
+        torch.set_rng_state(resume_from.torch_rng_state.cpu())
+        _restore_device_rng_state(device, resume_from.device_rng_state)
     decoder, lm_head = _decoder_and_head(model)
     chunked_loss = (
         ChunkedCrossEntropy(lm_head, logits_chunk_size)
@@ -218,14 +343,34 @@ def optimize(
     )
     trace_path = Path(trace_path)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    optimizer_steps = 0
-    samples_seen = 0
-    loss_sum = 0.0
-    with trace_path.open("w", encoding="utf-8") as trace:
-        for epoch in range(epochs):
-            order = list(range(len(samples)))
-            randomizer.shuffle(order)
-            for begin in range(0, len(order), gradient_accumulation_steps):
+    optimizer_steps = resume_from.optimizer_steps if resume_from is not None else 0
+    samples_seen = resume_from.samples_seen if resume_from is not None else 0
+    loss_sum = resume_from.loss_sum if resume_from is not None else 0.0
+    start_epoch = resume_from.epoch_index if resume_from is not None else 0
+    resumed_order = list(resume_from.order) if resume_from is not None else []
+    resumed_begin = resume_from.next_begin if resume_from is not None else 0
+    if max_steps is not None and optimizer_steps >= max_steps:
+        return OptimizationResult(
+            optimizer_steps,
+            samples_seen,
+            loss_sum / samples_seen,
+        )
+    trace_mode = "a" if resume_from is not None else "w"
+    _prepare_resume_trace(trace_path, optimizer_steps, resume_from is not None)
+    with trace_path.open(trace_mode, encoding="utf-8") as trace:
+        for epoch in range(start_epoch, epochs):
+            if epoch == start_epoch and resumed_order:
+                order = resumed_order
+                first_begin = resumed_begin
+            else:
+                order = list(range(len(samples)))
+                randomizer.shuffle(order)
+                first_begin = 0
+            for begin in range(
+                first_begin,
+                len(order),
+                gradient_accumulation_steps,
+            ):
                 group = order[begin : begin + gradient_accumulation_steps]
                 optimizer.zero_grad(set_to_none=True)
                 current_lr = _learning_rate_at(
@@ -291,7 +436,27 @@ def optimize(
                     torch.mps.empty_cache()
                 if checkpoint_steps and optimizer_steps % checkpoint_steps == 0:
                     assert checkpoint is not None
-                    checkpoint(optimizer_steps)
+                    next_begin = begin + gradient_accumulation_steps
+                    next_epoch = epoch
+                    checkpoint_order = tuple(order)
+                    if next_begin >= len(order):
+                        next_epoch += 1
+                        next_begin = 0
+                        checkpoint_order = ()
+                    checkpoint(
+                        OptimizationCheckpoint(
+                            optimizer_steps=optimizer_steps,
+                            samples_seen=samples_seen,
+                            loss_sum=loss_sum,
+                            epoch_index=next_epoch,
+                            order=checkpoint_order,
+                            next_begin=next_begin,
+                            random_state=randomizer.getstate(),
+                            torch_rng_state=torch.get_rng_state(),
+                            device_rng_state=_device_rng_state(device),
+                            optimizer_state=optimizer.state_dict(),
+                        )
+                    )
                 if max_steps is not None and optimizer_steps >= max_steps:
                     return OptimizationResult(
                         optimizer_steps,
@@ -320,6 +485,125 @@ def resolve_device(requested: str) -> str:
     if requested == "mps" and not torch.backends.mps.is_available():
         raise SftTrainingError("当前 PyTorch 无法使用 MPS")
     return requested
+
+
+def _validate_optimization_checkpoint(
+    checkpoint: OptimizationCheckpoint,
+    sample_count: int,
+    epochs: int,
+) -> None:
+    """确认恢复状态的数据位置适用于当前训练任务。
+
+    Args:
+        checkpoint (OptimizationCheckpoint): 待恢复的训练状态。
+        sample_count (int): 当前 token 化样本数量。
+        epochs (int): 当前配置的总 epoch 数。
+
+    Raises:
+        SftTrainingError: epoch、游标或样本顺序与当前任务不一致。
+
+    Returns:
+        None: 状态可以恢复时返回。
+    """
+    if checkpoint.epoch_index > epochs:
+        raise SftTrainingError("checkpoint epoch 超出当前训练配置")
+    if checkpoint.order:
+        if (
+            len(checkpoint.order) != sample_count
+            or set(checkpoint.order) != set(range(sample_count))
+            or checkpoint.next_begin >= sample_count
+        ):
+            raise SftTrainingError("checkpoint 样本顺序与当前数据集不一致")
+    elif checkpoint.next_begin != 0:
+        raise SftTrainingError("checkpoint 空样本顺序不能带非零游标")
+
+
+def _prepare_resume_trace(
+    trace_path: Path,
+    optimizer_steps: int,
+    is_resume: bool,
+) -> None:
+    """校验 checkpoint 之前的指标，并原子丢弃 checkpoint 之后的记录。
+
+    正常中断可能发生在两次 checkpoint 之间，此时指标会领先于可恢复权重。
+    恢复必须回滚这些尚无对应权重的指标行，再从 checkpoint 的下一步重算。
+
+    Args:
+        trace_path (Path): 当前运行的 JSONL 指标文件。
+        optimizer_steps (int): checkpoint 声明的已完成步数。
+        is_resume (bool): 当前是否执行精确恢复。
+
+    Raises:
+        SftTrainingError: 指标文件缺失，或 checkpoint 之前的轨迹无效。
+
+    Returns:
+        None: 新运行直接返回；恢复轨迹则与 checkpoint 精确对齐。
+    """
+    if not is_resume:
+        return
+    if not trace_path.is_file():
+        raise SftTrainingError(f"精确续训缺少指标轨迹: {trace_path}")
+    original_content = trace_path.read_text(encoding="utf-8")
+    lines = original_content.splitlines()
+    retained: list[str] = []
+    for expected_step in range(1, optimizer_steps + 1):
+        try:
+            line = lines[expected_step - 1]
+            actual_step = int(json.loads(line)["step"])
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise SftTrainingError(f"精确续训指标轨迹无效: {trace_path}") from exc
+        if actual_step != expected_step:
+            raise SftTrainingError(
+                f"指标轨迹第 {expected_step} 行声明 step {actual_step}"
+            )
+        retained.append(line)
+    expected_content = "".join(f"{line}\n" for line in retained)
+    if original_content != expected_content:
+        _atomic_write_text(trace_path, expected_content)
+
+
+def _device_rng_state(device: str) -> Any | None:
+    """读取当前训练设备的随机数状态。
+
+    Args:
+        device (str): 当前 PyTorch 设备字符串。
+
+    Returns:
+        Any | None: MPS 随机状态；CPU 训练不需要额外状态。
+    """
+    if device != "mps":
+        return None
+    import torch
+
+    return torch.mps.get_rng_state()
+
+
+def _restore_device_rng_state(device: str, state: Any | None) -> None:
+    """恢复当前训练设备的随机数状态。
+
+    Args:
+        device (str): 当前 PyTorch 设备字符串。
+        state (Any | None): checkpoint 保存的设备随机状态。
+
+    Raises:
+        SftTrainingError: MPS 精确续训缺少设备随机状态。
+
+    Returns:
+        None: 状态恢复完成后返回。
+    """
+    if device != "mps":
+        return
+    if state is None:
+        raise SftTrainingError("MPS checkpoint 缺少设备随机状态")
+    import torch
+
+    torch.mps.set_rng_state(state.cpu())
 
 
 def attach_lora(
@@ -356,6 +640,7 @@ def attach_lora(
             bias="none",
             task_type="CAUSAL_LM",
         ),
+        autocast_adapter_dtype=True,
     )
 
 
@@ -400,12 +685,17 @@ def publish_adapter(
         raise
 
 
-def save_last_checkpoint(model: Any, destination: Path) -> None:
+def save_last_checkpoint(
+    model: Any,
+    destination: Path,
+    training_state: Mapping[str, Any],
+) -> None:
     """用原子符号链接切换覆盖一个 LoRA ``checkpoint-last``。
 
     Args:
         model (Any): 当前可训练的 PEFT 模型。
         destination (Path): 固定 checkpoint 目录。
+        training_state (Mapping[str, Any]): 优化器、数据游标与随机数状态。
 
     Raises:
         SftTrainingError: 目标是旧式实体目录，无法保证无缺口切换。
@@ -414,7 +704,7 @@ def save_last_checkpoint(model: Any, destination: Path) -> None:
     Returns:
         None: 新 checkpoint 完整发布后返回。
     """
-    destination = Path(destination)
+    destination = Path(destination).absolute()
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not destination.is_symlink():
         raise SftTrainingError(f"checkpoint 目标必须不存在或为符号链接: {destination}")
@@ -427,7 +717,10 @@ def save_last_checkpoint(model: Any, destination: Path) -> None:
     pointer = destination.with_name(f".{destination.name}-pointer-{uuid.uuid4().hex}")
     published = False
     try:
+        import torch
+
         model.save_pretrained(staging, safe_serialization=True)
+        torch.save(dict(training_state), staging / "training_state.pt")
         pointer.symlink_to(staging.name, target_is_directory=True)
         os.replace(pointer, destination)
         published = True
@@ -442,11 +735,44 @@ def save_last_checkpoint(model: Any, destination: Path) -> None:
         raise
 
 
+def load_training_checkpoint(
+    checkpoint_root: Path,
+    *,
+    device: str,
+) -> OptimizationCheckpoint:
+    """从已原子发布的 checkpoint 读取精确训练状态。
+
+    Args:
+        checkpoint_root (Path): 含 adapter 与 ``training_state.pt`` 的目录。
+        device (str): 优化器张量需要映射到的训练设备。
+
+    Raises:
+        SftTrainingError: 状态文件缺失或内容不符合精确恢复格式。
+        OSError: 状态文件无法读取。
+
+    Returns:
+        OptimizationCheckpoint: 可传给优化循环的完整恢复状态。
+    """
+    import torch
+
+    path = Path(checkpoint_root) / "training_state.pt"
+    if not path.is_file():
+        raise SftTrainingError(f"精确续训状态不存在: {path}")
+    try:
+        value = torch.load(path, map_location=device, weights_only=True)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise SftTrainingError(f"无法读取精确续训状态: {path}") from exc
+    if not isinstance(value, Mapping):
+        raise SftTrainingError(f"精确续训状态不是对象: {path}")
+    return OptimizationCheckpoint.from_payload(value)
+
+
 def train_sft(
     config: SftConfig,
     run_name: str,
     *,
     max_steps: int | None = None,
+    exact_resume: bool = False,
 ) -> dict[str, Any]:
     """加载本地 Qwen，训练或续训 LoRA，并保存 adapter 与运行记录。
 
@@ -454,6 +780,7 @@ def train_sft(
         config (SftConfig): 已校验的训练配置。
         run_name (str): 同时用于 adapter 和 runs 子目录的运行名称。
         max_steps (int | None): 可选的优化步上限。
+        exact_resume (bool): 是否从同名运行的 ``checkpoint-last`` 精确恢复。
 
     Raises:
         SftTrainingError: 名称、输入或输出目录不满足训练约定。
@@ -462,19 +789,78 @@ def train_sft(
     Returns:
         dict[str, Any]: 可序列化的最终训练清单。
     """
+    _validate_run_name(run_name)
+    with _exclusive_run_lock(config.runs_root, run_name):
+        return _train_sft_locked(
+            config,
+            run_name,
+            max_steps=max_steps,
+            exact_resume=exact_resume,
+        )
+
+
+def _train_sft_locked(
+    config: SftConfig,
+    run_name: str,
+    *,
+    max_steps: int | None,
+    exact_resume: bool,
+) -> dict[str, Any]:
+    """在已持有同名运行排他锁时执行 SFT。
+
+    Args:
+        config (SftConfig): 已校验的训练配置。
+        run_name (str): 日期开头的运行目录名。
+        max_steps (int | None): 可选的优化步上限。
+        exact_resume (bool): 是否恢复同名运行的完整 checkpoint。
+
+    Raises:
+        SftTrainingError: 输入来源、恢复血缘或训练状态无效。
+        OSError: 无法读取输入或发布产物。
+
+    Returns:
+        dict[str, Any]: 可序列化的最终训练清单。
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_name):
-        raise SftTrainingError(f"无效训练名称: {run_name}")
     adapter_path = config.adapter_root / run_name
     run_path = config.runs_root / run_name
-    if adapter_path.exists() or run_path.exists():
+    checkpoint_path = run_path / "checkpoint-last"
+    if exact_resume:
+        if adapter_path.exists() or not run_path.is_dir():
+            raise SftTrainingError(
+                f"精确续训要求未发布 adapter 且运行目录存在: {adapter_path}, {run_path}"
+            )
+        if not checkpoint_path.is_dir():
+            raise SftTrainingError(f"精确续训 checkpoint 不存在: {checkpoint_path}")
+    elif adapter_path.exists() or run_path.exists():
         raise SftTrainingError(f"训练输出已存在: {adapter_path} 或 {run_path}")
-    if config.init_adapter is not None:
+    if config.init_adapter is not None and not exact_resume:
         _validate_init_adapter(config)
+    device = resolve_device(config.device)
+    dtype = torch.bfloat16 if device == "mps" else torch.float32
+    execution_runtime = {
+        "device": device,
+        "base_model_dtype": str(dtype).removeprefix("torch."),
+        "adapter_dtype": "float32",
+    }
+    dataset_files = _dataset_source_files(config.dataset_root)
+    dataset_snapshot = snapshot_files(dataset_files)
     dataset_manifest = validate_sft_dataset(config.dataset_root)
+    _require_unchanged_sources(
+        "训练数据集",
+        _dataset_source_files(config.dataset_root),
+        dataset_files,
+        dataset_snapshot,
+    )
     dataset_manifest_sha256 = _sha256(config.dataset_root / "manifest.json")
+    _require_unchanged_sources(
+        "训练数据集",
+        _dataset_source_files(config.dataset_root),
+        dataset_files,
+        dataset_snapshot,
+    )
     base_model_files = model_source_files(config.base_model)
     base_model_snapshot = snapshot_files(base_model_files)
     base_model_sha256 = sha256_files(base_model_files)
@@ -483,6 +869,47 @@ def train_sft(
         base_model_files,
         base_model_snapshot,
     )
+    init_adapter_files: dict[str, Path] = {}
+    init_adapter_snapshot: dict[str, tuple[int, int, int, int, int]] = {}
+    init_adapter_sha256 = None
+    if config.init_adapter is not None and not exact_resume:
+        init_adapter_files = adapter_source_files(config.init_adapter)
+        init_adapter_snapshot = snapshot_files(init_adapter_files)
+        init_adapter_sha256 = sha256_files(init_adapter_files)
+        _require_unchanged_sources(
+            "父 adapter",
+            adapter_source_files(config.init_adapter),
+            init_adapter_files,
+            init_adapter_snapshot,
+        )
+    provenance = {
+        "base_model": str(config.base_model),
+        "base_model_sha256": base_model_sha256,
+        "dataset": str(config.dataset_root),
+        "dataset_files": dataset_manifest["files"],
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "execution_runtime": execution_runtime,
+        "init_adapter": (
+            str(config.init_adapter) if config.init_adapter is not None else None
+        ),
+        "init_adapter_sha256": init_adapter_sha256,
+    }
+    if exact_resume:
+        saved_provenance = _read_json(run_path / "provenance.json")
+        _validate_execution_runtime(
+            saved_provenance.get("execution_runtime"),
+            execution_runtime,
+        )
+        current_comparable = dict(provenance)
+        current_comparable["init_adapter_sha256"] = saved_provenance.get(
+            "init_adapter_sha256"
+        )
+        if saved_provenance != current_comparable:
+            raise SftTrainingError("精确续训的基座、数据集或父 adapter 血缘已变化")
+        saved_config = _read_json(run_path / "config.json")
+        if saved_config != config_as_json(config):
+            raise SftTrainingError("精确续训配置与原运行不一致")
+        provenance = saved_provenance
 
     tokenizer = AutoTokenizer.from_pretrained(
         str(config.base_model),
@@ -490,12 +917,16 @@ def train_sft(
         trust_remote_code=False,
     )
     samples = load_tokenized_samples(
-        config.dataset_root / "train.jsonl",
+        dataset_split_path(config.dataset_root, "train"),
         tokenizer,
         max_length=config.max_length,
     )
-    device = resolve_device(config.device)
-    dtype = torch.bfloat16 if device == "mps" else torch.float32
+    _require_unchanged_sources(
+        "训练数据集",
+        _dataset_source_files(config.dataset_root),
+        dataset_files,
+        dataset_snapshot,
+    )
     _require_unchanged_model_sources(
         config.base_model,
         base_model_files,
@@ -514,7 +945,35 @@ def train_sft(
         base_model_snapshot,
     )
     base_model.config.use_cache = False
-    if config.init_adapter is None:
+    resume_state = None
+    if exact_resume:
+        from peft import PeftModel
+
+        checkpoint_state_path = checkpoint_path / "training_state.pt"
+        if not checkpoint_state_path.is_file():
+            raise SftTrainingError(f"精确续训状态不存在: {checkpoint_state_path}")
+        checkpoint_files = {
+            **adapter_source_files(checkpoint_path),
+            "training_state.pt": checkpoint_state_path,
+        }
+        checkpoint_snapshot = snapshot_files(checkpoint_files)
+        model = PeftModel.from_pretrained(
+            base_model,
+            str(checkpoint_path),
+            is_trainable=True,
+            autocast_adapter_dtype=True,
+        )
+        resume_state = load_training_checkpoint(checkpoint_path, device=device)
+        _require_unchanged_sources(
+            "精确续训 checkpoint",
+            {
+                **adapter_source_files(checkpoint_path),
+                "training_state.pt": checkpoint_path / "training_state.pt",
+            },
+            checkpoint_files,
+            checkpoint_snapshot,
+        )
+    elif config.init_adapter is None:
         model = attach_lora(
             base_model,
             rank=config.lora_rank,
@@ -528,12 +987,21 @@ def train_sft(
             base_model,
             str(config.init_adapter),
             is_trainable=True,
+            autocast_adapter_dtype=True,
+        )
+        _require_unchanged_sources(
+            "父 adapter",
+            adapter_source_files(config.init_adapter),
+            init_adapter_files,
+            init_adapter_snapshot,
         )
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
 
-    run_path.mkdir(parents=True)
-    _write_json(run_path / "config.json", config_as_json(config))
+    if not exact_resume:
+        run_path.mkdir(parents=True)
+        _write_json(run_path / "config.json", config_as_json(config))
+        _write_json(run_path / "provenance.json", provenance)
     result = optimize(
         model,
         samples,
@@ -547,11 +1015,13 @@ def train_sft(
         warmup_steps=config.warmup_steps,
         logits_chunk_size=config.logits_chunk_size,
         checkpoint_steps=config.checkpoint_steps,
-        checkpoint=lambda _step: save_last_checkpoint(
+        checkpoint=lambda state: save_last_checkpoint(
             model,
-            run_path / "checkpoint-last",
+            checkpoint_path,
+            state.to_payload(),
         ),
         max_steps=max_steps,
+        resume_from=resume_state,
     )
     manifest = {
         "run_name": run_name,
@@ -561,9 +1031,14 @@ def train_sft(
             str(config.init_adapter) if config.init_adapter is not None else None
         ),
         "approximate_resume": config.init_adapter is not None,
+        "exact_resume": exact_resume,
+        "resumed_from_step": (
+            resume_state.optimizer_steps if resume_state is not None else None
+        ),
         "dataset": str(config.dataset_root),
         "dataset_files": dataset_manifest["files"],
         "dataset_manifest_sha256": dataset_manifest_sha256,
+        "init_adapter_sha256": provenance["init_adapter_sha256"],
         "init_adapter_manifest_sha256": _optional_sha256(
             config.init_adapter / "train_manifest.json"
             if config.init_adapter is not None
@@ -571,6 +1046,8 @@ def train_sft(
         ),
         "adapter": str(adapter_path),
         "device": device,
+        "base_model_dtype": execution_runtime["base_model_dtype"],
+        "adapter_dtype": execution_runtime["adapter_dtype"],
         "samples": len(samples),
         "samples_seen": result.samples_seen,
         "optimizer_steps": result.optimizer_steps,
@@ -595,6 +1072,126 @@ def train_sft(
     return manifest
 
 
+def _validate_run_name(run_name: str) -> None:
+    """要求训练目录名以本地日期开头并只含安全字符。
+
+    Args:
+        run_name (str): 同时用于 run 和 adapter 的目录名。
+
+    Raises:
+        SftTrainingError: 名称不是 ``YYYYMMDD-说明`` 形式。
+
+    Returns:
+        None: 名称可安全使用时返回。
+    """
+    if not re.fullmatch(r"\d{8}-[A-Za-z0-9][A-Za-z0-9._-]*", run_name):
+        raise SftTrainingError(f"无效训练名称，必须使用 YYYYMMDD-说明: {run_name}")
+
+
+@contextmanager
+def _exclusive_run_lock(runs_root: Path, run_name: str) -> Iterator[None]:
+    """在整个训练和发布期间持有同名运行的非阻塞排他锁。
+
+    Args:
+        runs_root (Path): SFT 运行记录根目录。
+        run_name (str): 需要防止并发写入的运行名称。
+
+    Raises:
+        SftTrainingError: 同名训练已由另一入口持锁。
+        OSError: 锁文件无法创建或操作。
+
+    Yields:
+        None: 调用方持锁执行训练，退出上下文时自动释放。
+    """
+    import fcntl
+
+    root = Path(runs_root)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / f".{run_name}.lock"
+    stream = lock_path.open("a+", encoding="utf-8")
+    locked = False
+    try:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError as exc:
+            raise SftTrainingError(f"同名训练正在运行: {run_name}") from exc
+        yield
+    finally:
+        try:
+            if locked:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
+
+
+def _dataset_source_files(root: Path) -> dict[str, Path]:
+    """列出训练实际读取且由 manifest 约束的数据集文件。
+
+    Args:
+        root (Path): SFT 数据集根目录。
+
+    Returns:
+        dict[str, Path]: manifest 和三个固定分卷路径。
+    """
+    root = Path(root)
+    return {
+        "manifest.json": root / "manifest.json",
+        "train.jsonl": dataset_split_path(root, "train"),
+        "validation/dev.jsonl": dataset_split_path(root, "dev"),
+        "eval/test.jsonl": dataset_split_path(root, "test"),
+    }
+
+
+def _validate_execution_runtime(
+    expected: object,
+    actual: Mapping[str, str],
+) -> None:
+    """要求精确续训使用相同的已解析设备和浮点精度。
+
+    Args:
+        expected (object): 原运行 provenance 中保存的运行时字段。
+        actual (Mapping[str, str]): 当前机器解析出的设备和 dtype。
+
+    Raises:
+        SftTrainingError: 原字段缺失，或设备、精度发生变化。
+
+    Returns:
+        None: 两个运行时完全相同时返回。
+    """
+    if not isinstance(expected, Mapping) or dict(expected) != dict(actual):
+        raise SftTrainingError(
+            f"精确续训设备或精度已变化: saved={expected}, current={dict(actual)}"
+        )
+
+
+def _require_unchanged_sources(
+    label: str,
+    current_files: Mapping[str, Path],
+    expected_files: Mapping[str, Path],
+    expected_snapshot: Mapping[str, tuple[int, int, int, int, int]],
+) -> None:
+    """确认取摘要、加载前后的来源文件集合与字节身份不变。
+
+    Args:
+        label (str): 错误消息中的来源名称。
+        current_files (Mapping[str, Path]): 当前重新枚举的来源文件。
+        expected_files (Mapping[str, Path]): 取摘要时的来源文件。
+        expected_snapshot (Mapping[str, tuple[int, int, int, int, int]]): 初始状态。
+
+    Raises:
+        SftTrainingError: 文件集合或任一文件状态发生变化。
+
+    Returns:
+        None: 来源保持不变时返回。
+    """
+    if dict(current_files) != dict(expected_files) or not sources_unchanged(
+        expected_files,
+        expected_snapshot,
+    ):
+        raise SftTrainingError(f"{label}发生变化，已拒绝使用过时指纹")
+
+
 def _require_unchanged_model_sources(
     root: Path,
     expected_files: Mapping[str, Path],
@@ -613,12 +1210,12 @@ def _require_unchanged_model_sources(
     Returns:
         None: 基座来源保持不变时返回。
     """
-    current_files = model_source_files(root)
-    if current_files != dict(expected_files) or not sources_unchanged(
+    _require_unchanged_sources(
+        "训练基座",
+        model_source_files(root),
         expected_files,
         expected_snapshot,
-    ):
-        raise SftTrainingError("训练基座发生变化，已拒绝使用过时指纹")
+    )
 
 
 def _decoder_and_head(model: Any) -> tuple[Any | None, Any | None]:
@@ -724,6 +1321,56 @@ def _write_json(path: Path, value: object) -> None:
         json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """在同目录写完临时文件后原子替换文本。
+
+    Args:
+        path (Path): 最终文本路径。
+        content (str): 完整 UTF-8 内容。
+
+    Raises:
+        OSError: 临时文件无法写入或替换。
+
+    Returns:
+        None: 最终路径已完整替换时返回。
+    """
+    path = Path(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}-",
+        dir=path.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """读取顶层必须为对象的 UTF-8 JSON 文件。
+
+    Args:
+        path (Path): 配置或训练血缘文件。
+
+    Raises:
+        SftTrainingError: JSON 无效或顶层不是对象。
+        OSError: 文件无法读取。
+
+    Returns:
+        dict[str, Any]: 解码后的普通字典。
+    """
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SftTrainingError(f"无效训练 JSON: {path}") from exc
+    if not isinstance(value, Mapping):
+        raise SftTrainingError(f"训练 JSON 顶层不是对象: {path}")
+    return dict(value)
 
 
 def _sha256(path: Path) -> str:

@@ -1,4 +1,4 @@
-"""从固定版本 canonical Markdown 生成多问法知识和人工审计报告。"""
+"""从固定版本规范事实 Markdown 生成多问法知识和人工审计报告。"""
 
 import json
 import re
@@ -11,6 +11,7 @@ from .markdown import KnowledgeEntry, parse_knowledge_entry
 from .pipeline import KnowledgeBuildResult
 
 _FIXED_VERSION = FIXED_GAME_VERSION
+_REQUIRED_MAP_IDS = ("OVERGROWTH", "UNDERDOCKS", "HIVE", "GLORY")
 _BAD_TEXT = re.compile(r"\{[^{}]+\}|\bTODO\b|res://", re.IGNORECASE)
 _INCOMPLETE_MARKERS = (
     "缺少已解析",
@@ -83,10 +84,10 @@ def generate_question_variants(
     """把固定版本单实体知识展开成可重建的多问法 JSONL。
 
     该函数只消费 ``mod_export/v0.107.1``，不会读取 ``web_wiki``，也不会
-    构建 train/dev/test 分卷。
+    构建训练、验证或测试分卷。
 
     Args:
-        snapshot_root (Path): 固定版本 canonical Markdown 根目录。
+        snapshot_root (Path): 固定版本规范事实 Markdown 根目录。
         output_root (Path): 按类别和实体写入 JSONL 的目标目录。
 
     Raises:
@@ -100,6 +101,7 @@ def generate_question_variants(
     if snapshot_root.name != _FIXED_VERSION:
         raise ValueError(f"多问法生成只接受固定版本 {_FIXED_VERSION}")
     output_root = Path(output_root)
+    _validate_map_catalog(snapshot_root)
     categories: dict[str, int] = {}
     expected: dict[str, set[str]] = {}
     seen_prompts: dict[str, str] = {}
@@ -111,8 +113,9 @@ def generate_question_variants(
         if category_dir.name == "raw":
             continue
         category = category_dir.name
-        expected[category] = set()
-        sample_count = 0
+        output_category = "encounters" if category == "acts" else category
+        expected.setdefault(category, set())
+        expected.setdefault(output_category, set())
         entries = [
             parse_knowledge_entry(path.read_text(encoding="utf-8"))
             for path in sorted(category_dir.glob("*.md"))
@@ -141,6 +144,9 @@ def generate_question_variants(
             if not rows:
                 skipped.append(f"{category}:{entry.object_id}:no_verified_facts")
                 continue
+            if output_category != category:
+                for row in rows:
+                    row["category"] = output_category
             for row in rows:
                 prompt = str(row["prompt"])
                 completion = str(row["completion"])
@@ -148,16 +154,14 @@ def generate_question_variants(
                 if previous is not None and previous != completion:
                     raise ValueError(f"相同问题存在不同答案: {prompt}")
                 seen_prompts[prompt] = completion
-            target = output_root / category / f"{entry.object_id}.jsonl"
+            target = output_root / output_category / f"{entry.object_id}.jsonl"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
                 "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
                 encoding="utf-8",
             )
-            expected[category].add(target.name)
-            sample_count += len(rows)
-        if sample_count:
-            categories[category] = sample_count
+            expected[output_category].add(target.name)
+            categories[output_category] = categories.get(output_category, 0) + len(rows)
 
     _remove_stale_generated(output_root, expected)
     entry_count = sum(categories.values())
@@ -174,6 +178,48 @@ def generate_question_variants(
         encoding="utf-8",
     )
     return KnowledgeBuildResult(output_root, entry_count, categories)
+
+
+def _validate_map_catalog(snapshot_root: Path) -> None:
+    """在写产物前验证四张地图及四类怪池完整存在。
+
+    生产生成器必须始终看到固定版本完整地图目录，防止局部输入在 stale 清理时
+    删除旧的有效地图文件。
+
+    Args:
+        snapshot_root (Path): 固定版本规范事实 Markdown 根目录。
+
+    Raises:
+        ValueError: 地图 ID、来源、怪池或生成问法数量不符合固定契约。
+
+    Returns:
+        None: 四张地图及其怪池均完整时返回。
+    """
+    acts_root = Path(snapshot_root) / "acts"
+    if not acts_root.is_dir():
+        raise ValueError(
+            f"地图知识必须且只能包含固定四张地图: {list(_REQUIRED_MAP_IDS)}"
+        )
+    entries = [
+        parse_knowledge_entry(path.read_text(encoding="utf-8"))
+        for path in sorted(acts_root.glob("*.md"))
+    ]
+    ids = [entry.object_id for entry in entries]
+    if len(entries) != len(_REQUIRED_MAP_IDS) or set(ids) != set(_REQUIRED_MAP_IDS):
+        raise ValueError(
+            f"地图知识必须且只能包含固定四张地图: {list(_REQUIRED_MAP_IDS)}"
+        )
+    headings = ("弱遭遇池", "常规遭遇池", "精英遭遇池", "Boss 遭遇池")
+    for entry in entries:
+        if entry.source != "mod_export":
+            raise ValueError(f"地图知识只能来自 mod_export: {entry.object_id}")
+        missing = [
+            heading for heading in headings if not _section_items(entry.body, heading)
+        ]
+        if missing:
+            raise ValueError(f"地图 {entry.object_id} 缺少怪池: {missing}")
+        if len(_map_encounter_questions(entry)) != 8:
+            raise ValueError(f"地图 {entry.object_id} 必须生成 8 条怪池问答")
 
 
 def generate_review_report(snapshot_root: Path, output_path: Path) -> Path:
@@ -328,7 +374,7 @@ def _disambiguate_entry(category: str, entry: KnowledgeEntry) -> KnowledgeEntry:
 
     Args:
         category (str): 实体类别。
-        entry (KnowledgeEntry): 名称发生冲突的 canonical 条目。
+        entry (KnowledgeEntry): 名称发生冲突的规范事实条目。
 
     Returns:
         KnowledgeEntry: 名称附带角色或稳定 ID、正文保持不变的新条目。
@@ -348,7 +394,7 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
 
     Args:
         category (str): 实体类别。
-        entry (KnowledgeEntry): 已修正并消歧的 canonical 条目。
+        entry (KnowledgeEntry): 已修正并消歧的规范事实条目。
 
     Returns:
         list[dict[str, str]]: 去重且不含空问答的训练候选行。
@@ -356,6 +402,7 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
     if _BAD_TEXT.search(entry.body):
         return []
     builders = {
+        "acts": _map_encounter_questions,
         "cards": _card_questions,
         "relics": _relic_questions,
         "potions": _potion_questions,
@@ -363,7 +410,6 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
         "powers": _power_questions,
         "characters": _character_questions,
         "monsters": _monster_questions,
-        "encounters": _encounter_questions,
         "events": _event_questions,
         "keywords": _keyword_questions,
     }
@@ -403,7 +449,7 @@ def _normalize_generated_answer(value: str) -> str:
     """移除只对 Markdown 浏览有意义的链接路径，保留可读标签。
 
     Args:
-        value (str): 由 canonical Markdown 提取的候选答案。
+        value (str): 由规范事实 Markdown 提取的候选答案。
 
     Returns:
         str: 删除链接目标并压缩空白后的单行答案。
@@ -421,13 +467,15 @@ def _question_supplement_source(
 
     Args:
         category (str): 当前问答的实体类别。
-        entry (KnowledgeEntry): 带补充来源元数据的 canonical 条目。
+        entry (KnowledgeEntry): 带补充来源元数据的规范事实条目。
         question (str): 已生成的问题文本。
 
     Returns:
         str: 当前问题实际使用的补充来源；未使用时返回空串。
     """
     raw = entry.metadata.get("supplement_source", "").strip()
+    if category == "characters":
+        return raw if "充能球" in question else ""
     if category != "monsters":
         return raw
     if "有哪些招式" not in question and "行动循环" not in question:
@@ -561,7 +609,7 @@ def _potion_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
         entry.metadata.get("target", ""), entry.metadata.get("target", "")
     )
     return [
-        (f"药水'{entry.name}'的效果是什么？", f"{rarity}药水。{effect}"),
+        (f"药水'{entry.name}'的效果是什么？", effect),
         (f"使用'{entry.name}'会发生什么？", effect),
         (f"药水'{entry.name}'是什么稀有度？", f"{rarity}。"),
         (f"'{entry.name}'什么时候可以使用？", f"使用方式:{usage}。目标:{target}。"),
@@ -628,27 +676,108 @@ def _enchantment_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
 
 
 def _character_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
-    """生成角色初始属性、牌组和遗物问法。
+    """生成角色初始配置、简介和故障机器人充能球问法。
 
     Args:
-        entry (KnowledgeEntry): 角色 canonical 知识条目。
+        entry (KnowledgeEntry): 角色规范事实知识条目。
 
     Returns:
         list[tuple[str, str]]: 角色知识问答对。
     """
-    deck = _section(entry.body, "起始牌组")
-    relics = _section(entry.body, "起始遗物")
+    deck = _compact_reference_counts(_section_items(entry.body, "起始牌组"))
+    relics = _compact_reference_counts(_section_items(entry.body, "起始遗物"))
     metadata = entry.metadata
+    orb_slots = metadata.get("orb_slots", "0")
     base = (
-        f"初始生命:{metadata.get('hp', '?')}。初始金币:{metadata.get('gold', '?')}。"
-        f"每回合能量:{metadata.get('energy', '?')}。"
+        f"初始HP{metadata.get('hp', '?')}，金币{metadata.get('gold', '?')}，"
+        f"每回合能量{metadata.get('energy', '?')}，充能球槽{orb_slots}。"
+        f"初始遗物：{'、'.join(relics)}。"
+        f"初始牌组（{sum(_reference_count(item) for item in deck)}张）："
+        f"{'、'.join(deck)}。"
     )
-    return [
-        (f"'{entry.name}'是什么角色？", base),
-        (f"'{entry.name}'的初始属性是什么？", base),
-        (f"'{entry.name}'的起始牌组是什么？", deck),
-        (f"'{entry.name}'的起始遗物是什么？", relics),
-    ]
+    rows = [(f"'{entry.name}'的初始配置是什么？", base)]
+    description = _section(entry.body, "简介")
+    if description:
+        rows.append((f"'{entry.name}'是什么角色？", description))
+    orbs = _section_items(entry.body, "充能球")
+    if orbs:
+        names = [_reference_name(orb) for orb in orbs]
+        rows.append((f"'{entry.name}'的充能球有哪几种？", "、".join(names) + "。"))
+        rows.extend(_character_orb_questions(entry.body))
+    return rows
+
+
+def _compact_reference_counts(items: Sequence[str]) -> list[str]:
+    """按首次出现顺序合并角色初始物品中的重复名称。
+
+    Args:
+        items (Sequence[str]): Markdown 列表中的名称与可选 ID。
+
+    Returns:
+        list[str]: 名称保留首次顺序，重复项写成 ``名称×数量``。
+    """
+    ordered: list[str] = []
+    counts: dict[str, int] = {}
+    for item in items:
+        name = _reference_name(item)
+        if name not in counts:
+            ordered.append(name)
+            counts[name] = 0
+        counts[name] += 1
+    return [f"{name}×{counts[name]}" if counts[name] > 1 else name for name in ordered]
+
+
+def _reference_name(value: str) -> str:
+    """从 ``显示名（稳定 ID）`` 中提取供回答使用的显示名。
+
+    Args:
+        value (str): 规范事实中的引用文本。
+
+    Returns:
+        str: 去掉稳定 ID 后的显示名称。
+    """
+    matched = re.fullmatch(r"(.+?)（[^（）]+）", value.strip())
+    return matched.group(1) if matched is not None else value.strip()
+
+
+def _reference_count(value: str) -> int:
+    """读取合并后引用末尾的数量，单项按一张计算。
+
+    Args:
+        value (str): ``名称`` 或 ``名称×数量``。
+
+    Returns:
+        int: 当前合并项代表的原始条目数。
+    """
+    matched = re.search(r"×(\d+)$", value)
+    return int(matched.group(1)) if matched is not None else 1
+
+
+def _character_orb_questions(body: str) -> list[tuple[str, str]]:
+    """从故障机器人充能球章节生成描述与机制问答。
+
+    Args:
+        body (str): 角色规范事实 Markdown 正文。
+
+    Returns:
+        list[tuple[str, str]]: 每种充能球各一条游戏描述和一条数值问答。
+    """
+    rows: list[tuple[str, str]] = []
+    for matched in re.finditer(r"(?ms)^## 充能球：([^\n]+)\s*\n(.*?)(?=^## |\Z)", body):
+        name = matched.group(1).strip()
+        section = matched.group(2)
+        description = re.search(r"(?m)^- 游戏描述：(.+)$", section)
+        mechanics = re.search(r"(?m)^- 基础数值与集中：(.+)$", section)
+        if description is not None:
+            rows.append((f"游戏如何描述'{name}'充能球？", description.group(1)))
+        if mechanics is not None:
+            rows.append(
+                (
+                    f"实机测得'{name}'充能球的基础数值和集中关系是什么？",
+                    mechanics.group(1),
+                )
+            )
+    return rows
 
 
 def _monster_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
@@ -667,15 +796,17 @@ def _monster_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     room = _ROOM_NAMES.get(room_raw, room_raw)
     moves = _section(entry.body, "招式")
     cycle = _section(entry.body, "循环")
+    hp = _hp_range(minimum, maximum)
     rows = [
         (
             f"怪物'{entry.name}'在A0下的初始生命值范围是什么？",
-            _hp_range(minimum, maximum),
+            hp,
         ),
+        (f"'{entry.name}'在0进阶时开场可能有多少生命？", hp),
         (f"'{entry.name}'属于普通、精英还是Boss？", f"{room}。"),
         (
             f"不考虑进阶难度，'{entry.name}'的基础信息是什么？",
-            f"怪物类型:{room}。基础HP:{_hp_range(minimum, maximum)}",
+            f"怪物类型:{room}。基础HP:{hp}",
         ),
     ]
     if moves:
@@ -685,28 +816,75 @@ def _monster_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     return rows
 
 
-def _encounter_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
-    """生成不虚构编队和数量的遭遇候选类型问法。
+def _map_encounter_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+    """生成地图级全部、普通、精英和 Boss 怪池问法。
+
+    普通房间会先从弱遭遇池取若干场，再使用常规遭遇池，因此普通怪池答案
+    保留两个子池，避免把早期弱池错误描述为全幕常规池。
 
     Args:
-        entry (KnowledgeEntry): 遭遇 canonical 知识条目。
+        entry (KnowledgeEntry): 地图规范事实知识条目。
 
     Returns:
-        list[tuple[str, str]]: 遭遇知识问答对。
+        list[tuple[str, str]]: 四类地图怪池各两种等价问法。
     """
-    possible = _section(entry.body, "可能出现的敌人类型")
-    if not possible:
-        return []
-    answer = (
-        possible
-        if "不表示同时出现或数量" in possible
-        else f"{possible}；这是去重后的可能类型，不表示同时出现或数量。"
-    )
-    return [
-        (f"遭遇'{entry.name}'可能出现哪些敌人类型？", answer),
-        (f"进入'{entry.name}'时，候选敌人类型有哪些？", answer),
-        (f"请列出'{entry.name}'可能生成的敌人类型，不推断具体编队和数量。", answer),
-    ]
+    weak = _reference_section_answer(entry.body, "弱遭遇池")
+    regular = _reference_section_answer(entry.body, "常规遭遇池")
+    elite = _reference_section_answer(entry.body, "精英遭遇池")
+    boss = _reference_section_answer(entry.body, "Boss 遭遇池")
+    rows: list[tuple[str, str]] = []
+    ordinary = f"前期弱遭遇池：{weak or '空'}；常规遭遇池：{regular or '空'}。"
+    if weak or regular or elite or boss:
+        complete = (
+            f"普通怪池：{ordinary}精英怪池：{elite or '空'}。Boss池：{boss or '空'}。"
+        )
+        rows.extend(
+            (
+                (f"请汇总地图'{entry.name}'的全部怪池。", complete),
+                (
+                    f"地图'{entry.name}'的普通、精英和Boss怪池分别有哪些遭遇？",
+                    complete,
+                ),
+            )
+        )
+    if weak or regular:
+        rows.extend(
+            (
+                (f"地图'{entry.name}'的普通怪池有哪些遭遇？", ordinary),
+                (
+                    f"地图'{entry.name}'普通战斗的前期弱池和常规池分别是什么？",
+                    ordinary,
+                ),
+            )
+        )
+    if elite:
+        rows.extend(
+            (
+                (f"地图'{entry.name}'的精英怪池有哪些遭遇？", elite),
+                (f"在地图'{entry.name}'进入精英房可能遇到哪些遭遇？", elite),
+            )
+        )
+    if boss:
+        rows.extend(
+            (
+                (f"地图'{entry.name}'的Boss池有哪些遭遇？", boss),
+                (f"地图'{entry.name}'末尾可能是哪几场Boss战？", boss),
+            )
+        )
+    return rows
+
+
+def _reference_section_answer(body: str, heading: str) -> str:
+    """把引用列表章节转换为不含内部 ID 的中文顿号列表。
+
+    Args:
+        body (str): 规范事实 Markdown 正文。
+        heading (str): 引用列表所属的二级标题。
+
+    Returns:
+        str: 只保留显示名称的单行答案；无列表项时返回空串。
+    """
+    return "、".join(_reference_name(item) for item in _section_items(body, heading))
 
 
 def _event_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
@@ -736,7 +914,7 @@ def _keyword_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     """生成游戏关键词释义问法。
 
     Args:
-        entry (KnowledgeEntry): 关键词 canonical 知识条目。
+        entry (KnowledgeEntry): 关键词规范事实知识条目。
 
     Returns:
         list[tuple[str, str]]: 关键词知识问答对。
@@ -754,7 +932,7 @@ def _section(body: str, heading: str) -> str:
     """提取二级 Markdown 标题下的正文并压成单行。
 
     Args:
-        body (str): canonical Markdown 正文。
+        body (str): 规范事实 Markdown 正文。
         heading (str): 不含 ``##`` 前缀的二级标题。
 
     Returns:
@@ -768,6 +946,26 @@ def _section(body: str, heading: str) -> str:
         return ""
     value = re.sub(r"^[-*]\s*", "", match.group(1).strip(), flags=re.MULTILINE)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _section_items(body: str, heading: str) -> list[str]:
+    """读取二级 Markdown 章节中的项目列表并保留顺序。
+
+    Args:
+        body (str): 规范事实 Markdown 正文。
+        heading (str): 不含 ``##`` 前缀的二级标题。
+
+    Returns:
+        list[str]: 去掉项目符号的非空列表项。
+    """
+    matched = re.search(rf"(?ms)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)", body)
+    if matched is None:
+        return []
+    return [
+        item.group(1).strip()
+        for line in matched.group(1).splitlines()
+        if (item := re.match(r"^[-*]\s+(.+)$", line.strip())) is not None
+    ]
 
 
 def _compact_upgrade(value: str) -> str:
@@ -806,7 +1004,7 @@ def _is_negative_number(value: str) -> bool:
     """识别游戏用负费用表达的不可打出哨兵。
 
     Args:
-        value (str): canonical 卡牌费用文本。
+        value (str): 规范事实卡牌费用文本。
 
     Returns:
         bool: 文本可解析为负数时为真。
@@ -894,7 +1092,7 @@ def _special_object_decision(category: str, row: Mapping[str, Any]) -> str:
     if object_id == "FAKE_MERCHANT_MONSTER":
         return "由 FAKE_MERCHANT_EVENT_ENCOUNTER 实际生成，保留"
     if (category, object_id) == ("encounters", "TEST_SUBJECT_BOSS"):
-        return "当前版本非调试、可奖励 Boss 遭遇；保留并进入监督问法"
+        return "当前版本非调试、可奖励 Boss 遭遇；raw 保留，不生成现场可见的组合题"
     if (category, object_id) == ("monsters", "TEST_SUBJECT"):
         return "当前版本图鉴可见 Boss 且招式完整；保留并进入监督问法"
     if (category, object_id) == ("events", "FAKE_MERCHANT"):

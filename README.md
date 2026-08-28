@@ -94,9 +94,9 @@ Markdown：
 uv run play-sts2-knowledge export
 ```
 
-随后离线应用版本化 curated 修正、怪物补充和已经真正进入事件页后的 UI
-快照，再生成按实体保存的多问法候选与人工审计报告。curated 在 `rebuild`
-阶段生效，不是 `generated` 之后的独立数据目录：
+随后离线应用版本化人工修正、怪物补充、故障机器人充能球实测和已经真正进入
+事件页后的界面快照，再生成按实体保存的多问法候选与人工审计报告。人工修正在
+`rebuild` 阶段生效，不是多问法生成后的独立数据目录：
 
 ```bash
 uv run play-sts2-knowledge rebuild \
@@ -106,19 +106,35 @@ uv run play-sts2-knowledge rebuild \
   --event-entries-root data/game_knowledge/event_entries/v0.107.1/events
 uv run play-sts2-knowledge generate-questions \
   data/game_knowledge/mod_export/v0.107.1
+uv run play-sts2-knowledge generate-arithmetic
 uv run play-sts2-knowledge review \
   data/game_knowledge/mod_export/v0.107.1
 ```
 
 多问法产物位于 `data/game_knowledge/generated-v0.107.1/`，仍是知识候选，不会
-自动构建或覆盖 E3 的 train/dev/test；E3 分卷与混合策略另行确定。Wiki 只作为
-怪物招式/循环的明确补充来源，事件变量优先使用同版本实机 UI 快照。
+自动改写正式 SFT 分卷。算术命令只从人类整局训练名册中通过 raw 审计的战斗帧
+读取真实攻击意图，确定性生成训练候选和独立验证候选；验证、测试、不合格和
+未分配局不会影响算术输入，
+并在生成时排除 `data/datasets/sft/eval/knowledge` 的最终算术考试题。Wiki 只作为
+怪物招式和循环的明确补充来源，事件变量优先使用同版本实机界面快照。
+
+`mod_export` 是“规范事实层”：同一张卡牌、怪物或地图只保留一份确定身份和字段
+的事实。它不是模板。Markdown 的标题和列表外形由渲染模板统一生成，但模板只是
+排版规则，真正作为后续问答依据的是其中的规范事实。地图事实还保存密林、暗港、
+巢穴和荣耀各自的前期弱遭遇池、常规遭遇池、精英池与 Boss 池。逐个遭遇的
+“进场后有哪几名敌人”属于现场已知信息，不生成训练题；四张地图的怪池候选统一
+写入 `generated-v0.107.1/encounters/`。故障机器人的初始配置和五种充能球机制
+则由固定版本 Mod 原始数据与受控实测快照合并后生成。
 
 完整链路是：
 
 ```text
-Mod raw + 受控补充 → rebuild + curated → canonical mod_export
-→ generated 多问法候选 → E3 混合与分卷 → datasets/sft
+固定版本 Mod 原始导出与受控补充
+→ 离线重建并应用版本化人工修正
+→ 固定版本规范事实层（mod_export）
+→ 多问法知识候选（generated-v0.107.1）与实战算术候选
+→ 人工确定知识、算术和行为的配比与分卷
+→ 可训练数据（data/datasets/sft）
 ```
 
 历史目录
@@ -126,26 +142,58 @@ Mod raw + 受控补充 → rebuild + curated → canonical mod_export
 
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 
+> 当前 `data/datasets/sft/` 仍是 E2 基线，旧训练集和旧知识考试卷还含已废弃的
+> 实机敌人组合题。必须先确定 E3 配比、重新生成知识考试卷并成功执行
+> `play-sts2-train build-sft`，才能运行下面的 E3 正式训练命令。
+
 ```bash
 uv sync --group training
 uv run --group training play-sts2-train sft \
   --config configs/sft.toml \
-  --name sft-clean-20260827-native-r16-e3
+  --name 20260828-sft-clean-native-r16-e3
 ```
 
 训练过程写入 `runs/sft/<name>/`，最终 adapter 写入
-`models/adapters/<name>/`。当前配置从 e2 adapter 近似续训；Qwen3.5-4B 的 32 层
+`models/adapters/<name>/`。名称必须以 `YYYYMMDD-` 开头，目录按名称排序就是时间
+顺序。Qwen3.5-4B 的 32 层
 都会按层类型覆盖对应的线性注意力或全注意力投影。训练器用模型原生 chat
 template 的 assistant mask 监督每个动作，并用 2,048-token 分块交叉熵控制
 logits 峰值。checkpoint 每 2,000 个优化
-步覆盖同一个 `checkpoint-last`，不会沿用旧实现的 15 步频率。用
-`--max-steps 1` 可以执行一次真实模型冒烟。
+步覆盖同一个 `checkpoint-last`，同时保存 LoRA、AdamW、数据游标、洗牌状态和
+PyTorch 随机状态，约占 180～200 MB。基座在 MPS 上使用 BF16，所有 LoRA
+可训练参数由训练器强制保持 FP32；任一可训练参数不是 FP32 都会在创建优化器前
+失败。中断后使用同一名称并增加 `--resume` 可
+精确续训；当前 r16 实测净文件约 165 MB，180～200 MB 是预留文件系统余量后的
+预算。中断若发生在两个 checkpoint 之间，恢复会先原子回滚没有对应权重的末尾
+指标，再从 checkpoint 的下一步重算并继续追加。父 adapter 只锁定实际加载的 LoRA 权重与 PEFT 配置
+哈希，不把可独立调整的聊天模板作为硬锁。数据分卷与父 adapter 在加载前后都会
+复核文件身份；精确恢复还分别锁定解析后的设备、基座精度和 adapter 精度。同名训练从加载到发布全程
+持有排他锁，不能并发写坏指标或 checkpoint。用 `--max-steps 1` 可以执行一次
+真实模型冒烟。
+
+```bash
+uv run --group training play-sts2-train sft \
+  --config configs/sft.toml \
+  --name 20260828-sft-clean-native-r16-e3 \
+  --resume
+```
+
+数据目录固定为 `train.jsonl`、`validation/dev.jsonl` 和 `eval/test.jsonl`。
+同一知识事实有多种问法时，一种未见问法进入验证集，其余进入训练集，用于选择
+学习率等训练参数；只有一种问法的事实不会被全部拿走。算术验证题使用独立随机
+种子生成，考查同类规则在新数字上的迁移。整局人类游戏必须先在
+`data/raw/human/splits.json` 明确归属，否则构建失败。训练/验证问题与
+`eval/knowledge` 考试卷完全重合时也会在写文件前失败。
+
+当前磁盘上的 `validation/dev.jsonl` 仍是 E2 行为基线：373 行全部来自
+`human_play`，没有算术题或知识题。上面的知识与算术验证规则描述的是下一次
+确定 E3 配比并执行 `build-sft` 后的目标分卷，不是对当前旧文件的描述。
 
 为完整人类局分配 dev/test 后，可以独立加载 adapter 做确定性生成验证：
 
 ```bash
 uv run --group training play-sts2-train eval-sft \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
   --split dev
 ```
 
@@ -156,11 +204,11 @@ uv run --group training play-sts2-train eval-sft \
 
 ```bash
 uv run --group training play-sts2-train merge-sft \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3
 ```
 
 基座模型从 `configs/sft.toml` 读取，默认输出为
-`models/merged/sft-clean-20260827-native-r16-e3-merged/`。命令拒绝覆盖已有目录，
+`models/merged/20260828-sft-clean-native-r16-e3-merged/`。命令拒绝覆盖已有目录，
 通过同盘暂存目录排他原子发布；发布前会核对 adapter 的基座血缘并确认输入没有
 变化。`merge_manifest.json` 记录全部基座权重、adapter 与实际 tokenizer 来源的
 SHA-256。需要非默认位置时增加 `--output <目录>`。
@@ -169,10 +217,10 @@ SHA-256。需要非默认位置时增加 `--output <目录>`。
 
 ```bash
 uv run --group training play-sts2-train eval-sft-loss \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
   --split test
 uv run --group training play-sts2-train eval-sft-knowledge \
-  --model models/merged/sft-clean-20260827-native-r16-e3-merged
+  --model models/merged/20260828-sft-clean-native-r16-e3-merged
 ```
 
 ## Harness 契约

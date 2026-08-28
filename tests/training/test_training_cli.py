@@ -70,13 +70,14 @@ def test_train_sft_command_passes_config_name_and_step_limit(
         None: 此测试不加载真实模型。
     """
     config = object()
-    calls: list[tuple[object, str, int | None]] = []
+    calls: list[tuple[object, str, int | None, bool]] = []
     monkeypatch.setattr(cli, "load_sft_config", lambda path: config)
     monkeypatch.setattr(
         cli,
         "train_sft",
-        lambda value, name, max_steps=None: (
-            calls.append((value, name, max_steps)) or {"optimizer_steps": 1}
+        lambda value, name, max_steps=None, exact_resume=False: (
+            calls.append((value, name, max_steps, exact_resume))
+            or {"optimizer_steps": 1}
         ),
     )
 
@@ -86,14 +87,15 @@ def test_train_sft_command_passes_config_name_and_step_limit(
             "--config",
             "configs/sft.toml",
             "--name",
-            "smoke",
+            "20260828-smoke",
             "--max-steps",
             "1",
+            "--resume",
         ]
     )
 
     assert result == 0
-    assert calls == [(config, "smoke", 1)]
+    assert calls == [(config, "20260828-smoke", 1, True)]
     assert '"optimizer_steps": 1' in capsys.readouterr().out
 
 

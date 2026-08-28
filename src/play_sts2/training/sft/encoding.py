@@ -39,7 +39,7 @@ class SftConfig:
 
     Args:
         base_model (Path): 本地 Hugging Face 基座模型目录。
-        dataset_root (Path): 含 ``train/dev/test.jsonl`` 的数据集目录。
+        dataset_root (Path): 含训练、验证和最终测试分卷的数据集目录。
         adapter_root (Path): 最终 LoRA adapter 的父目录。
         runs_root (Path): 训练过程记录的父目录。
         device (str): ``auto``、``mps`` 或 ``cpu``。

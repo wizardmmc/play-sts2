@@ -21,3 +21,16 @@
   混合及 train/dev/test 划分后再写入 `data/datasets/sft/`。
 - 不要直接修补生成的 JSONL 或 SFT 分卷；应修正 Mod 导出、curated 规则、受控
   补录数据或生成代码后重新构建。
+
+## 可用资源
+实验室的5卡A100服务器
+Host server
+  HostName REDACTED
+    User REDACTED
+  Port 22
+注：本质上这是我们的个人兴趣项目，所以最好单卡跑，如果没有别人用，允许多卡跑
+
+## 其他
+不要罗列实际很难遇到的bug
+不要过度工程化和防御性编程，例如滥用版本哈希
+本项目纯粹个人娱乐，不算前沿模型研究，请勿降智

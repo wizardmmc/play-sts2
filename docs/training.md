@@ -5,7 +5,8 @@
 - `data/game_knowledge/`：Web Wiki、Mod 实测导出与已核验问法。
 - `data/raw/human/`：按局、战斗和战略分片的精确人类动作事实。
 - `data/transcripts/`：raw 的可覆盖人类可读投影。
-- `data/datasets/sft/`：`train/dev/test.jsonl`、manifest 与评测集。
+- `data/datasets/sft/`：`train.jsonl`、`validation/dev.jsonl`、
+  `eval/test.jsonl`、manifest 与知识考试卷。
 - `runs/sft/`：配置副本、逐步指标和固定名称的 `checkpoint-last`。
 - `models/base/`、`models/adapters/`、`models/merged/`、`models/serving/`：
   分别保存基座、LoRA、合并 HF 权重和 MLX 服务件。
@@ -24,16 +25,23 @@ SSE 精确人类动作 ─→ combat/strategy ─→ Harness ┘
 uv run play-sts2-train build-sft
 ```
 
-默认输入是 `data/game_knowledge/` 与 `data/raw/human/`。知识包含
-`ancients/arithmetic/catalog/characters/encounters` 等核验资产及其变化问法；
-行为 split 读取 `data/raw/human/splits.json`。审计失败的
+默认知识入口是 `generated-v0.107.1`。地图怪池由固定版本 Mod 的四张地图模型
+导出，并统一写成 `encounters/{地图ID}.jsonl` 候选；进场后已经可见的敌人数和
+敌人组合不生成监督题。算术只从 `data/raw/human/splits.json` 的训练
+名册读取通过 raw 审计的真实攻击意图后确定性生成，不读取验证、测试、不合格或
+未分配局，也不复用归档 JSONL。行为分卷读取同一名册；新增
+可训练局如果没有明确归属，构建会失败。审计失败的
 `A7L5LAXFYJ` 在 raw meta 中标记 `training_eligible=false`，保留追溯但不训练。
 
-当前构建结果为 17,297/373/600 条 train/dev/test。有效人类动作共 4,091 条，
-其中战斗 2,866、战略 1,225。两层行为都使用独立
-`system/user/assistant`，不再把整场战斗拼成增长的多轮样本。
+当前落盘的 `validation/dev.jsonl` 还是 E2 行为基线，共 373 行且来源全部是
+`human_play`；它没有算术或知识类别。知识与算术验证候选只有在确定 E3 混合比例
+并重新执行 `build-sft` 后才会进入新的验证集。
 
-知识探针只报告“未见问法”而不声称“未见实体”：当前训练继承 e2，且真实
+知识验证集按“同一事实留出一种未见问法”构建，可用于学习率和训练轮数选择，
+不声称实体从未出现。算术验证题改用独立随机种子和新数字生成，不从训练题中
+抽取；两者都会主动排除最终算术考试题。独立知识考试卷
+位于 `eval/knowledge`；任何考试问题与训练或验证问题完全相同都会令构建失败。
+当前训练继承 e2，且真实
 战斗、商店和奖励状态本来就会出现实体名称与效果，无法在不删除有价值行为数据
 的前提下证明实体从未进入模型。组合算术仍作为独立、可精确评分的泛化指标。
 
@@ -47,6 +55,7 @@ SFT 实现集中在 `src/play_sts2/training/sft/`：
 - `merge.py`：安全合并 LoRA、记录来源哈希并原子发布 HF 模型。
 - `evaluation.py`：teacher-forced 与生成式行为评测。
 - `knowledge_evaluation.py`：知识召回和组合算术探针。
+- `game_knowledge/arithmetic.py`：从真实攻击意图生成互斥的算术训练/验证候选。
 
 顶层 `play_sts2.training` 只保留稳定公共入口；CLI 直接依赖 SFT 包。
 
@@ -72,27 +81,55 @@ layer，并不是解冻 4B 基座：24 个 linear-attention layer 覆盖
 `in_proj_a/in_proj_b/in_proj_qkv/in_proj_z/out_proj`，8 个 full-attention layer
 覆盖 `q_proj/k_proj/v_proj/o_proj`。
 
-训练使用 MPS bfloat16、梯度检查点、梯度裁剪和非有限梯度检查。词表投影与交叉
-熵按 2,048 token 分块，避免物化 `sequence × 151k vocabulary` 的完整 logits。
+训练基座在 MPS 上使用 BF16，LoRA 可训练参数由 PEFT 自动提升并由训练器硬校验
+为 FP32；不是 FP32 会在创建 AdamW 前立即失败。训练同时使用梯度检查点、梯度
+裁剪和非有限梯度检查。词表投影与交叉熵按 2,048 token 分块，避免物化
+`sequence × 151k vocabulary` 的完整 logits。
 模板通过 `{% generation %}` 标记取得精确 assistant loss mask，并先验证标记模板
 与服务模板逐 token 等价。
 
 `checkpoint_steps = 2000` 表示每 2,000 个优化步覆盖同一个
-`runs/sft/<name>/checkpoint-last`，不会按步数生成无限多个 adapter 目录。最终
-adapter 仍通过暂存目录原子发布。
+`runs/sft/<name>/checkpoint-last`，不会按步数生成无限多个 adapter 目录。
+checkpoint 同时保存约 55 MB LoRA 权重、约 110 MB AdamW 状态、样本游标、当前
+洗牌顺序和 CPU/MPS 随机状态；r16 实测净文件约 165 MB，按 180～200 MB 预算
+可以给文件系统元数据留出余量。权重与训练状态在同一
+暂存目录写完后再原子切换，避免恢复到不同 step。最终 adapter 仍通过暂存目录
+原子发布。若中断发生在 checkpoint 之后，恢复会原子截掉领先于 checkpoint 的
+指标行，再从对应下一步重算；不会把没有对应权重的日志误当作已完成进度。
+
+父 adapter 的血缘记录实际被 PEFT 加载的 `adapter_config.json` 与 LoRA 权重
+SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 adapter 的硬锁。
+基础模型、三个数据分卷与 manifest 仍会取摘要；数据和父 adapter 在实际加载前后
+还会复核文件身份。训练入口从加载到最终发布全程持有同名运行排他锁，第二个同名
+进程会立即失败。精确恢复还分别锁定解析后的设备、基座精度和 adapter 精度，
+不能把一次 MPS 运行在 CPU 上伪装成精确续训；任一训练输入变化都会被拒绝。
 
 ## 训练
+
+当前落盘数据仍是 E2 基线，旧训练集和旧召回考试卷含已废弃的实机敌人组合题。
+必须先确定 E3 混合比例、重建召回考试卷并成功运行 `build-sft`，再执行正式训练。
 
 ```bash
 uv sync --group training
 uv run --group training play-sts2-train sft \
   --config configs/sft.toml \
-  --name sft-clean-20260827-native-r16-e3
+  --name 20260828-sft-clean-native-r16-e3
 ```
 
-从 `init_adapter` 续训会保留 LoRA 权重，但不恢复优化器动量或数据游标，因此
-manifest 会记录 `approximate_resume=true`。先用独立运行名和 `--max-steps 1`
-做真实模型冒烟，避免与正式目录冲突。
+训练名必须以 `YYYYMMDD-` 开头。`init_adapter` 表示“用 E2 LoRA 初始化一个新的
+E3 运行”，不是恢复中断的同一运行，所以 manifest 仍记录
+`approximate_resume=true`。E3 运行中断后使用同名 `--resume`，会恢复优化器、
+数据游标和随机状态，并把 `metrics.jsonl` 从 checkpoint 的下一步继续追加：
+
+```bash
+uv run --group training play-sts2-train sft \
+  --config configs/sft.toml \
+  --name 20260828-sft-clean-native-r16-e3 \
+  --resume
+```
+
+先用独立的日期前缀运行名和 `--max-steps 1` 做真实模型冒烟，避免与正式目录
+冲突；一步冒烟只证明训练链路可运行，不代表模型取得有效进度。
 
 ## 行为评测
 
@@ -102,10 +139,10 @@ accuracy。当前目标是为 GRPO 打好基础，不必为了防御性横向比
 
 ```bash
 uv run --group training play-sts2-train eval-sft-loss \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
   --split dev
 uv run --group training play-sts2-train eval-sft-loss \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
   --split test
 ```
 
@@ -114,7 +151,7 @@ uv run --group training play-sts2-train eval-sft-loss \
 
 ```bash
 uv run --group training play-sts2-train eval-sft \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3 \
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
   --split dev
 ```
 
@@ -124,10 +161,10 @@ uv run --group training play-sts2-train eval-sft \
 
 ```bash
 uv run --group training play-sts2-train merge-sft \
-  --adapter models/adapters/sft-clean-20260827-native-r16-e3
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3
 ```
 
-默认输出为 `models/merged/sft-clean-20260827-native-r16-e3-merged/`。合并固定在
+默认输出为 `models/merged/20260828-sft-clean-native-r16-e3-merged/`。合并固定在
 CPU bfloat16 上执行，调用 `merge_and_unload(safe_merge=True)`，保存失败不会发布
 半成品；排他 rename 保证发布竞态也不会覆盖已有目标。命令会先核对训练清单或
 旧 adapter 声明的本地基座，且输入在合并期间变化时拒绝发布。
@@ -136,14 +173,17 @@ SHA-256、血缘校验方式以及依赖版本。
 
 ## 知识探针
 
-共 1,352 道未见问法和 100 道组合算术。知识题的自动通过口径是忽略空白后的
+当前旧考试卷含 1,352 道召回题和 100 道组合算术。以新的知识候选构建 E3 时，
+泄漏断言已经识别出其中 98 道召回题与训练/验证候选题面完全相同，因此这 1,352
+道题不能继续被称为 E3 的“未见问法”；确定最终知识配比后必须重新生成召回
+考试卷。100 道组合算术已作为算术生成排除项保留。知识题的自动通过口径是忽略空白后的
 完整参考答案匹配，宁可产生假阴性也不把“只命中几个数字”误报为正确；组合题
 严格检查结论和末尾最终数字。报告保存全部逐题 prompt/reference/answer/pass，
 便于人工复核。完整评测使用合并 HF 模型：
 
 ```bash
 uv run --group training play-sts2-train eval-sft-knowledge \
-  --model models/merged/sft-clean-20260827-native-r16-e3-merged
+  --model models/merged/20260828-sft-clean-native-r16-e3-merged
 ```
 
 ## MLX 服务件

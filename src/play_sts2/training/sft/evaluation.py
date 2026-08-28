@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .dataset import validate_sft_dataset
+from .dataset import dataset_split_path, validate_sft_dataset
 from .encoding import (
     IGNORE_LABEL,
     SftConfig,
@@ -232,7 +232,7 @@ def evaluate_sft_loss(
         )
     tokenizer, model, device = _load_evaluation_model(config, adapter_path)
     samples = load_tokenized_samples(
-        config.dataset_root / f"{split}.jsonl",
+        dataset_split_path(config.dataset_root, split),
         tokenizer,
         max_length=config.max_length,
     )
@@ -255,7 +255,9 @@ def evaluate_sft_loss(
             "output": str(output_path),
             "device": device,
             "elapsed_seconds": time.monotonic() - started,
-            "dataset_file": dataset_manifest["files"][f"{split}.jsonl"],
+            "dataset_file": dataset_manifest["files"][
+                dataset_split_path(Path(), split).as_posix()
+            ],
         }
     )
     _write_json(output_path, summary)
@@ -484,7 +486,7 @@ def evaluate_sft(
 
     summary: dict[str, object] = dict(
         evaluate_rows(
-            config.dataset_root / f"{split}.jsonl",
+            dataset_split_path(config.dataset_root, split),
             generate,
             output_path=output_path,
             max_samples=max_samples,
@@ -497,7 +499,9 @@ def evaluate_sft(
             "split": split,
             "output": str(output_path),
             "device": device,
-            "dataset_file": dataset_manifest["files"][f"{split}.jsonl"],
+            "dataset_file": dataset_manifest["files"][
+                dataset_split_path(Path(), split).as_posix()
+            ],
         }
     )
     _write_json(output_path.with_suffix(".summary.json"), summary)

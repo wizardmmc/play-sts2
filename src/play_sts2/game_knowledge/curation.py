@@ -53,7 +53,7 @@ def curate_entry(category: str, entry: KnowledgeEntry) -> KnowledgeEntry:
 
     Args:
         category (str): 实体类别。
-        entry (KnowledgeEntry): 待修正的 canonical Markdown 条目。
+        entry (KnowledgeEntry): 待修正的规范事实 Markdown 条目。
 
     Returns:
         KnowledgeEntry: 元数据不变、正文已应用固定版本替换的新条目。

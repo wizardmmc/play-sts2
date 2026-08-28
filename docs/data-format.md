@@ -65,7 +65,8 @@ SFT，但 `recording_complete=false`；Mod 若报告 `native_ui_capture_gap`，�
 开局录到 `game_over` 且没有已知采集缺口；它为 `false` 不会自动排除已经验证的
 单步样本。
 
-`data/raw/human/splits.json` 使用 seed 按局整体划分 train/dev/test。构建器只读取
+`data/raw/human/splits.json` 使用 seed 按局整体划分训练、验证和测试集。构建器
+拒绝任何未在名册中声明的可训练局，并只读取
 非隐藏、已有非空 `termination_reason` 的正式局，并跳过
 `training_eligible=false` 的整局；当前 `A7L5LAXFYJ` 保留用于审计但不训练。
 
@@ -119,25 +120,38 @@ cost: 1
 
 - `web_wiki` 保存结构化网页资料及 `source_detail`。
 - `mod_export` 保存当前游戏版本实测数据和 raw JSON。
-- `curated-v0.107.1` 保存核验问法与回答变体，包括远古者、算术、目录、角色和
-  遭遇知识。
+- `mod_export/v0.107.1` 保存经离线修正后的规范事实；
+  `generated-v0.107.1` 保存多问法候选，以及由实战攻击意图确定性生成的算术
+  训练/验证候选。
 
-事实错误回到事实源修正；新问法和训练反馈补强进入 curated。
+Mod 原始 `acts` 负责四张地图的分级怪池，生成后统一归入
+`generated-v0.107.1/encounters/{地图ID}.jsonl`。原始 `encounters` 中进场即可
+观察到的敌人数和具体组合不生成监督题。故障机器人充能球由固定版本受控补录先
+合并进 `characters/DEFECT.md`，再生成角色问答。
+
+事实错误回到 Mod 导出、受控补充或版本化 curated 事实修正规则；新问法修改
+`src/play_sts2/game_knowledge/generation.py` 中的生成规则，不能直接修补
+`generated-v0.107.1` JSONL。
 
 ## 可读 SFT 数据集
 
 ```text
 data/datasets/sft/
 ├── train.jsonl
-├── dev.jsonl
-├── test.jsonl
+├── validation/
+│   └── dev.jsonl
+├── eval/
+│   ├── test.jsonl
+│   └── knowledge/
 ├── manifest.json
-└── eval/knowledge/
 ```
 
 知识问答和每个人类动作各占一行。行为行统一为独立的
 `system/user/assistant`，通过当前 Harness 从 raw 重新生成观测和规范
 `ACTION:`。Dataset 不缓存 token ID，也不把一场战斗拼成增长的多轮历史。
+同一知识事实存在多种问题表述时，一种表述进入验证集，其余进入训练集；独立知识
+考试卷与训练/验证问题发生精确重合时拒绝发布。算术候选已显式标记 train/dev
+用途：验证题使用独立随机种子，不是从训练题中随机抽走。
 
 重建命令为：
 

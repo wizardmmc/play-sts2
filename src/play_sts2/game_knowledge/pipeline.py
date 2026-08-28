@@ -12,6 +12,7 @@ from .curation import FIXED_GAME_VERSION, curate_entity
 from .markdown import KnowledgeEntry, KnowledgeFormatError, parse_knowledge_entry
 
 _COLLECTIONS = (
+    "acts",
     "cards",
     "relics",
     "potions",
@@ -24,6 +25,7 @@ _COLLECTIONS = (
     "keywords",
 )
 _ENTITY_TYPES = {
+    "acts": "act",
     "cards": "card",
     "relics": "relic",
     "potions": "potion",
@@ -36,6 +38,22 @@ _ENTITY_TYPES = {
     "keywords": "keyword",
 }
 _FIXED_GAME_VERSION = FIXED_GAME_VERSION
+_REQUIRED_ACT_IDS = ("OVERGROWTH", "UNDERDOCKS", "HIVE", "GLORY")
+_REQUIRED_ACT_POOLS = (
+    "weak_encounters",
+    "regular_encounters",
+    "elite_encounters",
+    "boss_encounters",
+)
+_DEFECT_ORB_IDS = (
+    "LIGHTNING_ORB",
+    "FROST_ORB",
+    "DARK_ORB",
+    "GLASS_ORB",
+    "PLASMA_ORB",
+)
+_DEFECT_ORB_SUPPLEMENT = Path("supplements/v0.107.1/characters/defect_orbs.json")
+_DEFECT_ORB_ORIGIN = "human_rl:data/mod_information/snapshots/v0.107.1/orbs.json"
 _LOCAL_MARKER = "<!-- praxis:local -->"
 _MARKUP = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
 _RESOURCE = re.compile(r"res://\S+?\.png")
@@ -189,7 +207,7 @@ def rebuild_mod_knowledge(
     cycles_root: Path | None = None,
     event_entries_root: Path | None = None,
 ) -> KnowledgeBuildResult:
-    """从固定原始快照离线重建 canonical Markdown。
+    """从固定原始快照离线重建规范事实 Markdown。
 
     Wiki 只允许补充怪物的招式与循环；实跳 cycle 只作为待复核观察附在
     正文中。两者都不会取代 Mod 导出的基础 HP 和身份。
@@ -213,9 +231,18 @@ def rebuild_mod_knowledge(
     raw_root = Path(raw_root)
     if raw_root.name != "raw" or raw_root.parent.name != _FIXED_GAME_VERSION:
         raise ValueError(f"离线重建只接受 {_FIXED_GAME_VERSION}/raw")
+    acts_path = raw_root / "acts.json"
+    if not acts_path.is_file():
+        raise KnowledgeFormatError(f"固定版本重建缺少地图集合: {acts_path}")
     destination = Path(output_root) / "mod_export" / _FIXED_GAME_VERSION
     observations = _load_cycle_observations(cycles_root)
     event_snapshots = _load_event_snapshots(event_entries_root)
+    reference_names = _load_reference_names(raw_root)
+    orb_snapshot_path = Path(output_root) / _DEFECT_ORB_SUPPLEMENT
+    defect_orbs: list[dict[str, Any]] = []
+    defect_orb_metadata: dict[str, str] = {}
+    if orb_snapshot_path.is_file():
+        defect_orbs, defect_orb_metadata = _load_defect_orbs(orb_snapshot_path)
     categories: dict[str, int] = {}
     expected: dict[str, set[str]] = {}
     gaps: list[str] = []
@@ -227,7 +254,9 @@ def rebuild_mod_knowledge(
         if not isinstance(payload, list):
             raise TypeError(f"原始集合必须是 JSON 数组: {path}")
         entities = [dict(row) for row in payload if isinstance(row, Mapping)]
-        if collection == "monsters":
+        if collection == "acts":
+            _validate_required_acts(entities, path)
+        elif collection == "monsters":
             entities = [
                 _supplement_monster(entity, wiki_root, observations)
                 for entity in entities
@@ -235,6 +264,16 @@ def rebuild_mod_knowledge(
         elif collection == "events":
             entities = [
                 _supplement_event(entity, event_snapshots) for entity in entities
+            ]
+        elif collection == "characters":
+            entities = [
+                _supplement_character(
+                    entity,
+                    reference_names,
+                    defect_orbs,
+                    defect_orb_metadata,
+                )
+                for entity in entities
             ]
         expected[collection] = set()
         for entity in entities:
@@ -253,6 +292,8 @@ def rebuild_mod_knowledge(
         supplement_sources.append("human_rl_cycle_lab:pending_observation")
     if event_entries_root is not None:
         supplement_sources.append("game_ui_snapshot:resolved_options")
+    if defect_orbs:
+        supplement_sources.append(_DEFECT_ORB_SUPPLEMENT.as_posix())
     return _write_result(
         destination,
         "mod_export",
@@ -261,6 +302,190 @@ def rebuild_mod_knowledge(
         gaps=sorted(set(gaps)),
         supplements=supplement_sources,
     )
+
+
+def _validate_required_acts(
+    entities: Sequence[Mapping[str, Any]],
+    path: Path,
+) -> None:
+    """要求固定版本四张地图及四类遭遇池完整存在。
+
+    Args:
+        entities (Sequence[Mapping[str, Any]]): ``acts.json`` 中的地图对象。
+        path (Path): 用于错误定位的原始集合路径。
+
+    Raises:
+        KnowledgeFormatError: 地图 ID 集合或任一遭遇池不完整。
+
+    Returns:
+        None: 四张地图和所有池均可生成知识时返回。
+    """
+    ids = [entity.get("id") for entity in entities]
+    if len(entities) != len(_REQUIRED_ACT_IDS) or set(ids) != set(_REQUIRED_ACT_IDS):
+        raise KnowledgeFormatError(
+            f"{path} 必须且只能包含固定四张地图: {list(_REQUIRED_ACT_IDS)}"
+        )
+    for entity in entities:
+        act_id = str(entity["id"])
+        for field in _REQUIRED_ACT_POOLS:
+            pool = entity.get(field)
+            if not isinstance(pool, list) or not pool:
+                raise KnowledgeFormatError(f"地图 {act_id} 缺少非空 {field}")
+            if any(
+                not isinstance(encounter, Mapping)
+                or not isinstance(encounter.get("id"), str)
+                or not str(encounter.get("id")).strip()
+                or not isinstance(encounter.get("name"), str)
+                or not str(encounter.get("name")).strip()
+                for encounter in pool
+            ):
+                raise KnowledgeFormatError(f"地图 {act_id} 的 {field} 条目无效")
+
+
+def _load_reference_names(raw_root: Path) -> dict[str, str]:
+    """从固定快照读取角色起始卡牌、遗物和药水的显示名称。
+
+    Args:
+        raw_root (Path): ``mod_export/v0.107.1/raw`` 目录。
+
+    Raises:
+        TypeError: 任一存在的引用集合不是 JSON 数组。
+        OSError: 原始集合无法读取。
+
+    Returns:
+        dict[str, str]: 稳定 ID 到当前固定版本中文显示名的映射。
+    """
+    names: dict[str, str] = {}
+    for collection in ("cards", "relics", "potions"):
+        path = Path(raw_root) / f"{collection}.json"
+        if not path.is_file():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise TypeError(f"原始集合必须是 JSON 数组: {path}")
+        for row in payload:
+            if not isinstance(row, Mapping):
+                continue
+            object_id = _clean_text(row.get("id"))
+            name = _clean_text(row.get("name"))
+            if object_id and name:
+                names[object_id] = name
+    return names
+
+
+def _load_defect_orbs(
+    path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """读取并严格校验固定版本故障机器人充能球实测快照。
+
+    Args:
+        path (Path): 受控 ``defect_orbs.json`` 补录文件。
+
+    Raises:
+        KnowledgeFormatError: 版本、球种集合或机制字段不完整。
+        OSError: 补录文件无法读取。
+
+    Returns:
+        tuple[list[dict[str, Any]], dict[str, str]]: 按固定球种顺序保存的机制
+            事实，以及写入角色 frontmatter 的受控来源元数据。
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise KnowledgeFormatError(f"充能球快照不是 JSON 对象: {path}")
+    if str(payload.get("game_version") or "").removeprefix("v") != "0.107.1":
+        raise KnowledgeFormatError(f"充能球快照版本不是 {_FIXED_GAME_VERSION}: {path}")
+    supplement_metadata: dict[str, str] = {
+        "orb_supplement_source": _DEFECT_ORB_SUPPLEMENT.as_posix(),
+        "orb_supplement_origin": _DEFECT_ORB_ORIGIN,
+    }
+    for source_field, target_field in (
+        ("captured_at_utc", "orb_supplement_captured_at"),
+        ("mod_version", "orb_supplement_mod_version"),
+        ("provenance", "orb_supplement_provenance"),
+    ):
+        value = payload.get(source_field)
+        if not isinstance(value, str) or not value.strip():
+            raise KnowledgeFormatError(f"充能球快照缺少字段 {source_field}: {path}")
+        supplement_metadata[target_field] = value.strip()
+    raw_orbs = payload.get("orbs")
+    if not isinstance(raw_orbs, list):
+        raise KnowledgeFormatError(f"充能球快照缺少 orbs 数组: {path}")
+    by_id: dict[str, dict[str, Any]] = {}
+    for raw_orb in raw_orbs:
+        if not isinstance(raw_orb, Mapping):
+            raise KnowledgeFormatError(f"充能球条目不是对象: {path}")
+        orb = dict(raw_orb)
+        orb_id = orb.get("id")
+        if not isinstance(orb_id, str) or orb_id in by_id:
+            raise KnowledgeFormatError(f"充能球 ID 缺失或重复: {orb_id}")
+        for field in ("name", "description", "trigger", "focus_effect"):
+            if not isinstance(orb.get(field), str) or not str(orb[field]).strip():
+                raise KnowledgeFormatError(f"充能球 {orb_id} 缺少字段 {field}")
+        if type(orb.get("passive_base")) is not int:
+            raise KnowledgeFormatError(f"充能球 {orb_id} 的 passive_base 无效")
+        evoke = orb.get("evoke_base")
+        if orb_id == "DARK_ORB" and evoke is not None:
+            raise KnowledgeFormatError(f"充能球 {orb_id} 的 evoke_base 无效")
+        if orb_id != "DARK_ORB" and type(evoke) is not int:
+            raise KnowledgeFormatError(f"充能球 {orb_id} 的 evoke_base 无效")
+        if orb["trigger"] not in {"turn_end", "turn_start"}:
+            raise KnowledgeFormatError(f"充能球 {orb_id} 的 trigger 无效")
+        by_id[orb_id] = orb
+    if set(by_id) != set(_DEFECT_ORB_IDS):
+        raise KnowledgeFormatError(
+            f"充能球快照必须且只能包含固定五种球: {list(_DEFECT_ORB_IDS)}"
+        )
+    return [by_id[orb_id] for orb_id in _DEFECT_ORB_IDS], supplement_metadata
+
+
+def _supplement_character(
+    entity: dict[str, Any],
+    reference_names: Mapping[str, str],
+    defect_orbs: Sequence[Mapping[str, Any]],
+    defect_orb_metadata: Mapping[str, str],
+) -> dict[str, Any]:
+    """解析角色起始物品名称，并只给故障机器人附加充能球事实。
+
+    Args:
+        entity (dict[str, Any]): Mod 导出的角色实体。
+        reference_names (Mapping[str, str]): 起始物品 ID 到显示名的映射。
+        defect_orbs (Sequence[Mapping[str, Any]]): 固定版本五种充能球实测事实。
+        defect_orb_metadata (Mapping[str, str]): 补充文件、上游来源与采样元数据。
+
+    Raises:
+        KnowledgeFormatError: 故障机器人缺少补充文件或起始物品显示名。
+
+    Returns:
+        dict[str, Any]: 可直接渲染、仍保留稳定 ID 的角色实体副本。
+    """
+    result = dict(entity)
+    is_defect = entity.get("id") == "DEFECT"
+    for field in ("starting_deck", "starting_relics", "starting_potions"):
+        values = entity.get(field)
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            continue
+        unresolved = [
+            value
+            for value in values
+            if isinstance(value, str) and value and value not in reference_names
+        ]
+        if is_defect and unresolved:
+            raise KnowledgeFormatError(
+                f"故障机器人 {field} 无法解析显示名: {unresolved}"
+            )
+        result[field] = [
+            {"id": value, "name": reference_names.get(value, value)}
+            for value in values
+            if isinstance(value, str) and value
+        ]
+    if is_defect and not defect_orbs:
+        raise KnowledgeFormatError(
+            f"缺少故障机器人充能球补充: {_DEFECT_ORB_SUPPLEMENT.as_posix()}"
+        )
+    if is_defect:
+        result["orbs"] = [dict(orb) for orb in defect_orbs]
+        result.update(defect_orb_metadata)
+    return result
 
 
 def _mod_entry(
@@ -443,7 +668,7 @@ def _render_power(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
 
 
 def _render_character(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
-    """渲染角色初始属性、牌组和物品。
+    """渲染角色初始属性、物品、简介和可选充能球机制。
 
     Args:
         entity (Mapping[str, Any]): Mod 导出的角色实体。
@@ -460,17 +685,97 @@ def _render_character(entity: Mapping[str, Any], metadata: dict[str, str]) -> st
                 "starting_gold": "gold",
                 "max_energy": "energy",
                 "orb_slots": "orb_slots",
+                "orb_supplement_source": "supplement_source",
+                "orb_supplement_origin": "supplement_origin",
+                "orb_supplement_captured_at": "supplement_captured_at",
+                "orb_supplement_mod_version": "supplement_mod_version",
             },
         )
     )
-    lines = ["## 起始牌组", *_bullet_ids(entity.get("starting_deck"))]
-    lines.extend(("", "## 起始遗物", *_bullet_ids(entity.get("starting_relics"))))
-    potions = _bullet_ids(entity.get("starting_potions"))
+    lines = ["## 起始牌组", *_named_reference_bullets(entity.get("starting_deck"))]
+    lines.extend(
+        ("", "## 起始遗物", *_named_reference_bullets(entity.get("starting_relics")))
+    )
+    potions = _named_reference_bullets(entity.get("starting_potions"))
     if potions:
         lines.extend(("", "## 起始药水", *potions))
     description = _clean_text(entity.get("description"))
     if description:
         lines.extend(("", "## 简介", description))
+    orbs = entity.get("orbs")
+    if isinstance(orbs, Sequence) and not isinstance(orbs, (str, bytes)):
+        orb_rows = [orb for orb in orbs if isinstance(orb, Mapping)]
+        if orb_rows:
+            lines.extend(("", "## 充能球", *_named_reference_bullets(orb_rows)))
+            for orb in orb_rows:
+                name = _clean_text(orb.get("name"))
+                description = _clean_text(orb.get("description"))
+                if not name or not description:
+                    continue
+                lines.extend(
+                    (
+                        "",
+                        f"## 充能球：{name}",
+                        f"- 游戏描述：{description}",
+                        f"- 基础数值与集中：{_orb_mechanics(orb)}",
+                    )
+                )
+    return "\n".join(lines)
+
+
+def _orb_mechanics(orb: Mapping[str, Any]) -> str:
+    """把充能球被动、激发与集中关系渲染为中文短句。
+
+    Args:
+        orb (Mapping[str, Any]): 已通过固定版本校验的充能球事实。
+
+    Returns:
+        str: 不把未知黑暗激发基值伪装成零的机制说明。
+    """
+    trigger = {
+        "turn_end": "回合结束",
+        "turn_start": "回合开始",
+    }[str(orb["trigger"])]
+    values = [f"被动（{trigger}）{orb['passive_base']}"]
+    if orb.get("evoke_base") is not None:
+        values.append(f"激发{orb['evoke_base']}")
+    focus = _clean_text(orb.get("focus_effect")).replace(",", "，")
+    if focus and focus[-1] not in "。！？":
+        focus += "。"
+    return f"{'，'.join(values)}。{focus}"
+
+
+def _render_act(entity: Mapping[str, Any], metadata: dict[str, str]) -> str:
+    """渲染地图的弱、常规、精英和 Boss 遭遇池。
+
+    Args:
+        entity (Mapping[str, Any]): Mod 导出的地图实体。
+        metadata (dict[str, str]): 将写入 frontmatter 的公共字段。
+
+    Returns:
+        str: 可区分前期弱池与常规池的地图 Markdown 正文。
+    """
+    metadata.update(
+        _scalar_fields(
+            entity,
+            {
+                "index": "index",
+                "is_default": "is_default",
+            },
+        )
+    )
+    sections = (
+        ("弱遭遇池", "weak_encounters"),
+        ("常规遭遇池", "regular_encounters"),
+        ("精英遭遇池", "elite_encounters"),
+        ("Boss 遭遇池", "boss_encounters"),
+    )
+    lines: list[str] = []
+    for title, field in sections:
+        entries = _named_reference_bullets(entity.get(field))
+        if lines:
+            lines.append("")
+        lines.extend((f"## {title}", *(entries or ["（空）"])))
     return "\n".join(lines)
 
 
@@ -634,6 +939,7 @@ def _render_keyword(entity: Mapping[str, Any], _metadata: dict[str, str]) -> str
 
 
 _MOD_RENDERERS = {
+    "acts": _render_act,
     "cards": _render_card,
     "relics": _render_relic,
     "potions": _render_potion,
@@ -645,6 +951,28 @@ _MOD_RENDERERS = {
     "events": _render_event,
     "keywords": _render_keyword,
 }
+
+
+def _named_reference_bullets(value: object) -> list[str]:
+    """把带 ID 与显示名称的引用数组渲染成项目统一列表。
+
+    Args:
+        value (object): Mod 导出的引用对象数组。
+
+    Returns:
+        list[str]: ``- 名称（ID）`` 形式的 Markdown 列表。
+    """
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        object_id = _clean_text(item.get("id"))
+        name = _clean_text(item.get("name"))
+        if object_id and name:
+            result.append(f"- {name}（{object_id}）")
+    return result
 
 
 def _scalar_fields(

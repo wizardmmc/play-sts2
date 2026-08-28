@@ -28,6 +28,31 @@ def model_source_files(root: Path) -> dict[str, Path]:
     return {path.name: path for path in sorted(set(paths)) if path.is_file()}
 
 
+def adapter_source_files(root: Path) -> dict[str, Path]:
+    """列出继续训练时由 PEFT 实际加载的 adapter 配置与权重。
+
+    tokenizer 和聊天模板由基础模型目录加载，不属于父 adapter 的硬锁输入；
+    因此使用者可以独立调整模板，而不会伪造 LoRA 权重血缘。
+
+    Args:
+        root (Path): 本地 PEFT adapter 目录。
+
+    Returns:
+        dict[str, Path]: 以相对文件名为键的 adapter 来源文件。
+    """
+    root = Path(root)
+    names = {
+        "adapter_config.json",
+        "adapter_model.safetensors",
+        "adapter_model.bin",
+    }
+    return {
+        path.name: path
+        for path in sorted(root / name for name in names)
+        if path.is_file()
+    }
+
+
 def tokenizer_source_files(root: Path) -> dict[str, Path]:
     """列出决定 tokenizer 和聊天模板身份的本地文件。
 

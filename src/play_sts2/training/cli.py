@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--knowledge-root",
         type=Path,
-        default=Path("data/game_knowledge"),
+        default=Path("data/game_knowledge/generated-v0.107.1"),
     )
     build.add_argument(
         "--human-root",
@@ -40,13 +40,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/datasets/sft"),
     )
+    build.add_argument("--train-run", action="append", default=[])
     build.add_argument("--dev-run", action="append", default=[])
     build.add_argument("--test-run", action="append", default=[])
+    build.add_argument(
+        "--knowledge-probes-root",
+        type=Path,
+        default=Path("data/datasets/sft/eval/knowledge"),
+    )
 
     train = subparsers.add_parser("sft", help="训练 Qwen LoRA adapter")
     train.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
     train.add_argument("--name", required=True, help="adapter 与 run 的目录名称")
     train.add_argument("--max-steps", type=int, help="限制优化步数，用于真实冒烟")
+    train.add_argument(
+        "--resume",
+        action="store_true",
+        help="从同名运行的 checkpoint-last 精确恢复",
+    )
 
     merge = subparsers.add_parser("merge-sft", help="把 LoRA 合并为独立 HF 模型")
     merge.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
@@ -110,8 +121,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             knowledge_root=args.knowledge_root,
             human_root=args.human_root,
             output_root=args.output_root,
+            train_run_ids=args.train_run,
             dev_run_ids=args.dev_run,
             test_run_ids=args.test_run,
+            knowledge_probe_root=args.knowledge_probes_root,
         )
         output = {
             "output_root": str(result.output_root),
@@ -121,7 +134,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
     elif args.command == "sft":
         config = load_sft_config(args.config)
-        output = train_sft(config, args.name, max_steps=args.max_steps)
+        output = train_sft(
+            config,
+            args.name,
+            max_steps=args.max_steps,
+            exact_resume=args.resume,
+        )
     elif args.command == "merge-sft":
         config = load_sft_config(args.config)
         output = merge_sft_adapter(config, args.adapter, args.output)

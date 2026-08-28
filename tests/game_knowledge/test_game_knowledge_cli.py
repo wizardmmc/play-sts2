@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-from play_sts2.game_knowledge import KnowledgeBuildResult, cli
+from play_sts2.game_knowledge import (
+    ArithmeticBuildResult,
+    KnowledgeBuildResult,
+    cli,
+)
 
 
 def test_rebuild_command_passes_controlled_supplement_sources(
@@ -46,7 +50,13 @@ def test_rebuild_command_passes_controlled_supplement_sources(
             KnowledgeBuildResult: 不执行磁盘重建的测试结果。
         """
         calls.append(
-            (raw_root, output_root, wiki_root, cycles_root, event_entries_root)
+            (
+                raw_root,
+                output_root,
+                wiki_root,
+                cycles_root,
+                event_entries_root,
+            )
         )
         return KnowledgeBuildResult(
             output_root / "mod_export/v0.107.1", 3, {"cards": 3}
@@ -128,6 +138,69 @@ def test_generate_questions_command_does_not_build_e3_splits(
     )
 
     assert calls == [(snapshot, output)]
+
+
+def test_generate_arithmetic_command_passes_independent_sources(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """算术命令应显式传入人类战斗帧、候选目录和最终 probe。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离临时目录。
+        monkeypatch (pytest.MonkeyPatch): 用于替换真实算术生成实现。
+        capsys (pytest.CaptureFixture[str]): 用于读取命令标准输出。
+
+    Raises:
+        AssertionError: CLI 未保持训练候选和最终考试题的来源边界。
+
+    Returns:
+        None: 此测试只验证命令行契约。
+    """
+    calls: list[tuple[Path, Path, Path]] = []
+
+    def fake_generate(
+        *,
+        human_root: Path,
+        output_root: Path,
+        probe_root: Path,
+    ) -> ArithmeticBuildResult:
+        """记录算术生成参数并返回测试结果。
+
+        Args:
+            human_root (Path): 当前项目的人类精确战斗目录。
+            output_root (Path): 算术候选输出目录。
+            probe_root (Path): 不得泄漏的最终知识考试目录。
+
+        Returns:
+            ArithmeticBuildResult: 不执行真实生成的测试结果。
+        """
+        calls.append((human_root, output_root, probe_root))
+        return ArithmeticBuildResult(output_root, 12, 3, {"block_math": 15})
+
+    monkeypatch.setattr(cli, "generate_arithmetic_candidates", fake_generate)
+    human = tmp_path / "raw/human"
+    output = tmp_path / "generated-v0.107.1"
+    probes = tmp_path / "eval/knowledge"
+
+    assert (
+        cli.main(
+            [
+                "generate-arithmetic",
+                "--human-root",
+                str(human),
+                "--output-root",
+                str(output),
+                "--probes-root",
+                str(probes),
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [(human, output, probes)]
+    assert '"train": 12' in capsys.readouterr().out
 
 
 def test_review_command_writes_human_readable_report(

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..client import GameClient
+from .arithmetic import generate_arithmetic_candidates
 from .generation import generate_question_variants, generate_review_report
 from .pipeline import export_mod_knowledge, import_web_wiki, rebuild_mod_knowledge
 
@@ -43,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rebuilder = subparsers.add_parser(
         "rebuild",
-        help="从 v0.107.1 原始快照离线重建 canonical Markdown",
+        help="从 v0.107.1 原始快照离线重建规范事实 Markdown",
     )
     rebuilder.add_argument("raw_root", type=Path, help="固定版本 raw 目录")
     rebuilder.add_argument(
@@ -67,7 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="human-rl 已进入事件界面后保存的已解析 UI 快照目录",
     )
-
     generator = subparsers.add_parser(
         "generate-questions",
         help="生成按实体保存的多问法知识，不划分 E3 数据集",
@@ -78,6 +78,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/game_knowledge/generated-v0.107.1"),
         help="多问法 JSONL 输出目录",
+    )
+
+    arithmetic = subparsers.add_parser(
+        "generate-arithmetic",
+        help="从当前项目实战意图生成互斥的训练与验证算术候选",
+    )
+    arithmetic.add_argument(
+        "--human-root",
+        type=Path,
+        default=Path("data/raw/human"),
+        help="当前项目的人类精确战斗目录",
+    )
+    arithmetic.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/game_knowledge/generated-v0.107.1"),
+        help="知识与算术候选输出目录",
+    )
+    arithmetic.add_argument(
+        "--probes-root",
+        type=Path,
+        default=Path("data/datasets/sft/eval/knowledge"),
+        help="生成时必须排除的最终知识考试目录",
     )
 
     reviewer = subparsers.add_parser(
@@ -107,6 +130,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "review":
         report = generate_review_report(args.snapshot_root, args.output)
         print(json.dumps({"report": str(report)}, ensure_ascii=False))
+        return 0
+    if args.command == "generate-arithmetic":
+        arithmetic_result = generate_arithmetic_candidates(
+            human_root=args.human_root,
+            output_root=args.output_root,
+            probe_root=args.probes_root,
+        )
+        print(
+            json.dumps(
+                {
+                    "output_root": str(arithmetic_result.output_root),
+                    "train": arithmetic_result.train_count,
+                    "validation": arithmetic_result.validation_count,
+                    "buckets": arithmetic_result.buckets,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
     if args.command == "import-wiki":
         result = import_web_wiki(args.source, args.output_root)
