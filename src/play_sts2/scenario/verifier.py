@@ -37,7 +37,7 @@ def verify_battle_scenario(
     Args:
         scenario (BattleScenario): 请求创建的完整战斗场景。
         state (Mapping[str, Any]): Mod 返回的战斗入口状态。
-        expected_snapshot (BattleSnapshot | None): 可选的首次复现基准快照。
+        expected_snapshot (BattleSnapshot | None): 可选的同场景统一入口基准。
 
     Raises:
         ScenarioVerificationError: 状态不在战斗中、装载不符或快照不同。

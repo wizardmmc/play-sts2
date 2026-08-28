@@ -15,9 +15,9 @@ namespace STS2AIAgent.Game;
 /// <summary>
 /// 以游戏原生遭遇 RNG 公式进入指定战斗：
 ///   scenariofight CULTISTS_NORMAL floor=7
-/// <c>floor</c> 表示原战斗的总层数，只用于计算遭遇 RNG；命令不会伪造地图
-/// 历史。与游戏自带 <c>fight</c> 命令不同，此命令不会按当前时间随机化遭遇，
-/// 因而相同局种子、总层数和遭遇 ID 会生成相同的敌人组成与生命值。
+/// <c>floor</c> 是场景指定的总层数参数，只用于计算遭遇 RNG；命令不会伪造
+/// 地图历史，也不会倒带 Shuffle、Niche、MonsterAi 等其他运行中 RNG 流。
+/// 此命令只为指定遭遇注入由局种子、总层数参数和遭遇 ID 计算的 RNG。
 /// </summary>
 public sealed class ScenarioFightConsoleCmd : AbstractConsoleCmd
 {
@@ -88,7 +88,7 @@ public sealed class ScenarioFightConsoleCmd : AbstractConsoleCmd
         }
 
         // 与 EncounterModel.GenerateMonstersWithSlots 使用完全相同的公式，只把
-        // 当前调试局层数替换为场景记录的原总层数。
+        // 当前调试局层数替换为场景指定的总层数参数。其他 RNG 流保持当前计数。
         var encounterSeed = unchecked((uint)(
             (int)runState.Rng.Seed
             + floor

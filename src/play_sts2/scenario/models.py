@@ -18,13 +18,14 @@ _GAME_SEED = re.compile(r"^[0-9ABCDEFGHJKLMNPQRSTUVWXYZ]{10}$")
 class BattleScenario:
     """描述一场可重复创建的战斗入口。
 
-    ``floor`` 是原战斗的总层数，只参与遭遇 RNG 种子的计算。调试入口不会
-    伪造地图历史，因此新局状态中的 ``run.floor`` 仍保持真实值。
+    ``floor`` 是场景指定的总层数参数，只参与遭遇 RNG 种子的计算。调试入口
+    不会伪造地图历史，也不会恢复某次历史局的其他 RNG 计数器，因此新局状态中
+    的 ``run.floor`` 仍保持真实值。
 
     Args:
         character_id (str): 使用的角色稳定 ID。
         seed (str): 新局使用的游戏种子。
-        floor (int): 原战斗的总层数，用于确定遭遇 RNG。
+        floor (int): 用于确定遭遇 RNG 的场景总层数参数。
         encounter_id (str): 待进入的遭遇稳定 ID。
         deck (tuple[str, ...]): ``loadout`` 语法表示的完整牌组；附魔使用
             ``CARD@ENCHANTMENT[:AMOUNT]``。
@@ -88,7 +89,7 @@ class BattleScenario:
         if not 0 <= self.ascension <= 20:
             raise ValueError("进阶等级必须在 0 到 20 之间")
         if self.current_hp is None or self.max_hp is None:
-            raise ValueError("精确战斗场景必须同时设置当前和最大生命值")
+            raise ValueError("确定性战斗场景必须同时设置当前和最大生命值")
         if self.current_hp < 1:
             raise ValueError("当前生命值必须大于 0")
         if self.max_hp < self.current_hp:
@@ -173,7 +174,7 @@ class ModelInputSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class BattleSnapshot:
-    """保存判断战斗入口能否复现所需的 RNG 可见状态。
+    """保存判断同一场景能否重复构造相同入口所需的可见状态。
 
     Args:
         turn (int): 当前战斗回合。
@@ -194,7 +195,7 @@ class ScenarioResetResult:
 
     Args:
         state (dict[str, Any]): 可直接交给战斗 Runner 的完整 Mod 状态。
-        snapshot (BattleSnapshot): 可供后续采样复现核对的入口快照。
+        snapshot (BattleSnapshot): 可供同场景后续采样核对的入口快照。
     """
 
     state: dict[str, Any]

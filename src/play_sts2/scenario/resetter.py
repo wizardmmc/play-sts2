@@ -38,7 +38,7 @@ class BattleResetter:
 
         Args:
             scenario (BattleScenario): 待创建的完整战斗入口。
-            expected_snapshot (BattleSnapshot | None): 可选的首次采样基准快照。
+            expected_snapshot (BattleSnapshot | None): 可选的同场景统一入口基准。
 
         Raises:
             BattleResetError: 无法清理旧局、排队动作超时或响应缺少状态。

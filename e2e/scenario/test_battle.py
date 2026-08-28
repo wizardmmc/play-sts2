@@ -1,4 +1,4 @@
-"""验证真实游戏中的战斗场景与遭遇 RNG 复现。"""
+"""验证真实游戏中同一战斗场景与遭遇 RNG 的重复性。"""
 
 import time
 from collections.abc import Mapping
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.e2e
 def test_battle_scenario_repeats_entry_and_fixed_second_turn(
     running_game: RunningGame,
 ) -> None:
-    """同一场景重复创建时复现入口及固定动作后的第二回合。
+    """同一场景重复构造时保持入口及固定动作后的第二回合一致。
 
     Args:
         running_game (RunningGame): 测试进程启动的隔离游戏实例。
@@ -32,7 +32,7 @@ def test_battle_scenario_repeats_entry_and_fixed_second_turn(
         TimeoutError: 结束回合后未到达第二回合决策点。
 
     Returns:
-        None: 此测试仅验证真实游戏中的场景复现契约。
+        None: 入口一致性是场景契约；第二回合比较属于额外确定性回归检查。
     """
     scenario = BattleScenario(
         character_id="DEFECT",
