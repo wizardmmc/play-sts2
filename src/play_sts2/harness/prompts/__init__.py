@@ -116,9 +116,7 @@ def _expand_resource_tokens(text: str, token: str, resource_name: str) -> str:
     """
     return re.sub(
         rf"(?:(\d+)\s*点?\s*)?({token}+)",
-        lambda match: (
-            f"{match.group(1) or len(match.group(2))}点{resource_name}"
-        ),
+        lambda match: f"{match.group(1) or len(match.group(2))}点{resource_name}",
         text,
     )
 

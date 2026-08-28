@@ -85,9 +85,7 @@ def test_battle_system_prompt_preserves_resource_icon_meaning() -> None:
     energy_icon = (
         "[img]res://images/packed/sprite_fonts/colorless_energy_icon.png[/img]"
     )
-    bare_energy_icon = (
-        "res://images/packed/sprite_fonts/defect_energy_icon.png"
-    )
+    bare_energy_icon = "res://images/packed/sprite_fonts/defect_energy_icon.png"
     star_icon = "[img]res://images/packed/sprite_fonts/star_icon.png[/img]"
     unknown_icon = "[img]res://images/icons/unknown_resource.webp[/img]"
     state = {

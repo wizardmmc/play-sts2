@@ -397,9 +397,7 @@ def test_combat_card_selection_keeps_current_combat_context() -> None:
     assert "[0]冷静头脑(1费)" in observation.text
     assert "[1]电击+(0费)" in observation.text
     assert observation.text.endswith(
-        "可执行动作:\n"
-        "- select_deck_card(option_index)\n"
-        "- skip_card_selection"
+        "可执行动作:\n- select_deck_card(option_index)\n- skip_card_selection"
     )
 
 

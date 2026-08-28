@@ -167,9 +167,7 @@ def _capture_snapshot(
             index=_integer(card.get("index"), "手牌索引"),
             card_id=_text(card.get("card_id"), "手牌 ID"),
             upgrade_level=_integer(card.get("upgrade_level"), "手牌升级等级"),
-            enchantment_id=_optional_text(
-                card.get("enchantment_id"), "手牌附魔 ID"
-            ),
+            enchantment_id=_optional_text(card.get("enchantment_id"), "手牌附魔 ID"),
             enchantment_amount=_optional_integer(
                 card.get("enchantment_amount"), "手牌附魔层数"
             ),

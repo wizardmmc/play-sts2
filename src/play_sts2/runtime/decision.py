@@ -236,7 +236,9 @@ def _validate_action_for_state(
         raise ActionParseError(f"卡牌 [{card_index}] 当前没有合法目标")
     target_index = action.parameters.get("target_index")
     if target_index is None:
-        raise ActionParseError(f"卡牌 [{card_index}] 需要目标，合法目标 {valid_targets}")
+        raise ActionParseError(
+            f"卡牌 [{card_index}] 需要目标，合法目标 {valid_targets}"
+        )
     if target_index not in valid_targets:
         raise ActionParseError(
             f"target_index {target_index} 不在合法目标 {valid_targets}"
