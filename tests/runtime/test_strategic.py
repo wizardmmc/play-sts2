@@ -92,8 +92,14 @@ def test_strategic_runner_does_not_keep_history_between_screens() -> None:
     assert map_step.action.name == "choose_map_node"
     assert event_step.action.name == "choose_event_option"
     assert game.actions == [
-        ("choose_map_node", {"option_index": 0}),
-        ("choose_event_option", {"option_index": 1}),
+        (
+            "choose_map_node",
+            {"option_index": 0, "expected_state_revision": 1},
+        ),
+        (
+            "choose_event_option",
+            {"option_index": 1, "expected_state_revision": 2},
+        ),
     ]
     assert [
         tuple(message.role for message in request) for request in provider.requests
@@ -118,6 +124,7 @@ def test_strategic_runner_rejects_battle_state() -> None:
     with pytest.raises(runtime.StrategicRunError, match="不属于战略决策"):
         runtime.StrategicRunner(StrategicGame(), provider).step(
             {
+                "state_revision": 1,
                 "screen": "COMBAT",
                 "in_combat": True,
                 "available_actions": ["end_turn"],
@@ -134,6 +141,7 @@ def _map_state() -> dict[str, Any]:
         dict[str, Any]: 可由战略 Harness 渲染的地图状态。
     """
     return {
+        "state_revision": 1,
         "screen": "MAP",
         "available_actions": ["choose_map_node"],
         "run": {"character_name": "故障机器人", "current_hp": 70, "max_hp": 75},
@@ -148,6 +156,7 @@ def _event_state() -> dict[str, Any]:
         dict[str, Any]: 可由战略 Harness 渲染的事件状态。
     """
     return {
+        "state_revision": 2,
         "screen": "EVENT",
         "available_actions": ["choose_event_option"],
         "run": {"character_name": "故障机器人", "current_hp": 70, "max_hp": 75},

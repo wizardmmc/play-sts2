@@ -66,12 +66,12 @@ class CliGameClient:
         """
         return _combat_state()
 
-    def execute_action(self, action: str, **_parameters: int) -> dict[str, Any]:
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
         """执行唯一动作并返回战斗奖励状态。
 
         Args:
             action (str): Runtime 提交的动作名称。
-            _parameters (int): 当前动作未使用的参数。
+            parameters (int): Runtime 提交的状态版本参数。
 
         Raises:
             AssertionError: 模型没有选择结束回合。
@@ -80,10 +80,12 @@ class CliGameClient:
             dict[str, Any]: 含稳定奖励状态的动作结果。
         """
         assert action == "end_turn"
+        assert parameters == {"expected_state_revision": 1}
         return {
             "status": "completed",
             "stable": True,
             "state": {
+                "state_revision": 2,
                 "screen": "REWARD",
                 "in_combat": False,
                 "available_actions": ["claim_reward"],
@@ -285,6 +287,7 @@ def _combat_state() -> dict[str, Any]:
         dict[str, Any]: 可以结束回合的战斗状态。
     """
     return {
+        "state_revision": 1,
         "screen": "COMBAT",
         "in_combat": True,
         "turn": 1,

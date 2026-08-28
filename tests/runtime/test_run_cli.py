@@ -110,6 +110,7 @@ class NewRunCliGame:
         assert base_url == "http://127.0.0.1:8082"
         self.actions: list[dict[str, Any]] = []
         self._state = {
+            "state_revision": 1,
             "screen": "MAIN_MENU",
             "available_actions": ["open_character_select"],
         }
@@ -172,17 +173,28 @@ class NewRunCliGame:
         """
         self.actions.append({"action": action, **parameters})
         if action == "open_character_select":
-            self._state = _character_state(selected="IRONCLAD")
+            assert parameters == {"expected_state_revision": 1}
+            self._state = _character_state(selected="IRONCLAD", state_revision=2)
         elif action == "select_character":
-            assert parameters == {"option_index": 4}
-            self._state = _character_state(selected="DEFECT")
+            assert parameters == {
+                "expected_state_revision": 2,
+                "option_index": 4,
+            }
+            self._state = _character_state(selected="DEFECT", state_revision=3)
         elif action == "set_seed":
-            assert parameters == {"game_seed": "TEST-SEED"}
+            assert parameters == {
+                "expected_state_revision": 3,
+                "game_seed": "TEST-SEED",
+            }
         elif action == "embark":
-            self._state = _map_state()
+            assert parameters == {"expected_state_revision": 3}
+            self._state = _map_state(state_revision=4)
         elif action == "choose_map_node":
-            assert parameters == {"option_index": 0}
-            self._state = _game_over_state()
+            assert parameters == {
+                "option_index": 0,
+                "expected_state_revision": 4,
+            }
+            self._state = _game_over_state(state_revision=5)
         else:
             raise AssertionError(f"预期外动作: {action}")
         return {"status": "completed", "stable": True, "state": self._state}
@@ -204,6 +216,7 @@ class ResumeCliGame(NewRunCliGame):
         """
         super().__init__(base_url)
         self._state = {
+            "state_revision": 1,
             "screen": "MAIN_MENU",
             "available_actions": ["continue_run"],
         }
@@ -220,8 +233,17 @@ class ResumeCliGame(NewRunCliGame):
             dict[str, Any]: 含恢复后地图或终局状态的动作结果。
         """
         if action == "continue_run":
+            assert parameters == {"expected_state_revision": 1}
             self.actions.append({"action": action, **parameters})
-            self._state = _map_state()
+            self._state = _map_state(state_revision=2)
+            return {"status": "completed", "stable": True, "state": self._state}
+        if action == "choose_map_node":
+            assert parameters == {
+                "option_index": 0,
+                "expected_state_revision": 2,
+            }
+            self.actions.append({"action": action, **parameters})
+            self._state = _game_over_state(state_revision=3)
             return {"status": "completed", "stable": True, "state": self._state}
         return super().execute_action(action, **parameters)
 
@@ -290,11 +312,23 @@ def test_main_starts_new_run_and_plays_to_victory(
     ]
     assert NewRunCliGame.latest is not None
     assert NewRunCliGame.latest.actions == [
-        {"action": "open_character_select"},
-        {"action": "select_character", "option_index": 4},
-        {"action": "set_seed", "game_seed": "TEST-SEED"},
-        {"action": "embark"},
-        {"action": "choose_map_node", "option_index": 0},
+        {"action": "open_character_select", "expected_state_revision": 1},
+        {
+            "action": "select_character",
+            "expected_state_revision": 2,
+            "option_index": 4,
+        },
+        {
+            "action": "set_seed",
+            "expected_state_revision": 3,
+            "game_seed": "TEST-SEED",
+        },
+        {"action": "embark", "expected_state_revision": 3},
+        {
+            "action": "choose_map_node",
+            "option_index": 0,
+            "expected_state_revision": 4,
+        },
     ]
     assert capsys.readouterr().out == (
         "整局结束: victory，经历 0 场战斗，执行 1 个动作\n"
@@ -337,8 +371,12 @@ def test_main_resumes_current_run_without_bootstrap(
     assert exit_code == 0
     assert ResumeCliGame.latest is not None
     assert ResumeCliGame.latest.actions == [
-        {"action": "continue_run"},
-        {"action": "choose_map_node", "option_index": 0},
+        {"action": "continue_run", "expected_state_revision": 1},
+        {
+            "action": "choose_map_node",
+            "option_index": 0,
+            "expected_state_revision": 2,
+        },
     ]
 
 
@@ -381,16 +419,18 @@ temperature = 0.2
     return config_path
 
 
-def _character_state(*, selected: str) -> dict[str, Any]:
+def _character_state(*, selected: str, state_revision: int) -> dict[str, Any]:
     """构造角色选择页面。
 
     Args:
         selected (str): 当前选中的角色稳定 ID。
+        state_revision (int): 当前状态的单调版本。
 
     Returns:
         dict[str, Any]: 与开局流程兼容的角色选择状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "CHARACTER_SELECT",
         "available_actions": ["select_character", "set_seed", "embark"],
         "character_select": {
@@ -402,13 +442,14 @@ def _character_state(*, selected: str) -> dict[str, Any]:
     }
 
 
-def _map_state() -> dict[str, Any]:
+def _map_state(*, state_revision: int) -> dict[str, Any]:
     """构造开局后的唯一节点地图。
 
     Returns:
         dict[str, Any]: 可供战略模型选择的地图状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "MAP",
         "available_actions": ["choose_map_node"],
         "run": {
@@ -429,13 +470,14 @@ def _map_state() -> dict[str, Any]:
     }
 
 
-def _game_over_state() -> dict[str, Any]:
+def _game_over_state(*, state_revision: int) -> dict[str, Any]:
     """构造通关终局。
 
     Returns:
         dict[str, Any]: Mod 原始胜利状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "GAME_OVER",
         "available_actions": ["return_to_main_menu"],
         "game_over": {"is_victory": True},

@@ -78,19 +78,31 @@ class PendingBattleGame:
         return {
             "status": "completed",
             "stable": True,
-            "state": _reward_state(),
+            "state": _reward_state(state_revision=4),
         }
 
-    def state(self) -> dict[str, Any]:
-        """先返回不可决策过渡帧，再返回下一回合稳定状态。
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """先返回不可决策事件，再返回下一回合稳定状态。
 
         Returns:
-            dict[str, Any]: 当前轮询位置对应的游戏状态。
+            dict[str, Any]: 当前事件位置对应的游戏状态。
         """
+        assert timeout > 0
         self.state_calls += 1
         if self.state_calls == 1:
-            return _combat_state(turn=2, available_actions=[])
-        state = _combat_state(turn=2)
+            assert after_revision == 1
+            return _combat_state(
+                turn=2,
+                available_actions=[],
+                state_revision=2,
+            )
+        assert after_revision == 2
+        state = _combat_state(turn=2, state_revision=3)
         state["combat"]["player"]["energy"] = 2
         return state
 
@@ -165,21 +177,31 @@ class SelectionBattleGame:
             return {
                 "status": "completed",
                 "stable": True,
-                "state": _combat_selection_state(available_actions=[]),
+                "state": _combat_selection_state(
+                    available_actions=[],
+                    state_revision=2,
+                ),
             }
         return {
             "status": "completed",
             "stable": True,
-            "state": _reward_state(),
+            "state": _reward_state(state_revision=4),
         }
 
-    def state(self) -> dict[str, Any]:
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
         """返回已经开放选牌动作的稳定战斗状态。
 
         Returns:
             dict[str, Any]: 可以选择第 0 张牌的战斗内选牌状态。
         """
-        return _combat_selection_state()
+        assert after_revision == 2
+        assert timeout > 0
+        return _combat_selection_state(state_revision=3)
 
 
 class ConflictingBattleGame:
@@ -218,17 +240,122 @@ class ConflictingBattleGame:
         return {
             "status": "completed",
             "stable": True,
-            "state": _reward_state(),
+            "state": _reward_state(state_revision=3),
         }
 
-    def state(self) -> dict[str, Any]:
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
         """返回重新开放动作的稳定战斗状态。
 
         Returns:
             dict[str, Any]: 可再次交给模型的战斗状态。
         """
+        assert timeout > 0
         self.state_calls += 1
-        return _combat_state()
+        return _combat_state(state_revision=after_revision + 1)
+
+
+class EventDrivenBattleGame:
+    """只通过事件等待交付下一决策状态，拒绝主动状态轮询。"""
+
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, dict[str, int]]] = []
+        self.waits: list[tuple[int, float]] = []
+
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        self.actions.append((action, parameters))
+        if len(self.actions) == 1:
+            return {
+                "status": "pending",
+                "stable": False,
+                "state": _combat_state(
+                    turn=2,
+                    available_actions=[],
+                    state_revision=2,
+                ),
+            }
+        return {
+            "status": "completed",
+            "stable": True,
+            "state": _reward_state(state_revision=4),
+        }
+
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        self.waits.append((after_revision, timeout))
+        state = _combat_state(turn=2, state_revision=3)
+        state["combat"]["player"]["energy"] = 2
+        return state
+
+    def state(self) -> dict[str, Any]:
+        raise AssertionError("事件等待期间不应轮询 /state")
+
+
+class StaleRevisionBattleGame:
+    """首次提交时报告观测已过期，随后接受新 revision 的动作。"""
+
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, dict[str, int]]] = []
+        self.current = _combat_state(turn=2, state_revision=2)
+        self.current["combat"]["player"]["energy"] = 2
+
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        self.actions.append((action, parameters))
+        if len(self.actions) == 1:
+            raise _stale_state(parameters["expected_state_revision"], self.current)
+        return {
+            "status": "completed",
+            "stable": True,
+            "state": _reward_state(state_revision=3),
+        }
+
+
+def test_battle_runner_waits_on_state_events_without_polling() -> None:
+    """pending 动作通过 SSE 状态事件继续，而不是定时调用 ``/state``。"""
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = EventDrivenBattleGame()
+    provider = BattleProvider(["ACTION: end_turn", "ACTION: end_turn"])
+
+    result = runtime.BattleRunner(game, provider, state_timeout=5).run(
+        _combat_state(state_revision=1)
+    )
+
+    assert result.outcome is runtime.BattleOutcome.CLEARED
+    assert [revision for revision, _ in game.waits] == [2]
+    assert game.waits[0][1] == pytest.approx(5, abs=0.1)
+    assert [
+        parameters["expected_state_revision"] for _, parameters in game.actions
+    ] == [
+        1,
+        3,
+    ]
+
+
+def test_battle_runner_discards_stale_reply_and_regenerates_from_latest_state() -> None:
+    """revision 冲突不在旧 prompt 上重试，而是用 Mod 返回的新状态重新推理。"""
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = StaleRevisionBattleGame()
+    provider = BattleProvider(["ACTION: end_turn", "ACTION: end_turn"])
+
+    result = runtime.BattleRunner(game, provider).run(_combat_state(state_revision=1))
+
+    assert result.outcome is runtime.BattleOutcome.CLEARED
+    assert len(result.steps) == 1
+    assert [
+        parameters["expected_state_revision"] for _, parameters in game.actions
+    ] == [
+        1,
+        2,
+    ]
+    assert "能量2" in provider.requests[1][-1].content
 
 
 def test_battle_runner_uses_stateless_steps_and_waits_for_pending_action() -> None:
@@ -247,13 +374,12 @@ def test_battle_runner_uses_stateless_steps_and_waits_for_pending_action() -> No
     result = runtime.BattleRunner(
         game,
         provider,
-        poll_interval=0,
         state_timeout=1,
     ).run(_combat_state())
 
     assert result.outcome is runtime.BattleOutcome.CLEARED
     assert len(result.steps) == 2
-    assert result.final_state == _reward_state()
+    assert result.final_state == _reward_state(state_revision=4)
     assert game.actions == ["end_turn", "end_turn"]
     assert game.state_calls == 2
     assert tuple(message.role for message in provider.requests[1]) == ("system", "user")
@@ -281,7 +407,6 @@ def test_battle_runner_retries_temporary_action_window_conflict() -> None:
     result = runtime.BattleRunner(
         game,
         provider,
-        poll_interval=0,
         state_timeout=1,
     ).run(_combat_state())
 
@@ -310,7 +435,6 @@ def test_battle_runner_stops_after_action_window_retry_limit() -> None:
             game,
             provider,
             max_retries=1,
-            poll_interval=0,
             state_timeout=1,
         ).run(_combat_state())
 
@@ -376,7 +500,6 @@ def test_battle_runner_leaves_combat_for_strategic_card_reward() -> None:
     result = runtime.BattleRunner(
         FinishingBattleGame(final_state),
         BattleProvider(["ACTION: end_turn"]),
-        poll_interval=0,
         state_timeout=0,
     ).run(_combat_state())
 
@@ -395,6 +518,7 @@ def test_battle_runner_leaves_combat_for_any_strategic_screen() -> None:
     """
     runtime = importlib.import_module("play_sts2.runtime")
     final_state = {
+        "state_revision": 2,
         "screen": "EVENT",
         "in_combat": False,
         "available_actions": ["choose_event_option"],
@@ -408,7 +532,6 @@ def test_battle_runner_leaves_combat_for_any_strategic_screen() -> None:
     result = runtime.BattleRunner(
         FinishingBattleGame(final_state),
         BattleProvider(["ACTION: end_turn"]),
-        poll_interval=0,
         state_timeout=0,
     ).run(_combat_state())
 
@@ -432,14 +555,16 @@ def test_battle_runner_waits_for_transient_combat_card_selection() -> None:
     result = runtime.BattleRunner(
         game,
         provider,
-        poll_interval=0,
         state_timeout=1,
     ).run(_combat_state())
 
     assert result.outcome is runtime.BattleOutcome.CLEARED
     assert game.actions == [
-        ("end_turn", {}),
-        ("select_deck_card", {"option_index": 0}),
+        ("end_turn", {"expected_state_revision": 1}),
+        (
+            "select_deck_card",
+            {"expected_state_revision": 3, "option_index": 0},
+        ),
     ]
     assert "选择卡牌" in provider.requests[1][-1].content
 
@@ -491,17 +616,20 @@ def _combat_state(
     *,
     turn: int = 1,
     available_actions: Sequence[str] = ("end_turn",),
+    state_revision: int = 1,
 ) -> dict[str, Any]:
     """构造一个可以结束回合的最小战斗状态。
 
     Args:
         turn (int): 状态所属的战斗回合。
         available_actions (Sequence[str]): Mod 当前开放的动作。
+        state_revision (int): Mod 为动作并发控制分配的状态修订号。
 
     Returns:
         dict[str, Any]: 与 Harness 观测字段兼容的战斗状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "COMBAT",
         "in_combat": True,
         "turn": turn,
@@ -527,13 +655,14 @@ def _combat_state(
     }
 
 
-def _reward_state() -> dict[str, Any]:
+def _reward_state(*, state_revision: int = 2) -> dict[str, Any]:
     """构造战斗胜利后进入的奖励状态。
 
     Returns:
         dict[str, Any]: 已离开战斗的奖励状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "REWARD",
         "in_combat": False,
         "available_actions": ["claim_reward"],
@@ -548,6 +677,7 @@ def _game_over_state() -> dict[str, Any]:
         dict[str, Any]: 生命为零的游戏结束状态。
     """
     return {
+        "state_revision": 2,
         "screen": "GAME_OVER",
         "in_combat": False,
         "available_actions": ["return_to_main_menu"],
@@ -563,6 +693,7 @@ def _victory_game_over_state() -> dict[str, Any]:
         dict[str, Any]: 使用 Mod 真实字段表示胜利的终局状态。
     """
     return {
+        "state_revision": 2,
         "screen": "GAME_OVER",
         "in_combat": False,
         "available_actions": ["return_to_main_menu"],
@@ -578,6 +709,7 @@ def _card_reward_state() -> dict[str, Any]:
         dict[str, Any]: Harness 明确归属战略层的奖励选牌状态。
     """
     return {
+        "state_revision": 2,
         "screen": "CARD_SELECTION",
         "in_combat": True,
         "available_actions": ["choose_reward_card", "skip_reward_cards"],
@@ -588,16 +720,19 @@ def _card_reward_state() -> dict[str, Any]:
 def _combat_selection_state(
     *,
     available_actions: Sequence[str] = ("select_deck_card",),
+    state_revision: int = 2,
 ) -> dict[str, Any]:
     """构造战斗机制产生的选牌状态。
 
     Args:
         available_actions (Sequence[str]): Mod 当前开放的选牌动作。
+        state_revision (int): 当前选牌状态的 revision。
 
     Returns:
         dict[str, Any]: 过渡中或已可决策的战斗选牌状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "CARD_SELECTION",
         "in_combat": True,
         "available_actions": list(available_actions),
@@ -643,6 +778,36 @@ def _action_unavailable(action: str) -> httpx.HTTPStatusError:
                 "message": "Action is not available in the current state.",
                 "details": {"action": action, "screen": "COMBAT"},
                 "retryable": False,
+            },
+        },
+    )
+    return httpx.HTTPStatusError(
+        "409 Conflict",
+        request=request,
+        response=response,
+    )
+
+
+def _stale_state(
+    expected_revision: int,
+    current_state: dict[str, Any],
+) -> httpx.HTTPStatusError:
+    """构造 Mod 对过期状态动作返回的结构化 409。"""
+    request = httpx.Request("POST", "http://127.0.0.1:8080/action")
+    response = httpx.Response(
+        409,
+        request=request,
+        json={
+            "ok": False,
+            "error": {
+                "code": "stale_state",
+                "message": "Observed state revision is no longer current.",
+                "details": {
+                    "expected_state_revision": expected_revision,
+                    "actual_state_revision": current_state["state_revision"],
+                    "current_state": current_state,
+                },
+                "retryable": True,
             },
         },
     )

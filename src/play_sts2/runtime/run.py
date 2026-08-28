@@ -12,13 +12,17 @@ from ..client import GameClient
 from ..harness import HarnessLayer, format_action, shop_purchase_available
 from ..inference import DecisionProvider
 from .battle import BattleRunner
-from .decision import DecisionStep, is_action_window_conflict
+from .decision import (
+    DecisionStep,
+    is_action_window_conflict,
+    stale_state_from_conflict,
+    state_revision,
+)
 from .router import RunRoute, classify_run_state
 from .strategic import StrategicRunner
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_MAX_STRATEGIC_STEPS = 400
-_DEFAULT_POLL_INTERVAL = 0.2
 _DEFAULT_STATE_TIMEOUT = 30.0
 _SHOP_LOOP_ACTIONS = {"close_shop_inventory", "open_shop_inventory"}
 _SHOP_LOOP_REPETITIONS = 3
@@ -77,7 +81,6 @@ class RunRunner:
         temperature: float = 0.0,
         max_retries: int = _DEFAULT_MAX_RETRIES,
         max_strategic_steps: int = _DEFAULT_MAX_STRATEGIC_STEPS,
-        poll_interval: float = _DEFAULT_POLL_INTERVAL,
         state_timeout: float = _DEFAULT_STATE_TIMEOUT,
     ) -> None:
         """初始化不拥有游戏与模型连接生命周期的整局 Runner。
@@ -89,7 +92,6 @@ class RunRunner:
             temperature (float): 每次模型回复使用的采样温度。
             max_retries (int): 每个动作首次失败后允许的重试次数。
             max_strategic_steps (int): 单局允许执行的最大战略动作数。
-            poll_interval (float): 等待过渡状态时的轮询间隔秒数。
             state_timeout (float): 单次等待可处理状态的最长秒数。
 
         Returns:
@@ -102,7 +104,6 @@ class RunRunner:
             max_tokens=max_tokens,
             temperature=temperature,
             max_retries=max_retries,
-            poll_interval=poll_interval,
             state_timeout=state_timeout,
         )
         self._strategic = StrategicRunner(
@@ -114,7 +115,6 @@ class RunRunner:
         )
         self._max_retries = max_retries
         self._max_strategic_steps = max_strategic_steps
-        self._poll_interval = poll_interval
         self._state_timeout = state_timeout
 
     def run(self, initial_state: Mapping[str, Any] | None = None) -> RunResult:
@@ -145,7 +145,10 @@ class RunRunner:
         while True:
             route = classify_run_state(state)
             if route is RunRoute.TRANSIENT:
-                state = self._wait_for_route()
+                state = self._wait_for_route(
+                    state,
+                    after_revision=state_revision(state),
+                )
                 continue
             if route is RunRoute.UNKNOWN:
                 raise RunError(f"未知游戏屏幕: {state.get('screen')}")
@@ -177,18 +180,24 @@ class RunRunner:
                 )
                 step = self._strategic.step(state, notice=notice)
             except httpx.HTTPStatusError as exc:
-                if (
-                    not is_action_window_conflict(exc)
-                    or conflict_retries >= self._max_retries
-                ):
+                latest = stale_state_from_conflict(exc)
+                if latest is None and not is_action_window_conflict(exc):
+                    raise
+                if conflict_retries >= self._max_retries:
                     raise
                 conflict_retries += 1
-                state = self._wait_for_route()
+                state = self._wait_for_route(
+                    latest,
+                    after_revision=state_revision(state),
+                )
                 continue
             conflict_retries = 0
             strategic_steps += 1
             decisions.append(RunDecision(HarnessLayer.STRATEGIC, step))
-            state = self._state_after(step.action_result)
+            state = self._state_after(
+                step.action_result,
+                after_revision=state_revision(state),
+            )
             shop_trace.append((step.observation.text, format_action(step.action)))
             del shop_trace[: -2 * _SHOP_LOOP_REPETITIONS]
             loop = _repeated_shop_loop(shop_trace)
@@ -204,8 +213,13 @@ class RunRunner:
             elif step.action.name not in _SHOP_LOOP_ACTIONS:
                 shop_notice_active = False
 
-    def _state_after(self, action_result: Mapping[str, Any]) -> dict[str, Any]:
-        """从战略动作结果或后续轮询取得下一份可处理状态。
+    def _state_after(
+        self,
+        action_result: Mapping[str, Any],
+        *,
+        after_revision: int,
+    ) -> dict[str, Any]:
+        """从战略动作结果或后续事件取得下一份可处理状态。
 
         Args:
             action_result (Mapping[str, Any]): Mod 返回的原始动作结果。
@@ -222,16 +236,22 @@ class RunRunner:
             route = classify_run_state(candidate)
             if route is not RunRoute.TRANSIENT:
                 return candidate
-        return self._wait_for_route(candidate)
+        return self._wait_for_route(
+            candidate,
+            after_revision=after_revision,
+        )
 
     def _wait_for_route(
         self,
         candidate: Mapping[str, Any] | None = None,
+        *,
+        after_revision: int | None = None,
     ) -> dict[str, Any]:
         """等待动画过渡结束并取得下一份可分类状态。
 
         Args:
             candidate (Mapping[str, Any] | None): 可先检查的动作结果内状态。
+            after_revision (int | None): 没有候选状态时已经处理的 revision。
 
         Raises:
             RunError: 在限定时间内状态始终属于过渡帧。
@@ -241,17 +261,26 @@ class RunRunner:
         """
         deadline = time.monotonic() + self._state_timeout
         state = dict(candidate) if candidate is not None else None
+        revision = state_revision(state) if state is not None else after_revision
         while True:
             if (
                 state is not None
                 and classify_run_state(state) is not RunRoute.TRANSIENT
             ):
                 return state
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise RunError("等待下一可处理状态超时")
-            if self._poll_interval:
-                time.sleep(self._poll_interval)
-            state = self._game.state()
+            if revision is None:
+                raise RunError("等待状态缺少 state_revision")
+            try:
+                state = self._game.wait_for_state(
+                    after_revision=revision,
+                    timeout=remaining,
+                )
+            except TimeoutError as exc:
+                raise RunError("等待下一可处理状态超时") from exc
+            revision = state_revision(state)
 
 
 def _terminal_outcome(state: Mapping[str, Any]) -> RunOutcome:

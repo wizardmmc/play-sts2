@@ -20,6 +20,7 @@ class ScriptedClient:
         self._battle_is_settling = False
         self._pending_states: list[dict[str, Any]] = []
         self._state = {
+            "state_revision": 1,
             "screen": "COMBAT",
             "in_combat": True,
             "available_actions": ["save_and_quit"],
@@ -43,6 +44,32 @@ class ScriptedClient:
             ]
         return dict(self._state)
 
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """返回脚本排队的下一状态，不允许重置器回退到轮询。"""
+        assert timeout > 0
+        if self._pending_states:
+            self._state = self._pending_states.pop(0)
+        elif self._battle_is_settling:
+            self._battle_is_settling = False
+            self._state = {
+                **self._state,
+                "state_revision": self._state["state_revision"] + 1,
+                "available_actions": [
+                    "play_card",
+                    "end_turn",
+                    "save_and_quit",
+                ],
+            }
+        else:
+            raise TimeoutError("没有排队的脚本状态")
+        assert self._state["state_revision"] > after_revision
+        return dict(self._state)
+
     def execute_action(self, action: str, **parameters: Any) -> dict[str, Any]:
         """执行重置流程需要的最小动作集合。
 
@@ -57,28 +84,41 @@ class ScriptedClient:
             dict[str, Any]: 动作完成后的稳定状态结果。
         """
         self.actions.append((action, parameters))
+        revision = self._state["state_revision"]
         response_state: dict[str, Any] | None = None
         if action == "save_and_quit":
+            assert parameters == {"expected_state_revision": revision}
             response_state = dict(self._state)
             self._pending_states = [
-                {"screen": "UNKNOWN", "available_actions": []},
                 {
+                    "state_revision": revision + 1,
+                    "screen": "UNKNOWN",
+                    "available_actions": [],
+                },
+                {
+                    "state_revision": revision + 2,
                     "screen": "MAIN_MENU",
                     "available_actions": ["abandon_run"],
                 },
             ]
         elif action == "abandon_run":
+            assert parameters == {"expected_state_revision": revision}
             self._state = {
+                "state_revision": revision + 1,
                 "screen": "MAIN_MENU",
                 "available_actions": ["confirm_modal"],
             }
         elif action == "confirm_modal":
+            assert parameters == {"expected_state_revision": revision}
             self._state = {
+                "state_revision": revision + 1,
                 "screen": "MAIN_MENU",
                 "available_actions": ["open_character_select"],
             }
         elif action == "open_character_select":
+            assert parameters == {"expected_state_revision": revision}
             self._state = {
+                "state_revision": revision + 1,
                 "screen": "CHARACTER_SELECT",
                 "available_actions": ["select_character", "set_seed", "embark"],
                 "character_select": {
@@ -96,11 +136,17 @@ class ScriptedClient:
                 },
             }
         elif action == "select_character":
+            assert parameters["expected_state_revision"] == revision
             self._state["character_select"]["selected_character_id"] = "DEFECT"
+            self._state["state_revision"] = revision + 1
         elif action == "set_seed":
+            assert parameters["expected_state_revision"] == revision
             self._state["character_select"]["seed"] = parameters["game_seed"]
+            self._state["state_revision"] = revision + 1
         elif action == "embark":
+            assert parameters == {"expected_state_revision": revision}
             self._state = {
+                "state_revision": revision + 1,
                 "screen": "EVENT",
                 "available_actions": ["choose_event_option", "save_and_quit"],
                 "run": {
@@ -134,15 +180,24 @@ class ScriptedClient:
         elif action == "run_console_command":
             command = parameters["command"]
             if command.startswith("scenariofight"):
-                self._state = _combat_state(current_hp=70, max_hp=70)
+                self._state = _combat_state(
+                    current_hp=70,
+                    max_hp=70,
+                    state_revision=revision + 1,
+                )
                 self._state["available_actions"] = ["save_and_quit"]
                 self._battle_is_settling = True
                 response_state = self._state
             elif command.startswith("loadout hp="):
                 assert "end_turn" in self._state["available_actions"]
-                self._state = _combat_state(current_hp=41, max_hp=70)
+                self._state = _combat_state(
+                    current_hp=41,
+                    max_hp=70,
+                    state_revision=revision + 1,
+                )
             else:
                 assert command.startswith("loadout cards=")
+                self._state["state_revision"] = revision + 1
         else:
             raise AssertionError(f"预期外动作: {action}")
         pending = action in {"save_and_quit", "choose_event_option"} or (
@@ -184,13 +239,19 @@ def test_reset_replaces_stale_run_and_returns_verified_battle() -> None:
     assert result.state["screen"] == "COMBAT"
     assert result.snapshot.enemies[0].enemy_id == "DAMP_CULTIST"
     assert client.actions == [
-        ("save_and_quit", {}),
-        ("abandon_run", {}),
-        ("confirm_modal", {}),
-        ("open_character_select", {}),
-        ("select_character", {"option_index": 4}),
-        ("set_seed", {"game_seed": "ABCDEF1234"}),
-        ("embark", {}),
+        ("save_and_quit", {"expected_state_revision": 1}),
+        ("abandon_run", {"expected_state_revision": 3}),
+        ("confirm_modal", {"expected_state_revision": 4}),
+        ("open_character_select", {"expected_state_revision": 5}),
+        (
+            "select_character",
+            {"expected_state_revision": 6, "option_index": 4},
+        ),
+        (
+            "set_seed",
+            {"expected_state_revision": 7, "game_seed": "ABCDEF1234"},
+        ),
+        ("embark", {"expected_state_revision": 8}),
         (
             "run_console_command",
             {
@@ -208,7 +269,12 @@ def test_reset_replaces_stale_run_and_returns_verified_battle() -> None:
     ]
 
 
-def _combat_state(*, current_hp: int, max_hp: int) -> dict[str, Any]:
+def _combat_state(
+    *,
+    current_hp: int,
+    max_hp: int,
+    state_revision: int,
+) -> dict[str, Any]:
     """创建脚本重置器最终应返回的战斗状态。
 
     Args:
@@ -219,6 +285,7 @@ def _combat_state(*, current_hp: int, max_hp: int) -> dict[str, Any]:
         dict[str, Any]: 已装载场景内容的战斗状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "COMBAT",
         "in_combat": True,
         "turn": 1,

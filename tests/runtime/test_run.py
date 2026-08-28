@@ -76,25 +76,38 @@ class WholeRunGame:
         if action == "choose_map_node":
             self._map_choices += 1
             state = (
-                _combat_state() if self._map_choices == 1 else _game_over_state(True)
+                _combat_state(state_revision=2)
+                if self._map_choices == 1
+                else _game_over_state(True, state_revision=6)
             )
             return _completed(state)
         if action == "end_turn":
-            return _completed(_reward_state())
+            return _completed(_reward_state(state_revision=3))
         if action == "claim_reward":
             return {"status": "pending", "stable": False}
         raise AssertionError(f"预期外动作: {action}")
 
-    def state(self) -> dict[str, Any]:
-        """奖励结算后先返回过渡地图帧，再返回可选节点地图。
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """奖励结算后先接收过渡地图事件，再接收可选节点地图。
 
         Returns:
-            dict[str, Any]: 当前轮询次数对应的地图状态。
+            dict[str, Any]: 当前事件次数对应的地图状态。
         """
+        assert timeout > 0
         self.state_calls += 1
         if self.state_calls == 1:
-            return _map_state(available_actions=["save_and_quit"])
-        return _map_state()
+            assert after_revision == 3
+            return _map_state(
+                available_actions=["save_and_quit"],
+                state_revision=4,
+            )
+        assert after_revision == 4
+        return _map_state(state_revision=5)
 
 
 class StaticGame:
@@ -164,16 +177,22 @@ class ConflictingStrategicGame:
         self.action_calls += 1
         if self.action_calls == 1:
             raise _action_unavailable("choose_map_node", "MAP")
-        return _completed(_game_over_state(True))
+        return _completed(_game_over_state(True, state_revision=3))
 
-    def state(self) -> dict[str, Any]:
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
         """返回重新开放动作的地图状态。
 
         Returns:
             dict[str, Any]: 可再次交给战略模型的地图状态。
         """
+        assert timeout > 0
         self.state_calls += 1
-        return _map_state()
+        return _map_state(state_revision=after_revision + 1)
 
 
 class ShopLoopGame:
@@ -216,7 +235,12 @@ class ShopLoopGame:
             return _completed(self._shop_state())
         if action == "proceed":
             assert self._is_open is False
-            return _completed(_game_over_state(True))
+            return _completed(
+                _game_over_state(
+                    True,
+                    state_revision=len(self.actions) + 1,
+                )
+            )
         raise AssertionError(f"预期外动作: {action}")
 
     def state(self) -> dict[str, Any]:
@@ -234,7 +258,11 @@ class ShopLoopGame:
             dict[str, Any]: 金币不足的商店观测。
         """
         gold = len(self.actions) if self._state_changes else 0
-        return _shop_state(is_open=self._is_open, gold=gold)
+        return _shop_state(
+            is_open=self._is_open,
+            gold=gold,
+            state_revision=len(self.actions) + 1,
+        )
 
 
 def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
@@ -260,7 +288,6 @@ def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
     result = runtime.RunRunner(
         game,
         provider,
-        poll_interval=0,
         state_timeout=1,
     ).run(_map_state())
 
@@ -278,7 +305,7 @@ def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
         "claim_reward",
         "choose_map_node",
     ]
-    assert result.final_state == _game_over_state(True)
+    assert result.final_state == _game_over_state(True, state_revision=6)
     assert game.state_calls == 2
     assert all(
         tuple(message.role for message in provider.requests[index])
@@ -305,7 +332,6 @@ def test_run_runner_retries_temporary_strategic_action_conflict() -> None:
     result = runtime.RunRunner(
         game,
         provider,
-        poll_interval=0,
         state_timeout=1,
     ).run(_map_state())
 
@@ -373,7 +399,6 @@ def test_run_runner_times_out_while_state_stays_transient() -> None:
         runtime.RunRunner(
             StaticGame(state),
             provider,
-            poll_interval=0,
             state_timeout=0,
         ).run(state)
 
@@ -498,16 +523,19 @@ def _run_state() -> dict[str, Any]:
 def _map_state(
     *,
     available_actions: Sequence[str] = ("choose_map_node",),
+    state_revision: int = 1,
 ) -> dict[str, Any]:
     """构造一个最小地图状态。
 
     Args:
         available_actions (Sequence[str]): 当前地图开放的动作。
+        state_revision (int): 当前地图状态的 revision。
 
     Returns:
         dict[str, Any]: 与战略 Harness 兼容的地图状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "MAP",
         "in_combat": False,
         "available_actions": list(available_actions),
@@ -520,13 +548,14 @@ def _map_state(
     }
 
 
-def _combat_state() -> dict[str, Any]:
+def _combat_state(*, state_revision: int = 1) -> dict[str, Any]:
     """构造一个可以立即结束回合的最小战斗状态。
 
     Returns:
         dict[str, Any]: 与战斗 Harness 兼容的战斗状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "COMBAT",
         "in_combat": True,
         "turn": 1,
@@ -548,13 +577,14 @@ def _combat_state() -> dict[str, Any]:
     }
 
 
-def _reward_state() -> dict[str, Any]:
+def _reward_state(*, state_revision: int = 1) -> dict[str, Any]:
     """构造一个可以领取金币的战后奖励状态。
 
     Returns:
         dict[str, Any]: 与战略 Harness 兼容的奖励状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "REWARD",
         "in_combat": False,
         "available_actions": ["claim_reward"],
@@ -563,12 +593,18 @@ def _reward_state() -> dict[str, Any]:
     }
 
 
-def _shop_state(*, is_open: bool = False, gold: int = 0) -> dict[str, Any]:
+def _shop_state(
+    *,
+    is_open: bool = False,
+    gold: int = 0,
+    state_revision: int = 1,
+) -> dict[str, Any]:
     """构造库存固定且没有任何可购买项目的商店状态。
 
     Args:
         is_open (bool): 当前是否打开商店库存。
         gold (int): 用于区分测试观测的当前金币数。
+        state_revision (int): 当前商店状态的 revision。
 
     Returns:
         dict[str, Any]: 与战略 Harness 兼容的商店状态。
@@ -576,6 +612,7 @@ def _shop_state(*, is_open: bool = False, gold: int = 0) -> dict[str, Any]:
     run = _run_state()
     run["gold"] = gold
     return {
+        "state_revision": state_revision,
         "screen": "SHOP",
         "in_combat": False,
         "available_actions": (
@@ -605,16 +642,22 @@ def _shop_state(*, is_open: bool = False, gold: int = 0) -> dict[str, Any]:
     }
 
 
-def _game_over_state(victory: bool) -> dict[str, Any]:
+def _game_over_state(
+    victory: bool,
+    *,
+    state_revision: int = 1,
+) -> dict[str, Any]:
     """构造胜利或死亡的游戏结束状态。
 
     Args:
         victory (bool): 是否为通关胜利。
+        state_revision (int): 当前终局状态的 revision。
 
     Returns:
         dict[str, Any]: 与 Mod 原始字段一致的终局状态。
     """
     return {
+        "state_revision": state_revision,
         "screen": "GAME_OVER",
         "available_actions": ["return_to_main_menu"],
         "run": _run_state(),

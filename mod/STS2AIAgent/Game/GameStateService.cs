@@ -55,11 +55,11 @@ namespace STS2AIAgent.Game;
 
 internal static class GameStateService
 {
-    private const int StateVersion = 12;
+    private const int StateVersion = 13;
     private const int AgentViewVersion = 4;
-    private static readonly TimeSpan CombatActionSnapshotStableDelay = TimeSpan.FromMilliseconds(200);
-    private static string? _lastCombatActionReadinessSignature;
-    private static DateTime _lastCombatActionReadinessSinceUtc = DateTime.MinValue;
+    private static CombatState? _readyCombatState;
+    private static int _readyCombatRound = -1;
+    private static int _readyPlayerTurn = -1;
 
     public static GameStatePayload BuildStatePayload() =>
         BuildStatePayload(null);
@@ -100,7 +100,7 @@ internal static class GameStateService
         var modal = BuildModalPayload(currentScreen);
         var gameOver = BuildGameOverPayload(currentScreen, runState);
 
-        return new GameStatePayload
+        return GameStateRevisionTracker.Stamp(new GameStatePayload
         {
             state_version = StateVersion,
             run_id = runState?.Rng.StringSeed ?? "run_unknown",
@@ -150,7 +150,7 @@ internal static class GameStateService
                 bundles,
                 modal,
                 gameOver)
-        };
+        });
     }
 
     private static SessionPayload BuildSessionPayload(IScreenContext? currentScreen, RunState? runState)
@@ -1608,7 +1608,7 @@ internal static class GameStateService
 
         if (currentScreen is NChooseACardSelectionScreen)
         {
-            // The banner tracks the hovered card's rules, not a stable selection prompt.
+            // 提示条展示的是鼠标悬停卡牌的规则，并不是稳定的选择提示。
             return null;
         }
 
@@ -2131,9 +2131,14 @@ internal static class GameStateService
         me = null;
         combatRoom = null;
 
-        if (combatState == null || currentScreen is not NCombatRoom room)
+        if (combatState == null)
         {
-            ResetCombatActionReadiness();
+            MarkCombatTurnClosed();
+            return false;
+        }
+
+        if (currentScreen is not NCombatRoom room)
+        {
             return false;
         }
 
@@ -2143,45 +2148,46 @@ internal static class GameStateService
             CombatManager.Instance.IsOverOrEnding ||
             CombatManager.Instance.PlayerActionsDisabled)
         {
-            ResetCombatActionReadiness();
+            if (!CombatManager.Instance.IsInProgress ||
+                CombatManager.Instance.IsOverOrEnding)
+            {
+                MarkCombatTurnClosed();
+            }
             return false;
         }
 
         if (combatRoom.Mode != CombatRoomMode.ActiveCombat)
         {
-            ResetCombatActionReadiness();
             return false;
         }
 
         var hand = combatRoom.Ui?.Hand;
         if (hand == null || hand.InCardPlay || hand.IsInCardSelection || hand.CurrentMode != MegaCrit.Sts2.Core.Nodes.Combat.NPlayerHand.Mode.Play)
         {
-            ResetCombatActionReadiness();
             return false;
         }
 
         me = GetLocalPlayer(combatState);
         if (me == null || !me.Creature.IsAlive)
         {
-            ResetCombatActionReadiness();
+            MarkCombatTurnClosed();
             return false;
         }
 
         GameActionService.SyncCardPlayCounters(combatState.RoundNumber);
         if (!IsLocalCombatTurnReady(me))
         {
-            ResetCombatActionReadiness();
             return false;
         }
 
-        if (!IsCombatActionSnapshotStable(combatState, me))
+        if (!IsRecordedCombatTurnReady(combatState, me) ||
+            !GameActionService.AreGameActionsSettled())
         {
             return false;
         }
 
         if (!IsPlayerActionPhase(combatState, me))
         {
-            ResetCombatActionReadiness();
             return false;
         }
 
@@ -2262,49 +2268,13 @@ internal static class GameStateService
         return true;
     }
 
-    private static bool IsCombatActionSnapshotStable(CombatState combatState, Player me)
-    {
-        if (!GameActionService.AreGameActionsSettled())
-        {
-            ResetCombatActionReadiness();
-            return false;
-        }
-
-        var signature = BuildCombatActionReadinessSignature(combatState, me);
-        var now = DateTime.UtcNow;
-
-        if (!string.Equals(signature, _lastCombatActionReadinessSignature, StringComparison.Ordinal))
-        {
-            _lastCombatActionReadinessSignature = signature;
-            _lastCombatActionReadinessSinceUtc = now;
-            return false;
-        }
-
-        return now - _lastCombatActionReadinessSinceUtc >= CombatActionSnapshotStableDelay;
-    }
-
-    private static string BuildCombatActionReadinessSignature(CombatState combatState, Player me)
+    private static bool IsRecordedCombatTurnReady(CombatState combatState, Player me)
     {
         var playerCombatState = me.PlayerCombatState;
-        var handCards = playerCombatState?.Hand.Cards.ToList() ?? new List<CardModel>();
-        var handSignature = string.Join(
-            ",",
-            handCards.Select(card => $"{card.Id.Entry}:{card.Pile?.Type.ToString() ?? "Unknown"}"));
-
-        return string.Join(
-            "|",
-            combatState.RoundNumber,
-            playerCombatState?.TurnNumber ?? 0,
-            playerCombatState?.Energy ?? 0,
-            playerCombatState?.Stars ?? 0,
-            handCards.Count,
-            handSignature);
-    }
-
-    private static void ResetCombatActionReadiness()
-    {
-        _lastCombatActionReadinessSignature = null;
-        _lastCombatActionReadinessSinceUtc = DateTime.MinValue;
+        return ReferenceEquals(combatState, _readyCombatState) &&
+            combatState.RoundNumber == _readyCombatRound &&
+            playerCombatState != null &&
+            playerCombatState.TurnNumber == _readyPlayerTurn;
     }
 
     public static NEndTurnButton? GetEndTurnButton(NCombatRoom? combatRoom)
@@ -2636,6 +2606,45 @@ internal static class GameStateService
             end_turn_will_kill_player = lethalRisks.Any(risk => risk.will_kill_player),
             lethal_risks = lethalRisks
         };
+    }
+
+    /// <summary>
+    /// CombatManager 只会在抽牌、回合开始钩子与 AutoPrePlay 全部完成后发布
+    /// TurnStarted。以该事件为动作窗口边界，避免把中途短暂进入出牌阶段的
+    /// 状态暴露给模型。
+    /// </summary>
+    internal static void MarkCombatTurnStarted(CombatState combatState)
+    {
+        Player? me;
+        try
+        {
+            me = GetLocalPlayer(combatState);
+        }
+        catch (InvalidOperationException)
+        {
+            // 战斗清理或多人切换期间，可能会短暂出现没有本地玩家的状态。
+            // 就绪状态观测绝不能因此打断引擎事件。
+            MarkCombatTurnClosed();
+            return;
+        }
+
+        if (combatState.CurrentSide != CombatSide.Player ||
+            me?.PlayerCombatState == null)
+        {
+            MarkCombatTurnClosed();
+            return;
+        }
+
+        _readyCombatState = combatState;
+        _readyCombatRound = combatState.RoundNumber;
+        _readyPlayerTurn = me.PlayerCombatState.TurnNumber;
+    }
+
+    internal static void MarkCombatTurnClosed()
+    {
+        _readyCombatState = null;
+        _readyCombatRound = -1;
+        _readyPlayerTurn = -1;
     }
 
     private static CombatCompanionPayload? BuildOstyPayload(Player player)
@@ -5865,6 +5874,8 @@ internal static class GameStateService
 internal sealed class GameStatePayload
 {
     public int state_version { get; init; }
+
+    public long state_revision { get; set; }
 
     public string run_id { get; init; } = "run_unknown";
 

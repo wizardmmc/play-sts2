@@ -11,9 +11,19 @@ namespace STS2AIAgent.Server;
 internal static class Router
 {
     private const string ServiceName = "sts2-ai-agent";
-    private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.8.0-rlsts2.39";
+    private const string ProtocolVersion = "2026-08-28-v2";
+    private const string ModVersion = "0.8.0-rlsts2.45";
     private const string LogPrefix = "[STS2AIAgent.Router]";
+    private const int MaxEventStreamTimeoutMs = 86_400_000;
+
+    private static readonly HashSet<string> RevisionOptionalActions = new(
+        StringComparer.OrdinalIgnoreCase)
+    {
+        "run_console_command",
+        "save_and_quit",
+        "abandon_run",
+        "return_to_main_menu"
+    };
 
     private static long _requestCounter;
 
@@ -53,7 +63,9 @@ internal static class Router
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/state")
             {
+                var generation = GameEventService.Instance.CaptureGeneration();
                 var state = await GameThread.InvokeAsync(GameStateService.BuildStatePayload);
+                GameEventService.Instance.ObserveState(state, generation);
                 await WriteJsonAsync(response, 200, new
                 {
                     ok = true,
@@ -113,7 +125,10 @@ internal static class Router
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/events/stream")
             {
-                statusCode = await HandleEventStreamAsync(response, cancellationToken);
+                statusCode = await HandleEventStreamAsync(
+                    request,
+                    response,
+                    cancellationToken);
                 return;
             }
 
@@ -129,10 +144,40 @@ internal static class Router
                 var actionResponse = await GameThread.InvokeAsync(async () =>
                 {
                     using var suppression = NativeUiActionRecorder.Suppress();
+                    var generation = GameEventService.Instance.CaptureGeneration();
                     var beforeState = GameStateService.BuildStatePayload();
+                    GameEventService.Instance.ObserveState(beforeState, generation);
+                    if (actionRequest.expected_state_revision == null &&
+                        RequiresStateRevision(actionRequest.action))
+                    {
+                        throw new ApiException(
+                            400,
+                            "missing_state_revision",
+                            "State-dependent actions require expected_state_revision.",
+                            new
+                            {
+                                action = actionRequest.action,
+                                current_state = beforeState
+                            });
+                    }
+                    if (actionRequest.expected_state_revision is long expectedRevision &&
+                        expectedRevision != beforeState.state_revision)
+                    {
+                        throw new ApiException(
+                            409,
+                            "stale_state",
+                            "Observed state revision is no longer current.",
+                            new
+                            {
+                                expected_state_revision = expectedRevision,
+                                actual_state_revision = beforeState.state_revision,
+                                current_state = beforeState
+                            },
+                            retryable: true);
+                    }
                     var result = await GameActionService.ExecuteAsync(actionRequest);
                     GameEventService.Instance.PublishActionExecuted(
-                        actionRequest, beforeState, result);
+                        actionRequest, beforeState, result, generation);
                     return result;
                 });
                 await WriteJsonAsync(response, 200, new
@@ -202,8 +247,15 @@ internal static class Router
         await response.OutputStream.WriteAsync(bytes);
     }
 
-    private static async Task<int> HandleEventStreamAsync(HttpListenerResponse response, CancellationToken cancellationToken)
+    private static async Task<int> HandleEventStreamAsync(
+        HttpListenerRequest request,
+        HttpListenerResponse response,
+        CancellationToken cancellationToken)
     {
+        var streamTimeout = ParseEventStreamTimeout(request);
+        var generation = GameEventService.Instance.CaptureGeneration();
+        var snapshot = await GameThread.InvokeAsync(GameStateService.BuildStatePayload);
+
         response.StatusCode = 200;
         response.ContentType = "text/event-stream";
         response.ContentEncoding = Encoding.UTF8;
@@ -212,21 +264,37 @@ internal static class Router
         response.Headers["Connection"] = "keep-alive";
         response.Headers["X-Accel-Buffering"] = "no";
 
-        using var subscription = GameEventService.Instance.Subscribe();
+        using var subscription = GameEventService.Instance.Subscribe(
+            snapshot, generation);
+        using var streamWaitCts = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        var streamWaitToken = streamWaitCts.Token;
 
         try
         {
             await WriteSseCommentAsync(response, "stream opened");
+            var heartbeat = Task.Delay(TimeSpan.FromSeconds(15), streamWaitToken);
+            var streamDeadline = streamTimeout.HasValue
+                ? Task.Delay(streamTimeout.Value, streamWaitToken)
+                : Task.Delay(Timeout.InfiniteTimeSpan, streamWaitToken);
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                var waitForEvent = subscription.Reader.WaitToReadAsync(cancellationToken).AsTask();
-                var heartbeat = Task.Delay(TimeSpan.FromSeconds(15), cancellationToken);
-                var completedTask = await Task.WhenAny(waitForEvent, heartbeat);
+                var waitForEvent = subscription.Reader.WaitToReadAsync(streamWaitToken).AsTask();
+                var completedTask = await Task.WhenAny(
+                    waitForEvent,
+                    heartbeat,
+                    streamDeadline);
+
+                if (completedTask == streamDeadline)
+                {
+                    return 200;
+                }
 
                 if (completedTask == heartbeat)
                 {
                     await WriteSseCommentAsync(response, "heartbeat");
+                    heartbeat = Task.Delay(TimeSpan.FromSeconds(15), streamWaitToken);
                     continue;
                 }
 
@@ -262,6 +330,38 @@ internal static class Router
             // 响应流已经关闭。
             return 200;
         }
+        finally
+        {
+            streamWaitCts.Cancel();
+        }
+    }
+
+    private static bool RequiresStateRevision(string? action)
+    {
+        var normalized = action?.Trim();
+        return !string.IsNullOrEmpty(normalized) &&
+               !RevisionOptionalActions.Contains(normalized);
+    }
+
+    private static TimeSpan? ParseEventStreamTimeout(HttpListenerRequest request)
+    {
+        var raw = request.QueryString["timeout_ms"];
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(raw, out var timeoutMs) ||
+            timeoutMs < 1 ||
+            timeoutMs > MaxEventStreamTimeoutMs)
+        {
+            throw new ApiException(
+                400,
+                "invalid_request",
+                $"timeout_ms must be between 1 and {MaxEventStreamTimeoutMs}.");
+        }
+
+        return TimeSpan.FromMilliseconds(timeoutMs);
     }
 
     private static async Task WriteSseEventAsync(HttpListenerResponse response, GameEventEnvelope envelope)

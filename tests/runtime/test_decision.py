@@ -79,6 +79,7 @@ def test_decision_engine_executes_model_action() -> None:
         assert json.loads(request.content) == {
             "action": "play_card",
             "card_index": 0,
+            "expected_state_revision": 41,
             "target_index": 1,
         }
         return httpx.Response(200, json={"ok": True, "data": action_result})
@@ -293,7 +294,7 @@ def test_decision_engine_retries_invalid_model_output() -> None:
         max_retries=1,
     )
 
-    assert game.actions == [("end_turn", {})]
+    assert game.actions == [("end_turn", {"expected_state_revision": 41})]
     assert tuple(reply.text for reply in step.replies) == (
         "应该结束回合",
         "ACTION: end_turn",
@@ -308,6 +309,81 @@ def test_decision_engine_retries_invalid_model_output() -> None:
     assert "模型输出必须以 ACTION: 开头" in provider.requests[1][-1].content
 
 
+def test_decision_engine_rejects_dead_enemy_target_before_mod_request() -> None:
+    """目标不在卡牌合法索引中时先反馈模型，不向 Mod 提交必败请求。"""
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(["ACTION: play_card 0 0", "ACTION: play_card 0 1"])
+    game = RecordingGame()
+    state = _combat_state()
+    state["combat"]["hand"][0]["requires_target"] = True
+    state["combat"]["enemies"].insert(
+        0,
+        {
+            "index": 0,
+            "name": "已死亡敌人",
+            "current_hp": 0,
+            "max_hp": 20,
+            "is_alive": False,
+        },
+    )
+
+    step = runtime.DecisionEngine(game, provider).step(state, max_retries=1)
+
+    assert game.actions == [
+        (
+            "play_card",
+            {
+                "expected_state_revision": 41,
+                "card_index": 0,
+                "target_index": 1,
+            },
+        )
+    ]
+    assert step.retry_errors == ("target_index 0 不在合法目标 [1]",)
+    assert "合法目标 [1]" in provider.requests[1][-1].content
+
+
+def test_decision_engine_rejects_targeted_card_without_legal_targets() -> None:
+    """需要目标但没有合法目标时先反馈模型，不向 Mod 提交必败请求。"""
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(["ACTION: play_card 0 0", "ACTION: end_turn"])
+    game = RecordingGame()
+    state = _combat_state()
+    state["combat"]["hand"][0]["requires_target"] = True
+    state["combat"]["hand"][0]["valid_target_indices"] = []
+
+    step = runtime.DecisionEngine(game, provider).step(state, max_retries=1)
+
+    assert game.actions == [
+        ("end_turn", {"expected_state_revision": 41}),
+    ]
+    assert step.retry_errors == ("卡牌 [0] 当前没有合法目标",)
+    assert "当前没有合法目标" in provider.requests[1][-1].content
+
+
+def test_decision_engine_allows_card_that_does_not_require_target() -> None:
+    """无需目标的卡牌不应被本地目标校验误拒绝。"""
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = ReplyQueue(["ACTION: play_card 0"])
+    game = RecordingGame()
+    state = _combat_state()
+    state["combat"]["hand"][0]["requires_target"] = False
+    state["combat"]["hand"][0]["valid_target_indices"] = []
+
+    step = runtime.DecisionEngine(game, provider).step(state)
+
+    assert game.actions == [
+        (
+            "play_card",
+            {
+                "expected_state_revision": 41,
+                "card_index": 0,
+            },
+        )
+    ]
+    assert step.retry_errors == ()
+
+
 @pytest.mark.parametrize(
     ("state", "replies", "code", "message", "expected_actions"),
     [
@@ -317,8 +393,15 @@ def test_decision_engine_retries_invalid_model_output() -> None:
             "invalid_action",
             "Card cannot be played in the current state.",
             [
-                ("play_card", {"card_index": 0, "target_index": 1}),
-                ("end_turn", {}),
+                (
+                    "play_card",
+                    {
+                        "expected_state_revision": 41,
+                        "card_index": 0,
+                        "target_index": 1,
+                    },
+                ),
+                ("end_turn", {"expected_state_revision": 41}),
             ],
         ),
         (
@@ -326,7 +409,13 @@ def test_decision_engine_retries_invalid_model_output() -> None:
             ["ACTION: claim_reward 0", "ACTION: proceed"],
             "invalid_action",
             "The selected reward is not claimable in the current state.",
-            [("claim_reward", {"option_index": 0}), ("proceed", {})],
+            [
+                (
+                    "claim_reward",
+                    {"expected_state_revision": 42, "option_index": 0},
+                ),
+                ("proceed", {"expected_state_revision": 42}),
+            ],
         ),
         (
             "combat",
@@ -334,8 +423,15 @@ def test_decision_engine_retries_invalid_model_output() -> None:
             "invalid_target",
             "Action is not available in the current state.",
             [
-                ("play_card", {"card_index": 0, "target_index": 1}),
-                ("end_turn", {}),
+                (
+                    "play_card",
+                    {
+                        "expected_state_revision": 41,
+                        "card_index": 0,
+                        "target_index": 1,
+                    },
+                ),
+                ("end_turn", {"expected_state_revision": 41}),
             ],
         ),
     ],
@@ -401,8 +497,22 @@ def test_decision_engine_stops_after_rejected_action_retry_limit() -> None:
         )
 
     assert game.actions == [
-        ("play_card", {"card_index": 0, "target_index": 1}),
-        ("play_card", {"card_index": 0, "target_index": 1}),
+        (
+            "play_card",
+            {
+                "expected_state_revision": 41,
+                "card_index": 0,
+                "target_index": 1,
+            },
+        ),
+        (
+            "play_card",
+            {
+                "expected_state_revision": 41,
+                "card_index": 0,
+                "target_index": 1,
+            },
+        ),
     ]
     assert raised.value.errors == (
         f"Mod 拒绝动作: {message}",
@@ -536,6 +646,7 @@ def _combat_state() -> dict[str, Any]:
         dict[str, Any]: 可以打出第 0 张牌攻击敌人 1 的战斗状态。
     """
     return {
+        "state_revision": 41,
         "screen": "COMBAT",
         "in_combat": True,
         "turn": 1,
@@ -605,6 +716,7 @@ def _reward_state() -> dict[str, Any]:
         dict[str, Any]: 可以验证奖励业务拒绝纠错的战略状态。
     """
     return {
+        "state_revision": 42,
         "screen": "REWARD",
         "in_combat": False,
         "available_actions": ["claim_reward", "proceed"],

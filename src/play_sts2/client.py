@@ -1,6 +1,8 @@
 """访问 STS2 Agent Mod 暴露的本地 HTTP API。"""
 
 import json
+import math
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from threading import Event
@@ -266,6 +268,86 @@ class GameClient:
                     continue
                 value = line[5:]
                 data_lines.append(value.removeprefix(" "))
+
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """阻塞等待 SSE 交付一份更新的完整状态。
+
+        该方法只建立一条事件流连接，不按固定时间间隔请求 ``/state``。
+        ``stream_ready`` 携带的当前快照也参与比较，因此连接建立前已经发生的
+        状态变化不会丢失。
+
+        Args:
+            after_revision (int): 调用方已经处理的最后状态 revision。
+            timeout (float): 等待更新事件的最长秒数。
+
+        Raises:
+            ValueError: revision 或超时参数无效。
+            TimeoutError: 事件流在新 revision 到达前结束或超时。
+            httpx.HTTPStatusError: Mod 拒绝事件流请求。
+            ProtocolError: SSE 或其中的状态 revision 违反协议。
+
+        Returns:
+            dict[str, Any]: revision 严格大于 ``after_revision`` 的完整状态。
+        """
+        if (
+            isinstance(after_revision, bool)
+            or not isinstance(after_revision, int)
+            or after_revision < 0
+        ):
+            raise ValueError("after_revision must be a non-negative integer")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+        path = "/events/stream"
+        deadline = time.monotonic() + timeout
+        timeout_ms = max(1, math.ceil(timeout * 1000))
+        try:
+            with self._http.stream(
+                "GET",
+                path,
+                params={"timeout_ms": timeout_ms},
+                headers={"Accept": "text/event-stream"},
+                timeout=httpx.Timeout(timeout),
+            ) as response:
+                response.raise_for_status()
+                data_lines: list[str] = []
+                for line in response.iter_lines():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("timed out waiting for a newer game state")
+                    if not line:
+                        if not data_lines:
+                            continue
+                        raw_data = "\n".join(data_lines)
+                        data_lines.clear()
+                        try:
+                            payload = json.loads(raw_data)
+                        except json.JSONDecodeError as exc:
+                            raise ProtocolError(f"invalid {path} response") from exc
+                        if not isinstance(payload, Mapping):
+                            raise ProtocolError(f"invalid {path} response")
+                        data = payload.get("data")
+                        state = data.get("state") if isinstance(data, Mapping) else None
+                        if not isinstance(state, Mapping):
+                            continue
+                        revision = state.get("state_revision")
+                        if isinstance(revision, bool) or not isinstance(revision, int):
+                            raise ProtocolError(f"invalid {path} response")
+                        if revision > after_revision:
+                            return dict(state)
+                        continue
+                    if line.startswith(":") or not line.startswith("data:"):
+                        continue
+                    value = line[5:]
+                    data_lines.append(value.removeprefix(" "))
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("timed out waiting for a newer game state") from exc
+
+        raise TimeoutError("event stream ended before a newer game state arrived")
 
     def execute_action(self, action: str, **parameters: Any) -> dict[str, Any]:
         """执行一个 Mod 当前允许的游戏动作。

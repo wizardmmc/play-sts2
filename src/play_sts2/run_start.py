@@ -4,7 +4,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from .client import GameClient
+from .client import GameClient, ProtocolError
 
 
 class RunStartError(RuntimeError):
@@ -40,7 +40,10 @@ def start_run(
 
     _require_action(state, "open_character_select")
     state = _action_state(
-        client.execute_action("open_character_select"),
+        client.execute_action(
+            "open_character_select",
+            expected_state_revision=_state_revision(state),
+        ),
         "open_character_select",
     )
 
@@ -70,7 +73,11 @@ def start_run(
 
     _require_action(state, "select_character")
     state = _action_state(
-        client.execute_action("select_character", option_index=option_index),
+        client.execute_action(
+            "select_character",
+            expected_state_revision=_state_revision(state),
+            option_index=option_index,
+        ),
         "select_character",
     )
     character_select = state.get("character_select")
@@ -85,17 +92,23 @@ def start_run(
     if seed is not None:
         _require_action(state, "set_seed")
         state = _action_state(
-            client.execute_action("set_seed", game_seed=seed),
+            client.execute_action(
+                "set_seed",
+                expected_state_revision=_state_revision(state),
+                game_seed=seed,
+            ),
             "set_seed",
         )
 
     _require_action(state, "embark")
+    revision = _state_revision(state)
     deadline = time.monotonic() + client.action_timeout
     state = _await_run_state(
         client,
-        client.execute_action("embark"),
+        client.execute_action("embark", expected_state_revision=revision),
         deadline,
         "embark",
+        after_revision=revision,
     )
     run = state.get("run")
     if not isinstance(run, Mapping) or run.get("character_id") != character_id:
@@ -126,12 +139,14 @@ def resume_run(client: GameClient) -> dict[str, Any]:
         raise RunStartError("游戏既不在局中，也不在主菜单")
 
     _require_action(state, "continue_run")
+    revision = _state_revision(state)
     deadline = time.monotonic() + client.action_timeout
     state = _await_run_state(
         client,
-        client.execute_action("continue_run"),
+        client.execute_action("continue_run", expected_state_revision=revision),
         deadline,
         "continue_run",
+        after_revision=revision,
     )
     if not isinstance(state.get("run"), Mapping):
         raise RunStartError("续局后没有取得运行状态")
@@ -175,7 +190,13 @@ def _adjust_ascension(
     while current != target:
         action = "increase_ascension" if current < target else "decrease_ascension"
         _require_action(current_state, action)
-        current_state = _action_state(client.execute_action(action), action)
+        current_state = _action_state(
+            client.execute_action(
+                action,
+                expected_state_revision=_state_revision(current_state),
+            ),
+            action,
+        )
         character_select = current_state.get("character_select")
         if not isinstance(character_select, Mapping):
             raise RunStartError("角色选择状态不可用")
@@ -230,6 +251,8 @@ def _await_run_state(
     result: Mapping[str, Any],
     deadline: float,
     action: str,
+    *,
+    after_revision: int,
 ) -> dict[str, Any]:
     """等待已排队的开局或续局动作产生运行状态。
 
@@ -238,11 +261,12 @@ def _await_run_state(
         result (Mapping[str, Any]): 开局或续局动作的即时结果。
         deadline (float): 动作 HTTP 请求与状态等待共享的单调时钟截止点。
         action (str): 当前等待的动作名称。
+        after_revision (int): 提交动作前已经处理的状态版本。
 
     Raises:
         RunStartError: 动作既未完成也未排队，或新局状态等待超时。
-        httpx.HTTPStatusError: 轮询状态时 Mod 返回非成功 HTTP 状态码。
-        ProtocolError: 轮询状态时 Mod 返回不符合客户端协议的响应。
+        httpx.HTTPStatusError: 状态事件连接被 Mod 拒绝。
+        ProtocolError: 状态事件违反客户端协议。
 
     Returns:
         dict[str, Any]: 已包含 ``run`` 对象的游戏状态。
@@ -252,9 +276,28 @@ def _await_run_state(
     if result.get("status") != "pending":
         raise RunStartError(f"动作未返回稳定状态: {action}")
 
-    while time.monotonic() < deadline:
-        state = client.state()
-        if isinstance(state.get("run"), Mapping):
+    raw_state = result.get("state")
+    state = dict(raw_state) if isinstance(raw_state, Mapping) else None
+    revision = _state_revision(state) if state is not None else after_revision
+    while True:
+        if state is not None and isinstance(state.get("run"), Mapping):
             return state
-        time.sleep(0.2)
-    raise RunStartError(f"等待运行状态超时: {action}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RunStartError(f"等待运行状态超时: {action}")
+        try:
+            state = client.wait_for_state(
+                after_revision=revision,
+                timeout=remaining,
+            )
+        except TimeoutError as exc:
+            raise RunStartError(f"等待运行状态超时: {action}") from exc
+        revision = _state_revision(state)
+
+
+def _state_revision(state: Mapping[str, Any]) -> int:
+    """读取开局动作并发保护所需的状态 revision。"""
+    revision = state.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ProtocolError("game state is missing a valid state_revision")
+    return revision

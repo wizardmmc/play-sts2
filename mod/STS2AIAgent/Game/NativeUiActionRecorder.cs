@@ -48,7 +48,10 @@ internal static class NativeUiActionRecorder
     [ThreadStatic] private static int _buttonPatchDepth;
     [ThreadStatic] private static int _cardUiCommitDepth;
 
-    internal sealed record Capture(ActionRequest Request, GameStatePayload Before);
+    internal sealed record Capture(
+        ActionRequest Request,
+        GameStatePayload Before,
+        long LifecycleGeneration);
     private sealed record NativeAttempt(string Action, Capture? Capture);
     private sealed record GridCommitCapture(
         Capture[] Selections, NativeAttempt? Confirmation);
@@ -93,6 +96,7 @@ internal static class NativeUiActionRecorder
         if (Volatile.Read(ref _suppressionDepth) != 0) return null;
         try
         {
+            var generation = GameEventService.Instance.CaptureGeneration();
             var before = GameStateService.BuildStatePayload(
                 trustNativeUiGate ? action : null);
             if (!before.available_actions.Contains(action, StringComparer.Ordinal))
@@ -108,7 +112,7 @@ internal static class NativeUiActionRecorder
                 option_index = optionIndex,
                 target_index = targetIndex,
                 client_context = new { source = "human_ui", layer }
-            }, before);
+            }, before, generation);
         }
         catch { return null; }
     }
@@ -126,12 +130,13 @@ internal static class NativeUiActionRecorder
                     stable = false,
                     message = "Native UI action accepted.",
                     state = GameStateService.BuildStatePayload()
-                });
+                }, capture.LifecycleGeneration);
         }
         catch
         {
             CaptureGap(capture.Request.action ?? "unknown",
-                "native action publication failed");
+                "native action publication failed",
+                capture.LifecycleGeneration);
         }
     }
 
@@ -195,15 +200,20 @@ internal static class NativeUiActionRecorder
             target_index = targetIndex,
             command = request.command,
             client_context = request.client_context
-        }, capture.Before);
+        }, capture.Before, capture.LifecycleGeneration);
     }
 
-    private static void CaptureGap(string action, string reason)
+    private static void CaptureGap(
+        string action,
+        string reason,
+        long? generation = null)
     {
-        if (Volatile.Read(ref _suppressionDepth) != 0) return;
+        if (Volatile.Read(ref _suppressionDepth) != 0 || generation == null)
+            return;
         try
         {
-            GameEventService.Instance.PublishNativeUiCaptureGap(action, reason);
+            GameEventService.Instance.PublishNativeUiCaptureGap(
+                action, reason, generation.Value);
         }
         catch { }
     }

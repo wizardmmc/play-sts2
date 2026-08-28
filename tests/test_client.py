@@ -305,6 +305,39 @@ def test_iter_events_rejects_non_object_payload() -> None:
         list(client.iter_events(Event()))
 
 
+def test_wait_for_state_blocks_on_sse_until_revision_advances() -> None:
+    """用单条 SSE 连接等待新 revision，不重复请求 ``/state``。"""
+    old_state = {"state_revision": 7, "screen": "COMBAT"}
+    new_state = {"state_revision": 8, "screen": "REWARD"}
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        assert request.method == "GET"
+        assert request.url.path == "/events/stream"
+        assert request.url.params["timeout_ms"] == "3000"
+        assert request.headers["accept"] == "text/event-stream"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                "event: stream_ready\n"
+                f"data: {json.dumps({'type': 'stream_ready', 'data': {'state': old_state}})}\n\n"
+                "event: state_changed\n"
+                f"data: {json.dumps({'type': 'state_changed', 'data': {'state': new_state}})}\n\n"
+            ).encode(),
+        )
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        state = client.wait_for_state(after_revision=7, timeout=3.0)
+
+    assert state == new_state
+    assert requests == ["/events/stream"]
+
+
 def test_available_actions_reads_typed_descriptors() -> None:
     """将动作端点解析为包含屏幕归属的不可变动作集合。"""
 
@@ -403,6 +436,7 @@ def test_execute_action_posts_parameters_and_returns_result() -> None:
         assert request.extensions["timeout"]["read"] == 30.0
         assert json.loads(request.content) == {
             "action": "select_character",
+            "expected_state_revision": 41,
             "option_index": 2,
         }
         return httpx.Response(
@@ -420,7 +454,11 @@ def test_execute_action_posts_parameters_and_returns_result() -> None:
         "http://127.0.0.1:8080",
         transport=transport,
     ) as client:
-        result = client.execute_action("select_character", option_index=2)
+        result = client.execute_action(
+            "select_character",
+            expected_state_revision=41,
+            option_index=2,
+        )
 
     assert result == action_data
 

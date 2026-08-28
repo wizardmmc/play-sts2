@@ -106,7 +106,10 @@ class BattleResetter:
             )
             if action is None:
                 raise BattleResetError("无法清理当前游戏状态")
-            result = self._client.execute_action(action)
+            result = self._client.execute_action(
+                action,
+                expected_state_revision=_state_revision(state),
+            )
             state = _action_state(result, action)
             if result.get("stable") is not True:
                 state = self._await_cleanup_phase(state, action)
@@ -153,14 +156,22 @@ class BattleResetter:
         }[action]
         deadline = time.monotonic() + self._client.action_timeout
         state = dict(candidate)
-        while time.monotonic() < deadline:
+        revision = _state_revision(state)
+        while True:
             actions = state.get("available_actions")
             if isinstance(actions, list) and next_actions.intersection(actions):
                 return state
-            state = self._client.state()
-            if time.monotonic() < deadline:
-                time.sleep(0.2)
-        raise BattleResetError(f"等待动作状态迁移超时: {action}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BattleResetError(f"等待动作状态迁移超时: {action}")
+            try:
+                state = self._client.wait_for_state(
+                    after_revision=revision,
+                    timeout=remaining,
+                )
+            except TimeoutError as exc:
+                raise BattleResetError(f"等待动作状态迁移超时: {action}") from exc
+            revision = _state_revision(state)
 
     def _await_battle_ready(
         self,
@@ -179,7 +190,8 @@ class BattleResetter:
         """
         deadline = time.monotonic() + self._client.action_timeout
         state = dict(candidate)
-        while time.monotonic() < deadline:
+        revision = _state_revision(state)
+        while True:
             actions = state.get("available_actions")
             if (
                 state.get("screen") == "COMBAT"
@@ -188,10 +200,17 @@ class BattleResetter:
                 and "end_turn" in actions
             ):
                 return state
-            state = self._client.state()
-            if time.monotonic() < deadline:
-                time.sleep(0.2)
-        raise BattleResetError("等待战斗入口可操作状态超时")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BattleResetError("等待战斗入口可操作状态超时")
+            try:
+                state = self._client.wait_for_state(
+                    after_revision=revision,
+                    timeout=remaining,
+                )
+            except TimeoutError as exc:
+                raise BattleResetError("等待战斗入口可操作状态超时") from exc
+            revision = _state_revision(state)
 
 
 def _loadout_command(scenario: BattleScenario) -> str:
@@ -210,9 +229,7 @@ def _loadout_command(scenario: BattleScenario) -> str:
         potion_slots = scenario.potions + (None,) * (
             scenario.potion_slots - len(scenario.potions)
         )
-        parts.append(
-            "potions=" + ",".join(potion or "_" for potion in potion_slots)
-        )
+        parts.append("potions=" + ",".join(potion or "_" for potion in potion_slots))
     elif scenario.potions:
         parts.append(f"potions={','.join(scenario.potions)}")
     if scenario.potion_slots is not None:
@@ -238,3 +255,11 @@ def _action_state(result: Mapping[str, Any], action: str) -> dict[str, Any]:
     if not accepted or not isinstance(state, Mapping):
         raise BattleResetError(f"动作结果不可用: {action}")
     return dict(state)
+
+
+def _state_revision(state: Mapping[str, Any]) -> int:
+    """读取场景重置事件等待和动作保护使用的状态版本。"""
+    revision = state.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise BattleResetError("游戏状态缺少有效 state_revision")
+    return revision

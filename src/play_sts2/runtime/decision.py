@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from ..client import GameClient
+from ..client import GameClient, ProtocolError
 from ..harness import (
     ActionParseError,
     HarnessAction,
@@ -129,6 +129,7 @@ class DecisionEngine:
         Returns:
             DecisionStep: 本次闭环的消息、回复、动作和 Mod 结果。
         """
+        revision = state_revision(state)
         observation = build_observation(state)
         user_content = observation.text
         if notice:
@@ -152,6 +153,7 @@ class DecisionEngine:
             replies.append(reply)
             try:
                 action = parse_action(reply.text, observation.available_actions)
+                _validate_action_for_state(action, state)
             except ActionParseError as exc:
                 errors.append(str(exc))
                 if attempt == max_retries:
@@ -167,6 +169,7 @@ class DecisionEngine:
             try:
                 action_result = self._game.execute_action(
                     action.name,
+                    expected_state_revision=revision,
                     **action.parameters,
                 )
             except httpx.HTTPStatusError as exc:
@@ -197,6 +200,49 @@ class DecisionEngine:
         raise RuntimeError("模型动作循环意外结束")
 
 
+def _validate_action_for_state(
+    action: HarnessAction,
+    state: Mapping[str, Any],
+) -> None:
+    """在提交 Mod 前核对模型动作引用的当前状态索引。"""
+    if action.name != "play_card":
+        return
+
+    card_index = action.parameters["card_index"]
+    hand = (state.get("combat") or {}).get("hand") or []
+    card = next(
+        (
+            candidate
+            for fallback_index, candidate in enumerate(hand)
+            if isinstance(candidate, Mapping)
+            and candidate.get("index", fallback_index) == card_index
+        ),
+        None,
+    )
+    if card is None:
+        raise ActionParseError(f"card_index {card_index} 不在当前手牌中")
+    if card.get("playable") is False:
+        reason = card.get("unplayable_reason") or "未知原因"
+        raise ActionParseError(f"卡牌 [{card_index}] 当前不可使用: {reason}")
+    if card.get("requires_target") is not True:
+        return
+
+    valid_targets = [
+        target
+        for target in card.get("valid_target_indices") or []
+        if isinstance(target, int) and not isinstance(target, bool)
+    ]
+    if not valid_targets:
+        raise ActionParseError(f"卡牌 [{card_index}] 当前没有合法目标")
+    target_index = action.parameters.get("target_index")
+    if target_index is None:
+        raise ActionParseError(f"卡牌 [{card_index}] 需要目标，合法目标 {valid_targets}")
+    if target_index not in valid_targets:
+        raise ActionParseError(
+            f"target_index {target_index} 不在合法目标 {valid_targets}"
+        )
+
+
 def is_action_window_conflict(exc: httpx.HTTPStatusError) -> bool:
     """判断 Mod 是否因输入窗口短暂关闭而拒绝动作。
 
@@ -212,6 +258,32 @@ def is_action_window_conflict(exc: httpx.HTTPStatusError) -> bool:
         and error.get("code") == "invalid_action"
         and error.get("message") == _ACTION_WINDOW_MESSAGE
     )
+
+
+def stale_state_from_conflict(
+    exc: httpx.HTTPStatusError,
+) -> dict[str, Any] | None:
+    """从 Mod 的 revision 冲突中取得已在游戏线程读取的当前状态。"""
+    error = _mod_error(exc)
+    if not isinstance(error, Mapping) or error.get("code") != "stale_state":
+        return None
+    details = error.get("details")
+    if not isinstance(details, Mapping):
+        return None
+    current_state = details.get("current_state")
+    if not isinstance(current_state, Mapping):
+        return None
+    state = dict(current_state)
+    state_revision(state)
+    return state
+
+
+def state_revision(state: Mapping[str, Any]) -> int:
+    """读取动作并发控制所需的非负状态 revision。"""
+    revision = state.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ProtocolError("game state is missing a valid state_revision")
+    return revision
 
 
 def _model_action_rejection(exc: httpx.HTTPStatusError) -> str | None:

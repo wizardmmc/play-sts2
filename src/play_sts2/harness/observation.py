@@ -153,7 +153,11 @@ def _render_combat(state: Mapping[str, Any]) -> str:
         lines.extend(f"  {relic_state}" for relic_state in relic_ui_states)
 
     lines.append("敌人:")
-    lines.extend(_format_enemy(enemy) for enemy in combat.get("enemies") or [])
+    lines.extend(
+        _format_enemy(enemy)
+        for enemy in combat.get("enemies") or []
+        if enemy.get("is_alive") is not False
+    )
     lines.append("手牌:")
     lines.extend(f"  {_format_card(card)}" for card in combat.get("hand") or [])
     agent_combat = (state.get("agent_view") or {}).get("combat") or {}

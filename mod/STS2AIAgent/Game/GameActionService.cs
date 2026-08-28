@@ -5051,6 +5051,8 @@ internal sealed class ActionRequest
 {
     public string? action { get; init; }
 
+    public long? expected_state_revision { get; init; }
+
     public int? card_index { get; init; }
 
     public int? target_index { get; init; }

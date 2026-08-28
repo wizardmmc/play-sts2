@@ -19,10 +19,12 @@ def test_start_run_selects_requested_character_and_embarks() -> None:
         None: 此测试仅验证完整的最小开局流程。
     """
     initial_state = {
+        "state_revision": 1,
         "screen": "MAIN_MENU",
         "available_actions": ["open_character_select", "open_timeline"],
     }
     character_state = {
+        "state_revision": 2,
         "screen": "CHARACTER_SELECT",
         "available_actions": ["select_character", "embark"],
         "character_select": {
@@ -43,12 +45,14 @@ def test_start_run_selects_requested_character_and_embarks() -> None:
     }
     selected_state = {
         **character_state,
+        "state_revision": 3,
         "character_select": {
             **character_state["character_select"],
             "selected_character_id": "DEFECT",
         },
     }
     run_state = {
+        "state_revision": 4,
         "screen": "MAP",
         "run_id": "TEST-RUN",
         "available_actions": ["choose_map_node"],
@@ -79,7 +83,17 @@ def test_start_run_selects_requested_character_and_embarks() -> None:
         """
         nonlocal embark_pending
         if request.method == "GET" and request.url.path == "/state":
-            data = run_state if embark_pending else initial_state
+            data = initial_state
+        elif request.method == "GET" and request.url.path == "/events/stream":
+            assert request.url.params["timeout_ms"] == "30000"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    "event: stream_ready\n"
+                    f"data: {json.dumps({'type': 'stream_ready', 'data': {'state': run_state}})}\n\n"
+                ).encode(),
+            )
         else:
             assert request.method == "POST"
             assert request.url.path == "/action"
@@ -124,9 +138,13 @@ def test_start_run_selects_requested_character_and_embarks() -> None:
 
     assert result == run_state
     assert requests == [
-        {"action": "open_character_select"},
-        {"action": "select_character", "option_index": 4},
-        {"action": "embark"},
+        {"action": "open_character_select", "expected_state_revision": 1},
+        {
+            "action": "select_character",
+            "expected_state_revision": 2,
+            "option_index": 4,
+        },
+        {"action": "embark", "expected_state_revision": 3},
     ]
 
 
@@ -155,19 +173,24 @@ def test_start_run_rejects_locked_character_before_selection() -> None:
         """
         if request.method == "GET":
             data = {
+                "state_revision": 1,
                 "screen": "MAIN_MENU",
                 "available_actions": ["open_character_select"],
             }
         else:
             body = json.loads(request.content)
             requests.append(body)
-            assert body == {"action": "open_character_select"}
+            assert body == {
+                "action": "open_character_select",
+                "expected_state_revision": 1,
+            }
             data = {
                 "action": "open_character_select",
                 "status": "completed",
                 "stable": True,
                 "message": "Action completed.",
                 "state": {
+                    "state_revision": 2,
                     "screen": "CHARACTER_SELECT",
                     "available_actions": ["select_character", "embark"],
                     "character_select": {
@@ -203,7 +226,9 @@ def test_start_run_rejects_locked_character_before_selection() -> None:
     ):
         play_sts2.start_run(client, "DEFECT")
 
-    assert requests == [{"action": "open_character_select"}]
+    assert requests == [
+        {"action": "open_character_select", "expected_state_revision": 1}
+    ]
 
 
 def test_start_run_sets_ascension_and_seed_before_embark() -> None:
@@ -216,6 +241,7 @@ def test_start_run_sets_ascension_and_seed_before_embark() -> None:
         None: 此测试仅验证场景开局需要的确定性参数。
     """
     state = {
+        "state_revision": 1,
         "screen": "MAIN_MENU",
         "available_actions": ["open_character_select"],
     }
@@ -240,8 +266,10 @@ def test_start_run_sets_ascension_and_seed_before_embark() -> None:
             body = json.loads(request.content)
             requests.append(body)
             action = body["action"]
+            next_revision = state["state_revision"] + 1
             if action == "open_character_select":
                 state = {
+                    "state_revision": next_revision,
                     "screen": "CHARACTER_SELECT",
                     "available_actions": [
                         "select_character",
@@ -265,13 +293,17 @@ def test_start_run_sets_ascension_and_seed_before_embark() -> None:
                 }
             elif action == "select_character":
                 state["character_select"]["selected_character_id"] = "DEFECT"
+                state["state_revision"] = next_revision
             elif action == "increase_ascension":
                 state["character_select"]["ascension"] += 1
+                state["state_revision"] = next_revision
             elif action == "set_seed":
                 state["character_select"]["seed"] = body["game_seed"]
+                state["state_revision"] = next_revision
             else:
                 assert action == "embark"
                 state = {
+                    "state_revision": next_revision,
                     "screen": "EVENT",
                     "available_actions": ["choose_event_option", "save_and_quit"],
                     "run": {
@@ -306,12 +338,20 @@ def test_start_run_sets_ascension_and_seed_before_embark() -> None:
         "floor": 0,
     }
     assert requests == [
-        {"action": "open_character_select"},
-        {"action": "select_character", "option_index": 4},
-        {"action": "increase_ascension"},
-        {"action": "increase_ascension"},
-        {"action": "set_seed", "game_seed": "ABCDEF1234"},
-        {"action": "embark"},
+        {"action": "open_character_select", "expected_state_revision": 1},
+        {
+            "action": "select_character",
+            "expected_state_revision": 2,
+            "option_index": 4,
+        },
+        {"action": "increase_ascension", "expected_state_revision": 3},
+        {"action": "increase_ascension", "expected_state_revision": 4},
+        {
+            "action": "set_seed",
+            "expected_state_revision": 5,
+            "game_seed": "ABCDEF1234",
+        },
+        {"action": "embark", "expected_state_revision": 6},
     ]
 
 
@@ -325,6 +365,7 @@ def test_resume_run_continues_save_from_main_menu() -> None:
         None: 此测试验证保存局的恢复流程。
     """
     run_state = {
+        "state_revision": 3,
         "screen": "MAP",
         "available_actions": ["choose_map_node"],
         "run": {"character_id": "DEFECT", "floor": 3},
@@ -342,25 +383,34 @@ def test_resume_run_continues_save_from_main_menu() -> None:
             httpx.Response: 当前步骤对应的 Mod 协议响应。
         """
         nonlocal pending
-        if request.method == "GET":
-            data = (
-                run_state
-                if pending
-                else {
-                    "screen": "MAIN_MENU",
-                    "available_actions": ["continue_run"],
-                }
+        if request.method == "GET" and request.url.path == "/state":
+            data = {
+                "state_revision": 1,
+                "screen": "MAIN_MENU",
+                "available_actions": ["continue_run"],
+            }
+        elif request.method == "GET" and request.url.path == "/events/stream":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    "event: stream_ready\n"
+                    f"data: {json.dumps({'type': 'stream_ready', 'data': {'state': run_state}})}\n\n"
+                ).encode(),
             )
         else:
             body = json.loads(request.content)
             requests.append(body)
-            assert body == {"action": "continue_run"}
+            assert body == {
+                "action": "continue_run",
+                "expected_state_revision": 1,
+            }
             pending = True
             data = {
                 "action": "continue_run",
                 "status": "pending",
                 "stable": False,
-                "state": {"screen": "MAIN_MENU"},
+                "state": {"state_revision": 2, "screen": "MAIN_MENU"},
             }
         return httpx.Response(200, json={"ok": True, "data": data})
 
@@ -371,7 +421,7 @@ def test_resume_run_continues_save_from_main_menu() -> None:
         result = play_sts2.resume_run(client)
 
     assert result == run_state
-    assert requests == [{"action": "continue_run"}]
+    assert requests == [{"action": "continue_run", "expected_state_revision": 1}]
 
 
 def test_resume_run_uses_already_active_run() -> None:
@@ -384,6 +434,7 @@ def test_resume_run_uses_already_active_run() -> None:
         None: 此测试验证当前局续玩的最短路径。
     """
     state = {
+        "state_revision": 1,
         "screen": "EVENT",
         "available_actions": ["choose_event_option"],
         "run": {"character_id": "DEFECT", "floor": 2},

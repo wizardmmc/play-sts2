@@ -57,12 +57,12 @@ def test_battle_scenario_repeats_entry_and_fixed_second_turn(
         assert "end_turn" in first.state["available_actions"], first.state[
             "available_actions"
         ]
-        first_second_turn = capture_battle_snapshot(_end_turn(client))
+        first_second_turn = capture_battle_snapshot(_end_turn(client, first.state))
         second = resetter.reset(
             scenario,
             expected_snapshot=first.snapshot,
         )
-        second_second_turn = capture_battle_snapshot(_end_turn(client))
+        second_second_turn = capture_battle_snapshot(_end_turn(client, second.state))
 
     assert first.snapshot == second.snapshot
     assert first_second_turn.turn == 2
@@ -110,9 +110,7 @@ def test_combat_state_exposes_card_glow_and_relic_ui_counter(
         assert relic["stack_count"] == 1
         assert relic["is_used_up"] is False
         assert "【当前回合】" not in prompt
-        assert (
-            "- [0] 双截棍: 你每打出10张攻击牌，获得1点能量。" in prompt
-        )
+        assert "- [0] 双截棍: 你每打出10张攻击牌，获得1点能量。" in prompt
         assert "遗物UI:\n  [0] 双截棍〔计数 0〕" in observation
         assert "你每打出10张攻击牌" not in observation
         assert "〔金光：有利条件满足〕" in observation
@@ -125,7 +123,7 @@ def test_combat_state_exposes_card_glow_and_relic_ui_counter(
             if played == 3:
                 assert state["combat"]["hand"][0]["should_glow_gold"] is False
             if not state["combat"]["hand"]:
-                state = _end_turn(client)
+                state = _end_turn(client, state)
 
         assert relic["status"] == "Active"
         energy_before = state["combat"]["player"]["energy"]
@@ -138,7 +136,10 @@ def test_combat_state_exposes_card_glow_and_relic_ui_counter(
     assert relic["status"] == "Normal"
 
 
-def _end_turn(client: GameClient) -> dict[str, Any]:
+def _end_turn(
+    client: GameClient,
+    current_state: Mapping[str, Any],
+) -> dict[str, Any]:
     """执行固定的空过回合动作并等待第二回合决策状态。
 
     Args:
@@ -150,11 +151,14 @@ def _end_turn(client: GameClient) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 第二回合的稳定战斗状态。
     """
-    result = client.execute_action("end_turn")
+    result = client.execute_action(
+        "end_turn",
+        expected_state_revision=current_state["state_revision"],
+    )
     candidate = result.get("state")
     deadline = time.monotonic() + client.action_timeout
-    while time.monotonic() < deadline:
-        state = dict(candidate) if isinstance(candidate, Mapping) else client.state()
+    state = dict(candidate) if isinstance(candidate, Mapping) else dict(current_state)
+    while True:
         if (
             state.get("screen") == "COMBAT"
             and state.get("in_combat") is True
@@ -162,9 +166,13 @@ def _end_turn(client: GameClient) -> dict[str, Any]:
             and "end_turn" in (state.get("available_actions") or [])
         ):
             return state
-        time.sleep(0.2)
-        candidate = None
-    raise TimeoutError("等待第二回合决策状态超时")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("等待第二回合决策状态超时")
+        state = client.wait_for_state(
+            after_revision=state["state_revision"],
+            timeout=remaining,
+        )
 
 
 def _play_first_card(
@@ -186,6 +194,7 @@ def _play_first_card(
     card = state["combat"]["hand"][0]
     result = client.execute_action(
         "play_card",
+        expected_state_revision=state["state_revision"],
         card_index=card["index"],
         target_index=0,
     )
@@ -209,17 +218,23 @@ def _await_player_turn(
         dict[str, Any]: 可继续打牌或结束回合的稳定状态。
     """
     deadline = time.monotonic() + client.action_timeout
-    state = dict(candidate) if isinstance(candidate, Mapping) else client.state()
-    while time.monotonic() < deadline:
+    if not isinstance(candidate, Mapping):
+        raise TimeoutError("打牌响应缺少状态")
+    state = dict(candidate)
+    while True:
         if (
             state.get("screen") == "COMBAT"
             and state.get("in_combat") is True
             and "end_turn" in (state.get("available_actions") or [])
         ):
             return state
-        time.sleep(0.2)
-        state = client.state()
-    raise TimeoutError("等待打牌后玩家阶段超时")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("等待打牌后玩家阶段超时")
+        state = client.wait_for_state(
+            after_revision=state["state_revision"],
+            timeout=remaining,
+        )
 
 
 def _await_relic_counter(
@@ -243,10 +258,14 @@ def _await_relic_counter(
     """
     deadline = time.monotonic() + client.action_timeout
     state = dict(candidate)
-    while time.monotonic() < deadline:
+    while True:
         relics = (state.get("run") or {}).get("relics") or []
         if relics and relics[0].get("counter_value") == expected:
             return state
-        time.sleep(0.2)
-        state = client.state()
-    raise TimeoutError(f"等待遗物计数稳定到 {expected} 超时")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"等待遗物计数稳定到 {expected} 超时")
+        state = client.wait_for_state(
+            after_revision=state["state_revision"],
+            timeout=remaining,
+        )

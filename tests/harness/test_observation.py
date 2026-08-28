@@ -590,6 +590,60 @@ def test_build_observation_renders_combat_decision() -> None:
     )
 
 
+def test_battle_observation_hides_dead_enemies_without_renumbering_targets() -> None:
+    """死亡敌人不再干扰模型选择，存活敌人的 Mod 目标索引保持不变。"""
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["play_card", "end_turn"],
+        "run": {"relics": [], "potions": []},
+        "combat": {
+            "player": {
+                "current_hp": 70,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 3,
+                "stars": 0,
+            },
+            "enemies": [
+                {
+                    "index": 0,
+                    "name": "已死亡敌人",
+                    "current_hp": 0,
+                    "max_hp": 20,
+                    "block": 0,
+                    "is_alive": False,
+                },
+                {
+                    "index": 1,
+                    "name": "存活敌人",
+                    "current_hp": 20,
+                    "max_hp": 20,
+                    "block": 0,
+                    "is_alive": True,
+                },
+            ],
+            "hand": [
+                {
+                    "index": 0,
+                    "name": "打击",
+                    "energy_cost": 1,
+                    "target_type": "AnyEnemy",
+                    "requires_target": True,
+                    "valid_target_indices": [1],
+                    "playable": True,
+                }
+            ],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "已死亡敌人" not in observation.text
+    assert "敌[1] 存活敌人" in observation.text
+
+
 def test_combat_observation_renders_generic_card_and_relic_ui_state() -> None:
     """游戏提供的高亮与遗物 UI 状态按通用字段进入战斗观测。
 

@@ -16,12 +16,17 @@ from ..harness import (
     state_layer,
 )
 from ..inference import DecisionProvider
-from .decision import DecisionEngine, DecisionStep, is_action_window_conflict
+from .decision import (
+    DecisionEngine,
+    DecisionStep,
+    is_action_window_conflict,
+    stale_state_from_conflict,
+    state_revision,
+)
 from .router import RunRoute, classify_run_state
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_MAX_STEPS = 300
-_DEFAULT_POLL_INTERVAL = 0.2
 _DEFAULT_STATE_TIMEOUT = 30.0
 
 
@@ -63,7 +68,6 @@ class BattleRunner:
         temperature: float = 0.0,
         max_retries: int = _DEFAULT_MAX_RETRIES,
         max_steps: int = _DEFAULT_MAX_STEPS,
-        poll_interval: float = _DEFAULT_POLL_INTERVAL,
         state_timeout: float = _DEFAULT_STATE_TIMEOUT,
     ) -> None:
         """初始化不拥有游戏与模型连接生命周期的战斗 Runner。
@@ -75,7 +79,6 @@ class BattleRunner:
             temperature (float): 每次模型生成使用的采样温度。
             max_retries (int): 每个动作首次失败后允许的重试次数。
             max_steps (int): 单场战斗允许执行的最大动作数。
-            poll_interval (float): 等待下一可决策状态时的轮询间隔秒数。
             state_timeout (float): 单次动作后等待稳定状态的最长秒数。
 
         Returns:
@@ -90,7 +93,6 @@ class BattleRunner:
         )
         self._max_retries = max_retries
         self._max_steps = max_steps
-        self._poll_interval = poll_interval
         self._state_timeout = state_timeout
 
     def run(self, initial_state: Mapping[str, Any] | None = None) -> BattleResult:
@@ -124,17 +126,23 @@ class BattleRunner:
                     max_retries=self._max_retries,
                 )
             except httpx.HTTPStatusError as exc:
-                if (
-                    not is_action_window_conflict(exc)
-                    or conflict_retries >= self._max_retries
-                ):
+                latest = stale_state_from_conflict(exc)
+                if latest is None and not is_action_window_conflict(exc):
+                    raise
+                if conflict_retries >= self._max_retries:
                     raise
                 conflict_retries += 1
-                state = self._wait_for_state()
+                state = self._wait_for_state(
+                    latest,
+                    after_revision=state_revision(state),
+                )
                 continue
             conflict_retries = 0
             steps.append(step)
-            state = self._state_after(step.action_result)
+            state = self._state_after(
+                step.action_result,
+                after_revision=state_revision(state),
+            )
 
         return BattleResult(
             outcome=_outcome(state),
@@ -142,8 +150,13 @@ class BattleRunner:
             final_state=state,
         )
 
-    def _state_after(self, action_result: Mapping[str, Any]) -> dict[str, Any]:
-        """从动作结果或后续轮询中取得下一份可决策状态。
+    def _state_after(
+        self,
+        action_result: Mapping[str, Any],
+        *,
+        after_revision: int,
+    ) -> dict[str, Any]:
+        """从动作结果或后续事件中取得下一份可决策状态。
 
         Args:
             action_result (Mapping[str, Any]): Mod 返回的原始动作结果。
@@ -156,18 +169,22 @@ class BattleRunner:
         """
         raw_state = action_result.get("state")
         candidate = dict(raw_state) if isinstance(raw_state, Mapping) else None
-        if action_result.get("stable") is True and candidate is not None:
-            return self._wait_for_state(candidate)
-        return self._wait_for_state()
+        return self._wait_for_state(
+            candidate,
+            after_revision=after_revision,
+        )
 
     def _wait_for_state(
         self,
         candidate: Mapping[str, Any] | None = None,
+        *,
+        after_revision: int | None = None,
     ) -> dict[str, Any]:
         """等待下一份可生成观测的战斗状态或明确的战斗出口。
 
         Args:
             candidate (Mapping[str, Any] | None): 可先检查的动作结果内状态。
+            after_revision (int | None): 没有候选状态时已经处理的 revision。
 
         Raises:
             BattleRunError: 在配置时限内没有取得可用状态。
@@ -177,16 +194,25 @@ class BattleRunner:
         """
         deadline = time.monotonic() + self._state_timeout
         state = dict(candidate) if candidate is not None else None
+        revision = state_revision(state) if state is not None else after_revision
         while True:
             if state is not None and (
                 _decision_ready(state) or _battle_finished(state)
             ):
                 return state
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise BattleRunError("等待下一可决策状态超时")
-            if self._poll_interval:
-                time.sleep(self._poll_interval)
-            state = self._game.state()
+            if revision is None:
+                raise BattleRunError("等待状态缺少 state_revision")
+            try:
+                state = self._game.wait_for_state(
+                    after_revision=revision,
+                    timeout=remaining,
+                )
+            except TimeoutError as exc:
+                raise BattleRunError("等待下一可决策状态超时") from exc
+            revision = state_revision(state)
 
 
 def _fight_ongoing(state: Mapping[str, Any]) -> bool:
