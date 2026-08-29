@@ -195,74 +195,144 @@ class ConflictingStrategicGame:
         return _map_state(state_revision=after_revision + 1)
 
 
-class ShopLoopGame:
-    """模拟金币耗尽后反复开关同一商店库存的游戏。"""
+class TwoShopVisitsGame:
+    """模拟关闭第一家商店后离开，并进入第二家商店的游戏。"""
 
-    def __init__(self, *, state_changes: bool = False) -> None:
-        """初始化关闭的库存和空动作记录。
-
-        Args:
-            state_changes (bool): 是否让每次动作后的观测资源发生变化。
-
-        Returns:
-            None: 此方法只初始化商店循环测试替身。
-        """
+    def __init__(self) -> None:
+        """初始化动作记录与两次独立商店访问状态。"""
         self.actions: list[str] = []
+        self._visit = 1
         self._is_open = False
-        self._state_changes = state_changes
 
     def execute_action(self, action: str, **_parameters: int) -> dict[str, Any]:
-        """切换库存开关，或在模型主动离开时返回终局。
+        """按库存开关、离店和下一节点顺序推进两次商店访问。
 
         Args:
-            action (str): 模型提交的商店动作。
-            _parameters (int): 商店开关与离开动作不使用的参数。
+            action (str): 模型提交的战略动作。
+            _parameters (int): 当前动作的索引参数。
 
         Raises:
-            AssertionError: 模型动作与当前库存状态不一致。
+            AssertionError: 动作绕过商店访问边界或顺序不符合测试契约。
 
         Returns:
-            dict[str, Any]: 下一份商店状态或胜利终局。
+            dict[str, Any]: 下一份商店、地图或终局状态。
         """
         self.actions.append(action)
+        revision = len(self.actions) + 1
         if action == "open_shop_inventory":
             assert self._is_open is False
             self._is_open = True
-            return _completed(self._shop_state())
+            return _completed(_shop_state(is_open=True, state_revision=revision))
         if action == "close_shop_inventory":
             assert self._is_open is True
             self._is_open = False
-            return _completed(self._shop_state())
-        if action == "proceed":
+            return _completed(_shop_state(is_open=False, state_revision=revision))
+        if action == "proceed" and self._visit == 1:
             assert self._is_open is False
-            return _completed(
-                _game_over_state(
-                    True,
-                    state_revision=len(self.actions) + 1,
-                )
+            return _completed(_map_state(state_revision=revision))
+        if action == "choose_map_node":
+            assert self._visit == 1
+            self._visit = 2
+            return _completed(_shop_state(is_open=False, state_revision=revision))
+        assert action == "proceed" and self._visit == 2
+        assert self._is_open is False
+        return _completed(_game_over_state(True, state_revision=revision))
+
+
+class PurchasingShopGame:
+    """模拟连续购买两类商品、主动关店并离开的游戏。"""
+
+    def __init__(self) -> None:
+        """初始化动作记录和购买阶段。"""
+        self.actions: list[str] = []
+        self._stage = 0
+
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        """按购买、关闭和离店顺序推进商店状态。
+
+        Args:
+            action (str): 模型提交的商店动作。
+            parameters (int): 当前动作的 revision 和商品索引。
+
+        Raises:
+            AssertionError: 购买被商店访问屏蔽提前阻断或动作顺序错误。
+
+        Returns:
+            dict[str, Any]: 下一购买阶段、关闭库存页或终局状态。
+        """
+        assert parameters.pop("expected_state_revision") == len(self.actions) + 1
+        self.actions.append(action)
+        revision = len(self.actions) + 1
+        if self._stage == 0:
+            assert action == "buy_card"
+            assert parameters == {"option_index": 0}
+            self._stage = 1
+            return _completed(_purchasable_shop_state(stage=1, revision=revision))
+        if self._stage == 1:
+            assert action == "buy_relic"
+            assert parameters == {"option_index": 0}
+            self._stage = 2
+            return _completed(_purchasable_shop_state(stage=2, revision=revision))
+        if self._stage == 2:
+            assert action == "close_shop_inventory"
+            assert parameters == {}
+            self._stage = 3
+            return _completed(_shop_state(is_open=False, state_revision=revision))
+        assert action == "proceed"
+        assert parameters == {}
+        return _completed(_game_over_state(True, state_revision=revision))
+
+
+class RewardSkipGame:
+    """模拟跳过卡牌奖励后原奖励入口仍留在总页的游戏。"""
+
+    def __init__(self) -> None:
+        """初始化动作记录和卡牌、金币并存的奖励页。"""
+        self.actions: list[tuple[str, dict[str, int]]] = []
+
+    def execute_action(self, action: str, **parameters: int) -> dict[str, Any]:
+        """按卡牌奖励跳过、领取金币和离场顺序推进状态。
+
+        Args:
+            action (str): 模型提交的奖励动作。
+            parameters (int): 奖励索引参数。
+
+        Raises:
+            AssertionError: 模型重新打开已跳过的卡牌奖励或动作顺序错误。
+
+        Returns:
+            dict[str, Any]: 下一份奖励选择、奖励总页或终局状态。
+        """
+        expected_revision = parameters.pop("expected_state_revision")
+        assert expected_revision == len(self.actions) + 1
+        self.actions.append((action, parameters))
+        if len(self.actions) == 1:
+            assert (action, parameters) == ("claim_reward", {"option_index": 1})
+            return _completed(_reward_card_selection_state(state_revision=2))
+        if len(self.actions) == 2:
+            assert (action, parameters) == ("skip_reward_cards", {})
+            return _completed(_reward_with_card_and_gold(state_revision=3))
+        if len(self.actions) == 3:
+            assert (action, parameters) == ("claim_reward", {"option_index": 0})
+            return _completed(_reward_with_card_only(state_revision=4))
+        if len(self.actions) == 4:
+            assert (action, parameters) == ("proceed", {})
+            return _completed(_map_state(state_revision=5))
+        if len(self.actions) == 5:
+            assert (action, parameters) == (
+                "choose_map_node",
+                {"option_index": 0},
             )
-        raise AssertionError(f"预期外动作: {action}")
-
-    def state(self) -> dict[str, Any]:
-        """返回当前库存开关对应的商店状态。
-
-        Returns:
-            dict[str, Any]: 当前商店状态。
-        """
-        return self._shop_state()
-
-    def _shop_state(self) -> dict[str, Any]:
-        """构造当前库存状态和可见动作。
-
-        Returns:
-            dict[str, Any]: 金币不足的商店观测。
-        """
-        gold = len(self.actions) if self._state_changes else 0
-        return _shop_state(
-            is_open=self._is_open,
-            gold=gold,
-            state_revision=len(self.actions) + 1,
+            return _completed(_reward_with_card_only(state_revision=6))
+        if len(self.actions) == 6:
+            assert (action, parameters) == ("claim_reward", {"option_index": 0})
+            return _completed(_reward_card_selection_state(state_revision=7))
+        assert len(self.actions) == 7
+        assert (action, parameters) == (
+            "choose_reward_card",
+            {"option_index": 0},
         )
+        return _completed(_game_over_state(True, state_revision=8))
 
 
 def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
@@ -405,25 +475,27 @@ def test_run_runner_times_out_while_state_stays_transient() -> None:
     assert provider.requests == []
 
 
-def test_run_runner_warns_once_then_accepts_model_shop_exit() -> None:
-    """商店开关循环触发一次提示后仍由模型主动离开。
+def test_run_runner_blocks_shop_reopen_until_next_shop_visit() -> None:
+    """库存关闭后隐藏重开动作，离开商店后下一次访问重新开放。
 
     Raises:
-        AssertionError: Harness 自动代打、没有提示循环或阻止模型纠偏。
+        AssertionError: 同一次访问仍可重开，或下一家商店没有恢复动作。
 
     Returns:
-        None: 此测试验证不代打的商店循环纠偏路径。
+        None: 此测试验证商店访问级硬屏蔽和离店重置。
     """
     runtime = importlib.import_module("play_sts2.runtime")
-    game = ShopLoopGame()
+    game = TwoShopVisitsGame()
     provider = WholeRunProvider(
         [
             "ACTION: open_shop_inventory",
             "ACTION: close_shop_inventory",
             "ACTION: open_shop_inventory",
-            "ACTION: close_shop_inventory",
+            "ACTION: proceed",
+            "ACTION: choose_map_node 0",
             "ACTION: open_shop_inventory",
             "ACTION: close_shop_inventory",
+            "ACTION: open_shop_inventory",
             "ACTION: proceed",
         ]
     )
@@ -434,61 +506,103 @@ def test_run_runner_warns_once_then_accepts_model_shop_exit() -> None:
     assert game.actions == [
         "open_shop_inventory",
         "close_shop_inventory",
-        "open_shop_inventory",
-        "close_shop_inventory",
+        "proceed",
+        "choose_map_node",
         "open_shop_inventory",
         "close_shop_inventory",
         "proceed",
     ]
-    assert "立刻输出 `ACTION: proceed`" in provider.requests[0][-1].content
-    corrective_message = provider.requests[6][-1].content
-    assert "动作循环" in corrective_message
-    assert "商店库存不会" in corrective_message
-    assert "harness 不会替你操作" in corrective_message
+    first_retry = provider.requests[3][-1].content
+    assert "动作不在当前可用动作中: open_shop_inventory" in first_retry
+    second_visit = provider.requests[5][-1].content
+    assert "- open_shop_inventory" in second_visit
+    second_retry = provider.requests[8][-1].content
+    assert "动作不在当前可用动作中: open_shop_inventory" in second_retry
 
 
-def test_run_runner_stops_repeated_shop_loop_without_harness_action() -> None:
-    """模型忽略一次循环提示后明确停止本局且不替它离开。
-
-    Raises:
-        AssertionError: 循环耗尽全局步数、Harness 自动离开或错误继续运行。
-
-    Returns:
-        None: 此测试验证循环被归类为模型失败。
-    """
-    runtime = importlib.import_module("play_sts2.runtime")
-    game = ShopLoopGame()
-    provider = WholeRunProvider(
-        ["ACTION: open_shop_inventory", "ACTION: close_shop_inventory"] * 6
-    )
-
-    with pytest.raises(runtime.RunError, match="纠偏提示后仍重复战略动作循环"):
-        runtime.RunRunner(game, provider).run(_shop_state())
-
-    assert game.actions == ["open_shop_inventory", "close_shop_inventory"] * 6
-    assert len(provider.requests) == 12
-
-
-def test_run_runner_does_not_flag_actions_when_observation_progresses() -> None:
-    """动作名称重复但模型观测持续变化时不误判为循环。
+def test_run_runner_keeps_shop_purchases_available_until_inventory_is_closed() -> None:
+    """连续购买不会触发访问屏蔽，只有主动关闭库存后才禁止重开。
 
     Raises:
-        AssertionError: Harness 只按动作名检测而忽略真实状态进展。
+        AssertionError: 一次购买后无法继续浏览，或关闭前错误隐藏购买动作。
 
     Returns:
-        None: 此测试验证循环检测绑定模型实际观测。
+        None: 此测试覆盖商店硬屏蔽不替模型结束购买流程。
     """
     runtime = importlib.import_module("play_sts2.runtime")
-    game = ShopLoopGame(state_changes=True)
+    game = PurchasingShopGame()
     provider = WholeRunProvider(
-        ["ACTION: open_shop_inventory", "ACTION: close_shop_inventory"] * 3
-        + ["ACTION: proceed"]
+        [
+            "ACTION: buy_card 0",
+            "ACTION: buy_relic 0",
+            "ACTION: close_shop_inventory",
+            "ACTION: open_shop_inventory",
+            "ACTION: proceed",
+        ]
     )
 
-    result = runtime.RunRunner(game, provider).run(_shop_state())
+    result = runtime.RunRunner(game, provider).run(_purchasable_shop_state(stage=0))
 
     assert result.outcome is runtime.RunOutcome.VICTORY
-    assert all("动作循环" not in request[-1].content for request in provider.requests)
+    assert game.actions == [
+        "buy_card",
+        "buy_relic",
+        "close_shop_inventory",
+        "proceed",
+    ]
+    after_first_purchase = provider.requests[1][-1].content
+    assert "buy_relic" in after_first_purchase
+    retry_after_close = provider.requests[4][-1].content
+    assert "动作不在当前可用动作中: open_shop_inventory" in retry_after_close
+
+
+def test_run_runner_hides_skipped_card_reward_until_leaving_reward_screen() -> None:
+    """跳过卡牌后只屏蔽该入口，并保留其他奖励和真实离场动作。
+
+    Raises:
+        AssertionError: 已跳过的卡牌入口再次暴露，或金币和离场动作被误删。
+
+    Returns:
+        None: 此测试验证奖励页局部遮蔽而非自动代打。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = RewardSkipGame()
+    provider = WholeRunProvider(
+        [
+            "ACTION: claim_reward 1",
+            "ACTION: skip_reward_cards",
+            "ACTION: claim_reward 1",
+            "ACTION: claim_reward 0",
+            "ACTION: proceed",
+            "ACTION: choose_map_node 0",
+            "ACTION: claim_reward 0",
+            "ACTION: choose_reward_card 0",
+        ]
+    )
+
+    result = runtime.RunRunner(game, provider).run(_reward_with_card_and_gold())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert game.actions == [
+        ("claim_reward", {"option_index": 1}),
+        ("skip_reward_cards", {}),
+        ("claim_reward", {"option_index": 0}),
+        ("proceed", {}),
+        ("choose_map_node", {"option_index": 0}),
+        ("claim_reward", {"option_index": 0}),
+        ("choose_reward_card", {"option_index": 0}),
+    ]
+    after_skip = provider.requests[2][-1].content
+    assert "13 金币" in after_skip
+    assert "将一张牌添加到你的牌组" not in after_skip
+    retry_after_skip = provider.requests[3][-1].content
+    assert "option_index 1 不在当前奖励选项" in retry_after_skip
+    card_only = provider.requests[4][-1].content
+    assert "claim_reward" not in card_only
+    assert "proceed" in card_only
+    next_reward = provider.requests[6][-1].content
+    assert "将一张牌添加到你的牌组" in next_reward
+    assert "claim_reward" in next_reward
 
 
 def _completed(state: dict[str, Any]) -> dict[str, Any]:
@@ -593,6 +707,86 @@ def _reward_state(*, state_revision: int = 1) -> dict[str, Any]:
     }
 
 
+def _reward_with_card_and_gold(*, state_revision: int = 1) -> dict[str, Any]:
+    """构造金币和卡牌入口并存的真实战后奖励页。
+
+    Args:
+        state_revision (int): 当前奖励状态版本。
+
+    Returns:
+        dict[str, Any]: 可领取金币、可打开卡牌且可离场的奖励状态。
+    """
+    return {
+        "state_revision": state_revision,
+        "screen": "REWARD",
+        "in_combat": False,
+        "available_actions": ["claim_reward", "proceed"],
+        "run": _run_state(),
+        "reward": {
+            "can_proceed": True,
+            "rewards": [
+                {
+                    "index": 0,
+                    "reward_type": "Gold",
+                    "name": "13 金币",
+                    "claimable": True,
+                },
+                {
+                    "index": 1,
+                    "reward_type": "Card",
+                    "name": "将一张牌添加到你的牌组。",
+                    "claimable": True,
+                },
+            ],
+        },
+    }
+
+
+def _reward_with_card_only(*, state_revision: int = 1) -> dict[str, Any]:
+    """构造只剩已跳过卡牌入口的奖励总页。
+
+    Args:
+        state_revision (int): 当前奖励状态版本。
+
+    Returns:
+        dict[str, Any]: 卡牌入口仍由游戏保留但允许离场的奖励状态。
+    """
+    state = _reward_with_card_and_gold(state_revision=state_revision)
+    state["reward"]["rewards"] = [state["reward"]["rewards"][1]]
+    state["reward"]["rewards"][0]["index"] = 0
+    return state
+
+
+def _reward_card_selection_state(*, state_revision: int = 1) -> dict[str, Any]:
+    """构造允许选择或跳过卡牌奖励的候选页。
+
+    Args:
+        state_revision (int): 当前选牌状态版本。
+
+    Returns:
+        dict[str, Any]: 一张卡牌候选和跳过动作组成的战略状态。
+    """
+    return {
+        "state_revision": state_revision,
+        "screen": "CARD_SELECTION",
+        "in_combat": False,
+        "available_actions": ["choose_reward_card", "skip_reward_cards"],
+        "run": _run_state(),
+        "selection": {
+            "cards": [
+                {
+                    "index": 0,
+                    "card_id": "COOLHEADED",
+                    "name": "冷静头脑",
+                    "card_type": "Skill",
+                    "energy_cost": 1,
+                    "resolved_rules_text": "生成1个冰霜充能球。抽1张牌。",
+                }
+            ]
+        },
+    }
+
+
 def _shop_state(
     *,
     is_open: bool = False,
@@ -638,6 +832,60 @@ def _shop_state(
                 "used": False,
                 "enough_gold": False,
             },
+        },
+    }
+
+
+def _purchasable_shop_state(
+    *,
+    stage: int,
+    revision: int = 1,
+) -> dict[str, Any]:
+    """构造依次可购买卡牌、遗物并最终关闭的库存状态。
+
+    Args:
+        stage (int): 已完成的购买数量，支持 ``0``、``1`` 或 ``2``。
+        revision (int): 当前商店状态版本。
+
+    Raises:
+        AssertionError: 测试传入未定义的购买阶段。
+
+    Returns:
+        dict[str, Any]: 仍处于同一次 SHOP 访问的打开库存状态。
+    """
+    assert stage in {0, 1, 2}
+    actions = ["close_shop_inventory"]
+    if stage == 0:
+        actions.insert(0, "buy_card")
+    elif stage == 1:
+        actions.insert(0, "buy_relic")
+    return {
+        "state_revision": revision,
+        "screen": "SHOP",
+        "in_combat": False,
+        "available_actions": actions,
+        "run": {**_run_state(), "gold": 200},
+        "shop": {
+            "is_open": True,
+            "cards": [
+                {
+                    "index": 0,
+                    "name": "眼部攻击",
+                    "price": 45,
+                    "is_stocked": stage == 0,
+                    "enough_gold": stage == 0,
+                }
+            ],
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "草莓",
+                    "price": 75,
+                    "is_stocked": stage <= 1,
+                    "enough_gold": stage <= 1,
+                }
+            ],
+            "potions": [],
         },
     }
 

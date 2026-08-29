@@ -6,6 +6,7 @@ import json
 import math
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,10 +49,15 @@ class GenerationScore:
         exact_match (bool): 去除首尾空白后是否与目标完全相同。
         action_shape_valid (bool | None): 人类行为是否为单行 ``ACTION:`` 外形；
             知识问答没有此指标。
+        action_legal (bool | None): 人类行为是否落在样本记录的精确合法动作集合；
+            知识问答没有此指标。
+        action_failure (str | None): 空输出、格式、动作名或参数失败类别。
     """
 
     exact_match: bool
     action_shape_valid: bool | None
+    action_legal: bool | None
+    action_failure: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +318,8 @@ def score_generation(
     expected: str,
     generated: str,
     source: str,
+    available_actions: Sequence[str] = (),
+    legal_actions: Sequence[str] = (),
 ) -> GenerationScore:
     """计算不依赖模型库的生成结果指标。
 
@@ -319,18 +327,41 @@ def score_generation(
         expected (str): 数据集中的目标 assistant 回复。
         generated (str): 模型实际生成的回复。
         source (str): 当前样本来源。
+        available_actions (Sequence[str]): 当前向模型开放的动作名称。
+        legal_actions (Sequence[str]): 已按当前状态索引展开的规范动作行。
 
     Returns:
         GenerationScore: 精确匹配与可选动作外形指标。
     """
     expected = expected.strip()
     generated = generated.strip()
-    action_shape = (
-        _ACTION_LINE.fullmatch(generated) is not None
-        if source == "human_play"
-        else None
-    )
-    return GenerationScore(expected == generated, action_shape)
+    if source != "human_play":
+        return GenerationScore(expected == generated, None, None, None)
+    if not generated:
+        return GenerationScore(False, False, False, "empty_output")
+    if _ACTION_LINE.fullmatch(generated) is None:
+        return GenerationScore(
+            expected == generated,
+            False,
+            False,
+            "invalid_format",
+        )
+    action_name = generated.split()[1]
+    if action_name not in available_actions:
+        return GenerationScore(
+            expected == generated,
+            True,
+            False,
+            "unavailable_action",
+        )
+    if generated not in legal_actions:
+        return GenerationScore(
+            expected == generated,
+            True,
+            False,
+            "invalid_parameters",
+        )
+    return GenerationScore(expected == generated, True, True, None)
 
 
 def decode_generation(
@@ -413,10 +444,27 @@ def evaluate_rows(
                 normalized = normalize_messages(messages, sample_id)
                 expected = normalized[-1]["content"]
                 reply = generate(normalized[:-1])
+                available_actions: Sequence[str] = ()
+                legal_actions: Sequence[str] = ()
+                if source == "human_play":
+                    available_actions = _row_string_sequence(
+                        row,
+                        "available_actions",
+                        path=path,
+                        line_number=line_number,
+                    )
+                    legal_actions = _row_string_sequence(
+                        row,
+                        "legal_actions",
+                        path=path,
+                        line_number=line_number,
+                    )
                 score = score_generation(
                     expected=expected,
                     generated=reply.text,
                     source=source,
+                    available_actions=available_actions,
+                    legal_actions=legal_actions,
                 )
                 records.append(
                     {
@@ -427,6 +475,8 @@ def evaluate_rows(
                         "truncated": reply.truncated,
                         "exact_match": score.exact_match,
                         "action_shape_valid": score.action_shape_valid,
+                        "action_legal": score.action_legal,
+                        "action_failure": score.action_failure,
                     }
                 )
                 if max_samples is not None and len(records) >= max_samples:
@@ -451,6 +501,12 @@ def evaluate_rows(
     valid_actions = sum(
         record["action_shape_valid"] is True for record in action_records
     )
+    legal_actions = sum(record["action_legal"] is True for record in action_records)
+    failures = Counter(
+        str(record["action_failure"])
+        for record in action_records
+        if record["action_failure"] is not None
+    )
     return {
         "samples": len(records),
         "exact_matches": exact_matches,
@@ -460,8 +516,47 @@ def evaluate_rows(
         "valid_action_shape_rate": (
             valid_actions / len(action_records) if action_records else 0.0
         ),
+        "legal_actions": legal_actions,
+        "legal_action_rate": (
+            legal_actions / len(action_records) if action_records else 0.0
+        ),
+        "empty_action_outputs": failures["empty_output"],
+        "invalid_action_formats": failures["invalid_format"],
+        "unavailable_actions": failures["unavailable_action"],
+        "invalid_action_parameters": failures["invalid_parameters"],
         "truncated_samples": sum(record["truncated"] is True for record in records),
     }
+
+
+def _row_string_sequence(
+    row: Mapping[str, Any],
+    field: str,
+    *,
+    path: Path,
+    line_number: int,
+) -> tuple[str, ...]:
+    """读取行为评测行中必需的字符串数组。
+
+    Args:
+        row (Mapping[str, Any]): 当前评测数据行。
+        field (str): 待读取的字段名称。
+        path (Path): 用于错误定位的 JSONL 路径。
+        line_number (int): 当前数据行号。
+
+    Raises:
+        SftTrainingError: 字段缺失、不是数组或包含非字符串值。
+
+    Returns:
+        tuple[str, ...]: 已验证的字符串序列。
+    """
+    values = row.get(field)
+    if (
+        not isinstance(values, Sequence)
+        or isinstance(values, (str, bytes))
+        or any(not isinstance(value, str) for value in values)
+    ):
+        raise SftTrainingError(f"行为评测行缺少 {field}: {path}:{line_number}")
+    return tuple(values)
 
 
 def evaluate_sft(
@@ -471,6 +566,7 @@ def evaluate_sft(
     *,
     max_samples: int | None = None,
     output_path: Path | None = None,
+    temperature: float = 0.0,
 ) -> dict[str, object]:
     """加载 LoRA adapter，执行独立生成式评测。
 
@@ -480,6 +576,7 @@ def evaluate_sft(
         split (str): ``dev`` 或 ``test`` 数据分卷。
         max_samples (int | None): 可选的评测样本上限。
         output_path (Path | None): 可选逐样本 JSONL 路径。
+        temperature (float): ``0`` 使用贪心生成，正数启用对应温度的采样。
 
     Raises:
         SftTrainingError: 分卷无效、为空或设备不可用。
@@ -491,11 +588,15 @@ def evaluate_sft(
     import torch
 
     resolved_split = _resolve_evaluation_split(split)
+    if not math.isfinite(temperature) or temperature < 0:
+        raise SftTrainingError("temperature 必须为非负有限数")
     dataset_manifest = validate_sft_dataset(config.dataset_root)
     adapter_path = Path(adapter_path)
     if output_path is None:
         output_path = (
-            config.runs_root.parent / "eval" / f"{adapter_path.name}-{split}.jsonl"
+            config.runs_root.parent
+            / "eval"
+            / _generation_output_name(adapter_path.name, split, temperature)
         )
     tokenizer, model, device = _load_evaluation_model(config, adapter_path)
 
@@ -517,13 +618,18 @@ def evaluate_sft(
             return_dict=False,
         ).to(device)
         with torch.no_grad():
+            generation_options: dict[str, Any] = {
+                "input_ids": input_ids,
+                "attention_mask": torch.ones_like(input_ids),
+                "max_new_tokens": config.eval_max_new_tokens,
+                "do_sample": temperature > 0,
+                "eos_token_id": tokenizer.eos_token_id,
+                "pad_token_id": tokenizer.pad_token_id,
+            }
+            if temperature > 0:
+                generation_options["temperature"] = temperature
             generated_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=torch.ones_like(input_ids),
-                max_new_tokens=config.eval_max_new_tokens,
-                do_sample=False,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
+                **generation_options,
             )
         continuation = generated_ids[0, input_ids.shape[-1] :]
         return decode_generation(
@@ -547,11 +653,33 @@ def evaluate_sft(
             "split": split,
             "output": str(output_path),
             "device": device,
+            "temperature": temperature,
+            "enable_thinking": False,
+            "max_retries": 0,
             "dataset_files": _manifest_split_files(dataset_manifest, resolved_split),
         }
     )
     _write_json(output_path.with_suffix(".summary.json"), summary)
     return summary
+
+
+def _generation_output_name(
+    adapter_name: str,
+    split: str,
+    temperature: float,
+) -> str:
+    """生成不会让不同采样温度互相覆盖的默认报告文件名。
+
+    Args:
+        adapter_name (str): 当前 LoRA adapter 目录名。
+        split (str): 用户请求的公开评测分卷名。
+        temperature (float): 本轮生成温度。
+
+    Returns:
+        str: 包含稳定温度标签的 JSONL 文件名。
+    """
+    temperature_label = format(temperature, ".12g").replace(".", "p")
+    return f"{adapter_name}-{split}-t{temperature_label}.jsonl"
 
 
 def _load_evaluation_model(

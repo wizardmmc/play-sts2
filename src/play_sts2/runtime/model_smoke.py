@@ -75,7 +75,7 @@ def smoke_model(
             max_tokens=max_tokens,
             temperature=temperature,
         )
-    parse_action(reply.text, ("end_turn",))
+    parse_action(reply.text, ("end_turn",), reasoning=reply.reasoning)
     return reply
 
 

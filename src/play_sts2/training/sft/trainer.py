@@ -330,7 +330,7 @@ def optimize(
     model.train()
     optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
     if resume_from is not None:
-        _validate_optimization_checkpoint(resume_from, len(samples), epochs)
+        _validate_optimization_checkpoint(resume_from, samples, epochs)
         optimizer.load_state_dict(resume_from.optimizer_state)
         randomizer.setstate(resume_from.random_state)
         torch.set_rng_state(resume_from.torch_rng_state.cpu())
@@ -363,7 +363,9 @@ def optimize(
                 order = resumed_order
                 first_begin = resumed_begin
             else:
-                order = list(range(len(samples)))
+                order = _sample_indices_for_epoch(samples, epoch)
+                if not order:
+                    raise SftTrainingError(f"第 {epoch + 1} 轮没有可训练样本")
                 randomizer.shuffle(order)
                 first_begin = 0
             for begin in range(
@@ -515,14 +517,14 @@ def _base_model_dtype(device: str) -> Any:
 
 def _validate_optimization_checkpoint(
     checkpoint: OptimizationCheckpoint,
-    sample_count: int,
+    samples: Sequence[TokenizedSample],
     epochs: int,
 ) -> None:
     """确认恢复状态的数据位置适用于当前训练任务。
 
     Args:
         checkpoint (OptimizationCheckpoint): 待恢复的训练状态。
-        sample_count (int): 当前 token 化样本数量。
+        samples (Sequence[TokenizedSample]): 当前 token 化样本及训练轮次。
         epochs (int): 当前配置的总 epoch 数。
 
     Raises:
@@ -534,14 +536,40 @@ def _validate_optimization_checkpoint(
     if checkpoint.epoch_index > epochs:
         raise SftTrainingError("checkpoint epoch 超出当前训练配置")
     if checkpoint.order:
+        if checkpoint.epoch_index >= epochs:
+            raise SftTrainingError("checkpoint 已完成全部 epoch 却仍带样本顺序")
+        expected_indices = set(
+            _sample_indices_for_epoch(samples, checkpoint.epoch_index)
+        )
         if (
-            len(checkpoint.order) != sample_count
-            or set(checkpoint.order) != set(range(sample_count))
-            or checkpoint.next_begin >= sample_count
+            len(checkpoint.order) != len(expected_indices)
+            or set(checkpoint.order) != expected_indices
+            or checkpoint.next_begin >= len(checkpoint.order)
         ):
             raise SftTrainingError("checkpoint 样本顺序与当前数据集不一致")
     elif checkpoint.next_begin != 0:
         raise SftTrainingError("checkpoint 空样本顺序不能带非零游标")
+
+
+def _sample_indices_for_epoch(
+    samples: Sequence[TokenizedSample],
+    epoch_index: int,
+) -> list[int]:
+    """选择当前轮知识问法和每轮复用的通用锚点。
+
+    Args:
+        samples (Sequence[TokenizedSample]): 全部已编码训练样本。
+        epoch_index (int): 从零开始的当前训练轮次。
+
+    Returns:
+        list[int]: 可以直接索引 ``samples`` 的稳定位置列表。
+    """
+    training_epoch = epoch_index + 1
+    return [
+        index
+        for index, sample in enumerate(samples)
+        if sample.training_epoch is None or sample.training_epoch == training_epoch
+    ]
 
 
 def _prepare_resume_trace(

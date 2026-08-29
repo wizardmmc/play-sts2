@@ -110,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--max-samples", type=int)
     evaluate.add_argument("--output", type=Path)
+    evaluate.add_argument("--temperature", type=float, default=0.0)
 
     evaluate_loss = subparsers.add_parser(
         "eval-sft-loss",
@@ -217,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.split,
             max_samples=args.max_samples,
             output_path=args.output,
+            temperature=args.temperature,
         )
     elif args.command == "eval-sft-loss":
         config = load_sft_config(args.config)

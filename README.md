@@ -144,20 +144,22 @@ uv run play-sts2-knowledge review \
 
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 
-当前 E3 数据使用 `configs/sft-e3-mix.toml` 定向混合：远古者不进入训练或验证，
+当前 E4 数据使用 `configs/sft-e4-mix.toml` 定向混合：远古者不进入训练或验证，
 其余正式知识实体和事实全部保留；高频常规动作按上限抽样，未列出的低频动作全部
 保留。
 重新构建命令为：
 
 ```bash
-uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
+uv run play-sts2-train build-sft \
+  --knowledge-root data/game_knowledge/generated-v0.111.0 \
+  --mix configs/sft-e4-mix.toml
 ```
 
 ```bash
 uv sync --group training
-uv run --group training play-sts2-train sft \
-  --config configs/sft.toml \
-  --name 20260828-sft-clean-native-r16-e3
+uv run --group training play-sts2-train sft-cuda \
+  --config configs/sft-e4-cuda-lr5e5.toml \
+  --name 20260829-sft-e4-knowledge-r16-lr5e5
 ```
 
 训练过程写入 `runs/sft/<name>/`，最终 adapter 写入
@@ -187,25 +189,31 @@ uv run --group training play-sts2-train sft \
 
 数据目录固定为同构的 `train/`、`validation/` 和 `eval/` 三棵树；知识按类别和
 实体拆成 JSONL，人类行为按 `combat/<run-id>/<battle-key>.jsonl` 与
-`strategy/<run-id>.jsonl` 保存。同一知识事实显式提供 train、validation、eval
-三种自然问法，后两种分别用于调参与冻结后的最终验收。三种问题原文必须互不
-重复；算术使用三个独立随机种子，并以 `case_id` 隔离相同运算语义和操作数。整局人类游戏必须先在
+`strategy/<run-id>.jsonl` 保存。同一知识事实显式提供五轮训练问法与
+validation/eval 两条留出问法；训练器第 N 轮只读取 `training_epoch=N` 的知识题，
+七种问题原文必须互不重复。算术使用三个独立随机种子，并以 `case_id` 隔离相同运算语义和操作数。整局人类游戏必须先在
 `data/raw/human/splits.json` 明确归属，否则构建失败。
 
-当前分卷共有 11,485 条训练样本、6,509 条验证样本和 6,736 条最终评测样本；
-train 覆盖 1,347 个知识实体和全部 5,856 个显式事实。validation/eval 都覆盖相同
+当前 E4 分卷共有 34,123 条训练候选、6,622 条验证样本和 6,849 条最终评测样本；
+每轮实际使用 10,247 条，train 覆盖 1,552 个知识实体和全部 5,969 个显式事实。
+validation/eval 都覆盖相同
 事实、全部知识类别、六类算术题以及按整局留出的战斗与战略行为。
+根目录的 `behavior-audit.json` 还会按分卷列出动作、页面和药水/营火/商店/卡牌
+奖励的条件对照；行为行保存当时可见动作与具体合法索引，供严格生成评测使用。
 
 为完整人类局分配 validation/eval 后，可以独立加载 adapter 做确定性生成验证：
 
 ```bash
 uv run --group training play-sts2-train eval-sft \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split validation
+  --split validation \
+  --temperature 0
 ```
 
 评测会保存目标与实际生成全文，并报告精确匹配率；人类行为还会单独报告单行
-`ACTION:` 外形通过率。它不会把动作外形合法等同于策略选择正确。
+`ACTION:` 外形、动作合法率以及空输出、格式错误、不可用动作和越界参数计数。
+评测固定 no-thinking、零重试；用 `--temperature 0.8` 可重复同一套尾部分布检查。
+动作合法不等同于策略选择正确。
 
 训练完成后，一条命令即可把 adapter 安全合并为独立 Hugging Face 模型：
 

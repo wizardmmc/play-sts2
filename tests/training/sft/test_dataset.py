@@ -1,5 +1,6 @@
 """验证 Markdown 知识和精确人类决策到 SFT messages 的转换。"""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -56,30 +57,41 @@ def test_formal_coverage_requires_every_arithmetic_and_behavior_bucket() -> None
         category: ("OBJECT", "SECOND") if category == "cards" else ("OBJECT",)
         for category in categories
     }
-    knowledge_rows = [
-        {
-            "sample_id": f"{category}/{object_id}/fact/{role}",
-            "source": "knowledge",
-            "category": category,
-            "object_id": object_id,
-            "fact_id": f"{category}/{object_id}/fact",
-            "question_role": role,
-            "dataset_split": split,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": f"问题-{category}-{object_id}-{role}",
-                },
-                {
-                    "role": "assistant",
-                    "content": f"答案-{category}-{object_id}",
-                },
-            ],
-        }
-        for category in categories
-        for object_id in objects_by_category[category]
-        for role, split in roles.items()
-    ]
+    knowledge_rows = []
+    for category in categories:
+        for object_id in objects_by_category[category]:
+            for role, split in roles.items():
+                epochs: tuple[int | None, ...] = (
+                    (1, 2, 3, 4, 5) if role == "train" else (None,)
+                )
+                for training_epoch in epochs:
+                    epoch_suffix = training_epoch or role
+                    row = {
+                        "sample_id": (
+                            f"{category}/{object_id}/fact/{role}/{epoch_suffix}"
+                        ),
+                        "source": "knowledge",
+                        "category": category,
+                        "object_id": object_id,
+                        "fact_id": f"{category}/{object_id}/fact",
+                        "question_role": role,
+                        "dataset_split": split,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"问题-{category}-{object_id}-{role}-{epoch_suffix}"
+                                ),
+                            },
+                            {
+                                "role": "assistant",
+                                "content": f"答案-{category}-{object_id}",
+                            },
+                        ],
+                    }
+                    if training_epoch is not None:
+                        row["training_epoch"] = training_epoch
+                    knowledge_rows.append(row)
     buckets = {
         "block_math",
         "energy_math",
@@ -111,6 +123,25 @@ def test_formal_coverage_requires_every_arithmetic_and_behavior_bucket() -> None
         )
 
     dataset_module._validate_formal_coverage(knowledge_rows, splits)
+    invalid_epoch_rows = [dict(row) for row in knowledge_rows]
+    invalid_epoch_splits = {
+        split: [dict(row) for row in rows] for split, rows in splits.items()
+    }
+    for rows in (invalid_epoch_rows, invalid_epoch_splits["train"]):
+        next(
+            row
+            for row in rows
+            if row.get("fact_id") == "cards/OBJECT/fact"
+            and row.get("training_epoch") == 5
+        )["training_epoch"] = 4
+    with pytest.raises(
+        DatasetBuildError,
+        match=r"cards/OBJECT/fact.*训练轮次.*\[1, 2, 3, 4, 5\]",
+    ):
+        dataset_module._validate_formal_coverage(
+            invalid_epoch_rows,
+            invalid_epoch_splits,
+        )
     leaking_case_splits = {split: list(rows) for split, rows in splits.items()}
     leaking_case_splits["dev"] = [dict(row) for row in leaking_case_splits["dev"]]
     next(
@@ -266,6 +297,8 @@ cost: 1
         "role": "assistant",
         "content": "ACTION: choose_map_node 0",
     }
+    assert behavior_row["available_actions"] == ["choose_map_node"]
+    assert behavior_row["legal_actions"] == ["ACTION: choose_map_node 0"]
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["splits"] == {"train": 1, "validation": 1, "eval": 0}
     assert manifest["sources"] == {"human_play": 1, "web_wiki": 1}
@@ -275,10 +308,130 @@ cost: 1
         "eval": {},
     }
     assert manifest["human"]["validation_runs"] == ["RUN-001"]
+    behavior_audit = json.loads(
+        (result.output_root / "behavior-audit.json").read_text(encoding="utf-8")
+    )
+    assert behavior_audit == manifest["behavior_audit"]
+    assert behavior_audit["splits"]["validation"]["actions"] == {"choose_map_node": 1}
     assert set(manifest["files"]) == {
         "train/cards/ZAP.jsonl",
         "validation/strategy/RUN-001.jsonl",
     }
+
+
+def test_behavior_audit_captures_explicit_decision_contrasts() -> None:
+    """行为标签和审计应区分有真实选择条件的关键战略对照。
+
+    Raises:
+        AssertionError: 药水保留、火堆、商店或卡牌奖励对照没有被独立统计。
+
+    Returns:
+        None: 此测试只验证行为审计的决策语义。
+    """
+    potion_state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["play_card", "use_potion", "end_turn"],
+    }
+    shop_state = {
+        "screen": "SHOP",
+        "available_actions": ["buy_card", "proceed"],
+        "shop": {
+            "cards": [{"index": 0, "is_stocked": True, "enough_gold": True}],
+            "relics": [],
+            "potions": [],
+        },
+    }
+    reward_state = {
+        "screen": "CARD_SELECTION",
+        "available_actions": ["choose_reward_card", "skip_reward_cards"],
+    }
+    assert "potion:hold" in dataset_module._behavior_tags(potion_state, "end_turn", {})
+    assert "shop:purchase" in dataset_module._behavior_tags(
+        shop_state, "buy_card", {"option_index": 0}
+    )
+    assert "shop:leave" in dataset_module._behavior_tags(shop_state, "proceed", {})
+    assert "card_reward:choose" in dataset_module._behavior_tags(
+        reward_state, "choose_reward_card", {"option_index": 0}
+    )
+    assert "card_reward:skip" in dataset_module._behavior_tags(
+        reward_state, "skip_reward_cards", {}
+    )
+
+    training_tags = [
+        ["potion:use"],
+        ["potion:hold"],
+        ["rest:heal"],
+        ["rest:smith"],
+        ["shop:purchase"],
+        ["shop:leave"],
+        ["card_reward:choose"],
+        ["card_reward:skip"],
+    ]
+    audit = dataset_module._behavior_audit(
+        {
+            "train": [
+                {
+                    "source": "human_play",
+                    "action": f"action-{index}",
+                    "screen": "TEST",
+                    "tags": tags,
+                }
+                for index, tags in enumerate(training_tags)
+            ],
+            "dev": [],
+            "test": [],
+        }
+    )
+
+    assert audit["training_contrasts"] == {
+        "card_reward_choose_vs_skip": {
+            "available": True,
+            "counts": {"choose": 1, "skip": 1},
+        },
+        "potion_use_vs_hold": {
+            "available": True,
+            "counts": {"hold": 1, "use": 1},
+        },
+        "rest_heal_vs_smith": {
+            "available": True,
+            "counts": {"heal": 1, "smith": 1},
+        },
+        "shop_purchase_vs_leave": {
+            "available": True,
+            "counts": {"leave": 1, "purchase": 1},
+        },
+    }
+    assert audit["missing_training_contrasts"] == []
+
+
+def test_behavior_row_rejects_reference_outside_exact_legal_actions() -> None:
+    """参考动作参数越过当前状态索引时不得发布为行为监督。
+
+    Raises:
+        AssertionError: 非法参考动作没有触发数据构建失败。
+
+    Returns:
+        None: 此测试钉住行为行的合法集合自证。
+    """
+    decision = {
+        "run_id": "RUN-ILLEGAL",
+        "event_id": 1,
+        "before_state": {
+            "screen": "MAP",
+            "available_actions": ["choose_map_node"],
+            "map": {
+                "available_nodes": [
+                    {"index": 0, "row": 1, "col": 0, "node_type": "Monster"}
+                ]
+            },
+        },
+        "action": "choose_map_node",
+        "parameters": {"option_index": 9},
+    }
+
+    with pytest.raises(DatasetBuildError, match="动作参数不在当前合法边界"):
+        dataset_module._behavior_row(decision)
 
 
 def test_build_sft_dataset_preserves_mod_game_version(tmp_path: Path) -> None:
@@ -365,6 +518,17 @@ game_version: v0.107.1
     changed.write_text('{"partial":true}\n', encoding="utf-8")
 
     with pytest.raises(DatasetBuildError, match="train/cards/ZAP.jsonl.*SHA-256"):
+        validate_sft_dataset(result.output_root)
+
+    build_sft_dataset(
+        knowledge_root=knowledge,
+        human_root=human,
+        output_root=result.output_root,
+    )
+    (result.output_root / "behavior-audit.json").write_text(
+        '{"format":"tampered"}\n', encoding="utf-8"
+    )
+    with pytest.raises(DatasetBuildError, match="行为审计与 manifest 不一致"):
         validate_sft_dataset(result.output_root)
 
     build_sft_dataset(
@@ -575,16 +739,16 @@ def test_build_sft_dataset_excludes_training_ineligible_runs(tmp_path: Path) -> 
     assert result.train_count == 0
 
 
-def test_build_sft_dataset_holds_out_one_question_form_for_validation(
+def test_build_sft_dataset_preserves_five_training_epochs_and_two_holdouts(
     tmp_path: Path,
 ) -> None:
-    """显式三套问法应进入同名实体文件的三个目录。
+    """五轮训练问法与两套留出问法应保留各自用途。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离数据目录。
 
     Raises:
-        AssertionError: question_role 没有决定目标分卷或文件身份。
+        AssertionError: 训练轮次或 question_role 没有保留到正式数据。
 
     Returns:
         None: 此测试只检查知识问法分卷契约。
@@ -597,6 +761,7 @@ def test_build_sft_dataset_holds_out_one_question_form_for_validation(
             "object_id": "ZAP",
             "fact_id": "cards/ZAP/cost",
             "question_role": "train",
+            "training_epoch": 1,
             "source": "mod_export+curated_override",
             "prompt": "Q: 电击的费用是多少？\nA:",
             "completion": " 1点能量。",
@@ -606,8 +771,39 @@ def test_build_sft_dataset_holds_out_one_question_form_for_validation(
             "object_id": "ZAP",
             "fact_id": "cards/ZAP/cost",
             "question_role": "train",
+            "training_epoch": 2,
             "source": "mod_export+curated_override",
             "prompt": "Q: 打出电击需要几点能量？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "train",
+            "training_epoch": 3,
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 未受修正时电击消耗多少资源？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "train",
+            "training_epoch": 4,
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 电击的基础资源消耗是什么？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "train",
+            "training_epoch": 5,
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 请只回答电击的原始费用。\nA:",
             "completion": " 1点能量。",
         },
         {
@@ -645,10 +841,11 @@ def test_build_sft_dataset_holds_out_one_question_form_for_validation(
     train = _directory_rows(result.train_path)
     validation = _directory_rows(result.dev_path)
     evaluation = _directory_rows(result.test_path)
-    assert result.train_count == 2
+    assert result.train_count == 5
     assert result.dev_count == 1
     assert result.test_count == 1
     assert {row["object_id"] for row in train + validation + evaluation} == {"ZAP"}
+    assert sorted(row["training_epoch"] for row in train) == [1, 2, 3, 4, 5]
     assert train[0]["messages"][0] != validation[0]["messages"][0]
     assert (result.train_path / "cards/ZAP.jsonl").is_file()
     assert (result.dev_path / "cards/ZAP.jsonl").is_file()
@@ -718,6 +915,19 @@ def test_build_sft_dataset_honors_generated_arithmetic_question_roles(
         + "\n",
         encoding="utf-8",
     )
+    (knowledge / "_manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "prompt_completion_candidates",
+                "source": "data/raw/human/*/combat/*.jsonl",
+                "human_root": "data/raw/human",
+                "training_run_ids": ["RUN-TRAIN"],
+                "seed": 20260824,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     human = tmp_path / "raw/human"
     human.mkdir(parents=True)
 
@@ -741,6 +951,16 @@ def test_build_sft_dataset_honors_generated_arithmetic_question_roles(
         "train": {"synthetic_arithmetic": 1},
         "validation": {"synthetic_arithmetic": 1},
         "eval": {"synthetic_arithmetic": 1},
+    }
+    assert manifest["arithmetic"] == {
+        "candidate_manifest": "arithmetic/_manifest.json",
+        "candidate_manifest_sha256": hashlib.sha256(
+            (knowledge / "_manifest.json").read_bytes()
+        ).hexdigest(),
+        "human_root": "data/raw/human",
+        "source": "data/raw/human/*/combat/*.jsonl",
+        "training_run_ids": ["RUN-TRAIN"],
+        "seed": 20260824,
     }
 
 

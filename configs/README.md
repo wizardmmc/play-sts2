@@ -3,23 +3,23 @@
 本目录下的 TOML 是按机器维护的本地配置，不进入 Git；已有工作区会继续保留这些
 文件，新环境首次运行前需要按下面的契约创建对应配置。
 
-`sft.toml` 保存 Qwen LoRA SFT 的默认数据、模型和超参数。
+`sft.toml` 保存 Qwen LoRA SFT 的本机默认数据、模型和超参数。
 训练日志写入 `runs/sft/<name>/`，最终 adapter 写入
-`models/adapters/<name>/`，名称必须以 `YYYYMMDD-` 开头。当前配置用 round-2
-e2 adapter 初始化新的 E3 运行，使用
-`1e-4`、r16/alpha32、2,048-token 分块 CE，并每 2,000 个优化
+`models/adapters/<name>/`，名称必须以 `YYYYMMDD-` 开头。E4 CUDA 配置用冻结的
+E3 adapter 初始化新运行，使用 `5e-5`/`1e-4` 两组对照、r16/alpha32、
+梯度累积 8、2,048-token 分块 CE，并每 250 个优化
 步覆盖一次带 AdamW、游标和随机状态的精确 `checkpoint-last`；同名运行增加
 `--resume` 可以精确恢复。验证/测试由 `data/raw/human/splits.json` 按完整局
 隔离；改动配置后先运行 token 化与单步冒烟，禁止静默截断或高频 checkpoint。
 
-`sft-e3-mix.toml` 只保存 train 中高频人类动作的上限：知识实体与事实必须全部
-保留，远古者由上游知识生成范围排除；未列出的低频动作全部保留。运行
-`uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml` 重建正式分卷。
+`sft-e4-mix.toml` 只保存 train 中高频人类动作的上限及旧行为数据的真实游戏版本：
+知识实体与事实必须全部保留，远古者由上游知识生成范围排除；未列出的低频动作全部
+保留。构建时显式指定 `generated-v0.111.0`。
 
 `sft-cuda.toml` 使用同一数据和 LoRA 配方，但只允许 `cuda` 或 `cuda:N`，基座以
 BF16 加载，LoRA 可训练参数仍强制为 FP32。通过独立的 `sft-cuda` 子命令运行，
-不改变 Mac 默认配置和 `sft` 命令。当前新版数据一轮共有 11,485 个优化步，因此 CUDA
-配置每 500 步覆盖一次 `checkpoint-last`，保证整轮训练期间可以精确续训。
+不改变 Mac 默认配置和 `sft` 命令。E4 每轮实际使用 10,247 条样本，梯度累积 8 后
+约 1,281 个优化步；CUDA 配置每 250 步覆盖一次 `checkpoint-last`。
 
 `inference.toml` 是本地模型转换、服务、冒烟和游戏 Runner 共用的唯一模型选择。
 `artifact_id`、合并目录和 MLX 目录必须对应；默认预先指向下一轮 e3，因此 e3

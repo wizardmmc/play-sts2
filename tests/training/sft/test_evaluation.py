@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import play_sts2.training.sft.evaluation as evaluation_module
 from play_sts2.training.sft import (
     GeneratedReply,
     decode_generation,
@@ -35,6 +36,39 @@ def test_score_generation_reports_exact_match_and_action_shape() -> None:
     assert exact.action_shape_valid is True
     assert invalid.exact_match is False
     assert invalid.action_shape_valid is False
+
+
+def test_score_generation_treats_every_no_thinking_action_failure_as_failure() -> None:
+    """空输出、格式错误、不可用动作和越界参数都必须保留为失败。
+
+    Raises:
+        AssertionError: no-thinking 评测漏记任一实际失败类型。
+
+    Returns:
+        None: 此测试不调用模型，也不执行重试或 reasoning 恢复。
+    """
+    common = {
+        "expected": "ACTION: end_turn",
+        "source": "human_play",
+        "available_actions": ["choose_map_node", "end_turn"],
+        "legal_actions": ["ACTION: choose_map_node 0", "ACTION: end_turn"],
+    }
+    cases = {
+        "empty_output": "",
+        "invalid_format": "先结束回合。\nACTION: end_turn",
+        "unavailable_action": "ACTION: play_card 0",
+        "invalid_parameters": "ACTION: choose_map_node 99",
+    }
+
+    for failure, generated in cases.items():
+        score = score_generation(generated=generated, **common)
+        assert score.action_legal is False
+        assert score.action_failure == failure
+
+    legal = score_generation(generated="ACTION: choose_map_node 0", **common)
+    assert legal.action_shape_valid is True
+    assert legal.action_legal is True
+    assert legal.action_failure is None
 
 
 def test_decode_generation_marks_missing_eos_as_truncated() -> None:
@@ -70,6 +104,23 @@ def test_decode_generation_marks_missing_eos_as_truncated() -> None:
     assert truncated == GeneratedReply("3,4", truncated=True)
 
 
+def test_default_generation_reports_keep_temperatures_separate() -> None:
+    """贪心和正温评测的默认文件名必须能够同时冻结。
+
+    Raises:
+        AssertionError: temperature 0 与 0.8 仍会写入同一路径。
+
+    Returns:
+        None: 此测试只检查稳定的默认报告文件名。
+    """
+    greedy = evaluation_module._generation_output_name("adapter-e3", "validation", 0.0)
+    sampled = evaluation_module._generation_output_name("adapter-e3", "validation", 0.8)
+
+    assert greedy == "adapter-e3-validation-t0.jsonl"
+    assert sampled == "adapter-e3-validation-t0p8.jsonl"
+    assert greedy != sampled
+
+
 def test_evaluate_rows_writes_per_sample_generations(tmp_path: Path) -> None:
     """生成式评测保存逐样本结果并汇总行为动作外形。
 
@@ -95,6 +146,8 @@ def test_evaluate_rows_writes_per_sample_generations(tmp_path: Path) -> None:
         {
             "sample_id": "human/RUN/1",
             "source": "human_play",
+            "available_actions": ["end_turn"],
+            "legal_actions": ["ACTION: end_turn"],
             "messages": [
                 {"role": "user", "content": "可结束回合。"},
                 {"role": "assistant", "content": "ACTION: end_turn"},
@@ -127,6 +180,12 @@ def test_evaluate_rows_writes_per_sample_generations(tmp_path: Path) -> None:
         "action_samples": 1,
         "valid_action_shapes": 1,
         "valid_action_shape_rate": 1.0,
+        "legal_actions": 0,
+        "legal_action_rate": 0.0,
+        "empty_action_outputs": 0,
+        "invalid_action_formats": 0,
+        "unavailable_actions": 1,
+        "invalid_action_parameters": 0,
         "truncated_samples": 1,
     }
     records = [
@@ -136,3 +195,5 @@ def test_evaluate_rows_writes_per_sample_generations(tmp_path: Path) -> None:
     assert records[1]["expected"] == "ACTION: end_turn"
     assert records[1]["generated"] == "ACTION: play_card 0"
     assert records[1]["truncated"] is True
+    assert records[1]["action_legal"] is False
+    assert records[1]["action_failure"] == "unavailable_action"

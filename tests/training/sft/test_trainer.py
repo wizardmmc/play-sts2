@@ -105,6 +105,88 @@ def test_optimize_updates_a_tiny_causal_model(tmp_path: Path) -> None:
     assert trace["loss"] > 0
 
 
+def test_optimize_uses_matching_knowledge_question_in_each_epoch(
+    tmp_path: Path,
+) -> None:
+    """每轮只训练该轮知识问法，同时重复无轮次的锚点样本。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离日志目录。
+
+    Raises:
+        AssertionError: 某轮读入其他轮次问法，或遗漏通用锚点。
+
+    Returns:
+        None: 此测试使用微型模型检查实际参与优化的样本数。
+    """
+    torch = pytest.importorskip("torch")
+
+    class TinyCausalModel(torch.nn.Module):
+        """提供最小的因果语言模型 loss 接口。"""
+
+        def __init__(self) -> None:
+            """创建一个四 token 词表的嵌入与投影。"""
+            super().__init__()
+            self.embedding = torch.nn.Embedding(4, 4)
+            self.head = torch.nn.Linear(4, 4)
+
+        def forward(
+            self,
+            *,
+            input_ids: object,
+            attention_mask: object,
+            labels: object,
+            use_cache: bool,
+        ) -> SimpleNamespace:
+            """计算向后错一位的交叉熵。
+
+            Args:
+                input_ids (object): 输入 token 张量。
+                attention_mask (object): 有效 token 掩码。
+                labels (object): 含忽略位的监督标签。
+                use_cache (bool): 是否启用 KV cache。
+
+            Returns:
+                SimpleNamespace: 含可反传标量 loss 的输出。
+            """
+            assert attention_mask is not None
+            assert use_cache is False
+            logits = self.head(self.embedding(input_ids))
+            loss = torch.nn.functional.cross_entropy(
+                logits[:, :-1].reshape(-1, 4),
+                labels[:, 1:].reshape(-1),
+            )
+            return SimpleNamespace(loss=loss)
+
+    samples = [
+        TokenizedSample("knowledge-e1", "knowledge", (0, 1), (-100, 1), 1),
+        TokenizedSample("knowledge-e2", "knowledge", (0, 2), (-100, 2), 2),
+        TokenizedSample("behavior-anchor", "human_play", (0, 3), (-100, 3)),
+    ]
+
+    result = optimize(
+        TinyCausalModel(),
+        samples,
+        device="cpu",
+        epochs=2,
+        learning_rate=0.1,
+        gradient_accumulation_steps=1,
+        seed=7,
+        trace_path=tmp_path / "metrics.jsonl",
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert result.samples_seen == 4
+    assert result.optimizer_steps == 4
+    assert [row["epoch"] for row in rows].count(1) == 2
+    assert [row["epoch"] for row in rows].count(2) == 2
+
+
 def test_training_rejects_base_model_changed_after_fingerprint(
     tmp_path: Path,
 ) -> None:

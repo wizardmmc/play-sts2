@@ -287,13 +287,13 @@ def test_eval_sft_command_uses_named_split(
         None: 此测试不加载真实模型。
     """
     config = object()
-    calls: list[tuple[object, Path, str, int | None, Path | None]] = []
+    calls: list[tuple[object, Path, str, int | None, Path | None, float]] = []
     monkeypatch.setattr(cli, "load_sft_config", lambda path: config)
     monkeypatch.setattr(
         cli,
         "evaluate_sft",
-        lambda value, adapter, split, max_samples=None, output_path=None: (
-            calls.append((value, adapter, split, max_samples, output_path))
+        lambda value, adapter, split, max_samples=None, output_path=None, temperature=0.0: (
+            calls.append((value, adapter, split, max_samples, output_path, temperature))
             or {"samples": 2}
         ),
     )
@@ -311,6 +311,8 @@ def test_eval_sft_command_uses_named_split(
             "2",
             "--output",
             "runs/eval/demo.jsonl",
+            "--temperature",
+            "0.8",
         ]
     )
 
@@ -322,6 +324,7 @@ def test_eval_sft_command_uses_named_split(
             "eval",
             2,
             Path("runs/eval/demo.jsonl"),
+            0.8,
         )
     ]
     assert '"samples": 2' in capsys.readouterr().out

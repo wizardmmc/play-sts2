@@ -1,7 +1,7 @@
 """在战略与战斗之间调度模型，直到当前一局结束。"""
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from ..client import GameClient
-from ..harness import HarnessLayer, format_action, shop_purchase_available
+from ..harness import HarnessLayer, shop_purchase_available
 from ..inference import DecisionProvider
 from .battle import BattleRunner
 from .decision import (
@@ -24,8 +24,6 @@ from .strategic import StrategicRunner
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_MAX_STRATEGIC_STEPS = 400
 _DEFAULT_STATE_TIMEOUT = 30.0
-_SHOP_LOOP_ACTIONS = {"close_shop_inventory", "open_shop_inventory"}
-_SHOP_LOOP_REPETITIONS = 3
 
 
 class RunError(RuntimeError):
@@ -138,12 +136,24 @@ class RunRunner:
         battle_count = 0
         strategic_steps = 0
         conflict_retries = 0
-        shop_trace: list[tuple[str, str]] = []
-        warned_shop_loops: set[tuple[tuple[str, str], ...]] = set()
-        shop_notice_active = False
+        card_reward_skipped = False
+        shop_inventory_closed = False
 
         while True:
-            route = classify_run_state(state)
+            screen = str(state.get("screen") or "")
+            if screen not in {"REWARD", "CARD_SELECTION"}:
+                card_reward_skipped = False
+            if screen != "SHOP":
+                shop_inventory_closed = False
+            model_state = _hide_skipped_card_rewards(
+                state,
+                hide_card_rewards=card_reward_skipped,
+            )
+            model_state = _hide_closed_shop_inventory(
+                model_state,
+                inventory_closed=shop_inventory_closed,
+            )
+            route = classify_run_state(model_state)
             if route is RunRoute.TRANSIENT:
                 state = self._wait_for_route(
                     state,
@@ -160,8 +170,6 @@ class RunRunner:
                     final_state=state,
                 )
             if route is RunRoute.BATTLE:
-                shop_trace.clear()
-                shop_notice_active = False
                 battle = self._battle.run(state)
                 battle_count += 1
                 decisions.extend(
@@ -173,12 +181,10 @@ class RunRunner:
             if strategic_steps >= self._max_strategic_steps:
                 raise RunError(f"战略动作数超过上限: {self._max_strategic_steps}")
             try:
-                notice = (
-                    _shop_loop_notice(state)
-                    if shop_notice_active
-                    else _shop_exit_notice(state)
+                step = self._strategic.step(
+                    model_state,
+                    notice=_shop_exit_notice(model_state),
                 )
-                step = self._strategic.step(state, notice=notice)
             except httpx.HTTPStatusError as exc:
                 latest = stale_state_from_conflict(exc)
                 if latest is None and not is_action_window_conflict(exc):
@@ -194,24 +200,15 @@ class RunRunner:
             conflict_retries = 0
             strategic_steps += 1
             decisions.append(RunDecision(HarnessLayer.STRATEGIC, step))
-            state = self._state_after(
+            next_state = self._state_after(
                 step.action_result,
                 after_revision=state_revision(state),
             )
-            shop_trace.append((step.observation.text, format_action(step.action)))
-            del shop_trace[: -2 * _SHOP_LOOP_REPETITIONS]
-            loop = _repeated_shop_loop(shop_trace)
-            if loop is not None:
-                shop_trace.clear()
-                if loop in warned_shop_loops:
-                    raise RunError(
-                        "模型在纠偏提示后仍重复战略动作循环: "
-                        "open_shop_inventory ↔ close_shop_inventory"
-                    )
-                warned_shop_loops.add(loop)
-                shop_notice_active = True
-            elif step.action.name not in _SHOP_LOOP_ACTIONS:
-                shop_notice_active = False
+            if step.action.name == "skip_reward_cards":
+                card_reward_skipped = True
+            if step.action.name == "close_shop_inventory":
+                shop_inventory_closed = True
+            state = next_state
 
     def _state_after(
         self,
@@ -297,55 +294,79 @@ def _terminal_outcome(state: Mapping[str, Any]) -> RunOutcome:
     return RunOutcome.VICTORY if victory is True else RunOutcome.DIED
 
 
-def _repeated_shop_loop(
-    trace: Sequence[tuple[str, str]],
-) -> tuple[tuple[str, str], ...] | None:
-    """识别同两份模型观测之间连续三次开关商店的周期。
+def _hide_skipped_card_rewards(
+    state: Mapping[str, Any],
+    *,
+    hide_card_rewards: bool,
+) -> dict[str, Any]:
+    """在当前奖励流程内隐藏模型已经明确跳过的卡牌入口。
+
+    只改变交给模型的状态副本，不执行游戏动作，也不隐藏金币、药水、遗物
+    等其他奖励。奖励索引会在领取其他奖励后重排，因此这里按奖励类型遮蔽，
+    离开奖励流程后由调用方恢复显示。
 
     Args:
-        trace (Sequence[tuple[str, str]]): 按执行顺序记录的观测与动作行。
+        state (Mapping[str, Any]): Mod 返回的当前完整状态。
+        hide_card_rewards (bool): 本次奖励流程是否已经跳过卡牌选择。
 
     Returns:
-        tuple[tuple[str, str], ...] | None: 与起点无关的两步循环键；
-        尚未形成真实商店周期时返回 ``None``。
+        dict[str, Any]: 可安全交给战略 Harness 的状态副本。
     """
-    window_size = 2 * _SHOP_LOOP_REPETITIONS
-    if len(trace) < window_size:
-        return None
-    window = tuple(trace[-window_size:])
-    cycle = window[:2]
-    if window != cycle * _SHOP_LOOP_REPETITIONS:
-        return None
-    actions = {entry[1].split()[1] for entry in cycle}
-    if actions != _SHOP_LOOP_ACTIONS:
-        return None
-    reversed_cycle = (cycle[1], cycle[0])
-    return min(cycle, reversed_cycle)
-
-
-def _shop_loop_notice(state: Mapping[str, Any]) -> str:
-    """根据当前商店页面给出不代打的循环出口提示。
-
-    Args:
-        state (Mapping[str, Any]): 待交给战略模型的当前商店状态。
-
-    Returns:
-        str: 说明库存语义、当前真实出口和再次循环后果的提示。
-    """
-    actions = {str(action) for action in state.get("available_actions") or []}
-    if "proceed" in actions:
-        exit_hint = "立刻输出 `ACTION: proceed` 离开商店。"
-    elif "close_shop_inventory" in actions:
-        exit_hint = (
-            "若不再购买，先输出 `ACTION: close_shop_inventory`；"
-            "回到商店后再使用真实离开动作。"
+    model_state = dict(state)
+    if state.get("screen") != "REWARD" or not hide_card_rewards:
+        return model_state
+    reward = state.get("reward")
+    if not isinstance(reward, Mapping):
+        return model_state
+    rewards = reward.get("rewards") or []
+    visible_rewards = [
+        item
+        for item in rewards
+        if not (
+            isinstance(item, Mapping)
+            and str(item.get("reward_type") or "").casefold() == "card"
         )
-    else:
-        exit_hint = "请使用当前页面真实的离开动作。"
-    return (
-        "注意：你已经连续重复商店开关动作循环。商店库存不会因关闭并重新打开而刷新；"
-        f"{exit_hint}harness 不会替你操作；再次重复该循环将终止本局。"
-    )
+    ]
+    if len(visible_rewards) == len(rewards):
+        return model_state
+    model_reward = dict(reward)
+    model_reward["rewards"] = visible_rewards
+    model_state["reward"] = model_reward
+    if not any(
+        isinstance(item, Mapping) and item.get("claimable") is not False
+        for item in visible_rewards
+    ):
+        model_state["available_actions"] = [
+            action
+            for action in state.get("available_actions") or []
+            if action != "claim_reward"
+        ]
+    return model_state
+
+
+def _hide_closed_shop_inventory(
+    state: Mapping[str, Any],
+    *,
+    inventory_closed: bool,
+) -> dict[str, Any]:
+    """在同一次商店访问关闭库存后隐藏重新打开动作。
+
+    Args:
+        state (Mapping[str, Any]): Mod 返回或已做奖励遮蔽的模型状态。
+        inventory_closed (bool): 当前商店访问是否已经主动关闭过库存。
+
+    Returns:
+        dict[str, Any]: 仅移除无新信息重开动作的状态副本。
+    """
+    model_state = dict(state)
+    if state.get("screen") != "SHOP" or not inventory_closed:
+        return model_state
+    model_state["available_actions"] = [
+        action
+        for action in state.get("available_actions") or []
+        if action != "open_shop_inventory"
+    ]
+    return model_state
 
 
 def _shop_exit_notice(state: Mapping[str, Any]) -> str | None:

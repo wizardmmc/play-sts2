@@ -104,21 +104,18 @@ def test_load_tokenized_samples_recurses_directory_tree(tmp_path: Path) -> None:
     ):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "sample_id": sample_id,
+            "source": ("human_play" if sample_id.startswith("human") else "knowledge"),
+            "messages": [
+                {"role": "user", "content": "状态"},
+                {"role": "assistant", "content": "答案"},
+            ],
+        }
+        if sample_id.startswith("knowledge"):
+            row["training_epoch"] = 2
         path.write_text(
-            json.dumps(
-                {
-                    "sample_id": sample_id,
-                    "source": (
-                        "human_play" if sample_id.startswith("human") else "knowledge"
-                    ),
-                    "messages": [
-                        {"role": "user", "content": "状态"},
-                        {"role": "assistant", "content": "答案"},
-                    ],
-                },
-                ensure_ascii=False,
-            )
-            + "\n",
+            json.dumps(row, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
 
@@ -128,6 +125,7 @@ def test_load_tokenized_samples_recurses_directory_tree(tmp_path: Path) -> None:
         "knowledge/ZAP",
         "human/RUN/1",
     ]
+    assert [sample.training_epoch for sample in samples] == [2, None]
 
 
 def test_load_sft_config_reads_minimal_toml(tmp_path: Path) -> None:

@@ -87,12 +87,14 @@ class TokenizedSample:
         source (str): ``web_wiki``、``mod_export`` 或 ``human_play``。
         input_ids (tuple[int, ...]): 完整对话 token ID。
         labels (tuple[int, ...]): 非 assistant 位置为 ``-100`` 的训练标签。
+        training_epoch (int | None): 知识问法指定的训练轮次；锚点样本为空。
     """
 
     sample_id: str
     source: str
     input_ids: tuple[int, ...]
     labels: tuple[int, ...]
+    training_epoch: int | None = None
 
     @property
     def supervised_tokens(self) -> int:
@@ -172,6 +174,7 @@ def encode_messages(
     sample_id: str,
     source: str,
     max_length: int,
+    training_epoch: int | None = None,
 ) -> TokenizedSample:
     """用模型原生模板编码一个独立 assistant 回复。
 
@@ -184,6 +187,7 @@ def encode_messages(
         sample_id (str): 用于错误定位的稳定样本 ID。
         source (str): 样本来源类别。
         max_length (int): 允许的最大完整序列长度。
+        training_epoch (int | None): 当前问法指定的训练轮次。
 
     Raises:
         SftTrainingError: 消息形状、模板边界或序列长度不符合约定。
@@ -209,6 +213,7 @@ def encode_messages(
             source=source,
             input_ids=tuple(input_ids),
             labels=tuple(native_labels),
+            training_epoch=training_epoch,
         )
     prompt_ids = _render_messages(
         tokenizer,
@@ -225,6 +230,7 @@ def encode_messages(
         source=source,
         input_ids=tuple(input_ids),
         labels=tuple(labels),
+        training_epoch=training_epoch,
     )
 
 
@@ -349,6 +355,7 @@ def load_tokenized_samples(
                 sample_id = row.get("sample_id")
                 source = row.get("source")
                 messages = row.get("messages")
+                training_epoch = row.get("training_epoch")
                 if (
                     not isinstance(sample_id, str)
                     or not isinstance(source, str)
@@ -358,6 +365,14 @@ def load_tokenized_samples(
                     raise SftTrainingError(
                         f"SFT 行缺少样本字段: {jsonl_path}:{line_number}"
                     )
+                if training_epoch is not None and (
+                    not isinstance(training_epoch, int)
+                    or isinstance(training_epoch, bool)
+                    or training_epoch not in {1, 2, 3, 4, 5}
+                ):
+                    raise SftTrainingError(
+                        f"SFT 行 training_epoch 无效: {jsonl_path}:{line_number}"
+                    )
                 samples.append(
                     encode_messages(
                         tokenizer,
@@ -365,6 +380,7 @@ def load_tokenized_samples(
                         sample_id=sample_id,
                         source=source,
                         max_length=max_length,
+                        training_epoch=training_epoch,
                     )
                 )
     if not samples:

@@ -5,6 +5,7 @@ from .actions import (
     HarnessAction,
     action_signature,
     format_action,
+    legal_action_lines,
     model_actions,
     parse_action,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "action_signature",
     "build_observation",
     "format_action",
+    "legal_action_lines",
     "model_actions",
     "parse_action",
     "shop_purchase_available",

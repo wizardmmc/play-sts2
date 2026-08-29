@@ -17,7 +17,15 @@ from ...game_knowledge import (
     KnowledgeFormatError,
     parse_knowledge_entry,
 )
-from ...harness import HarnessAction, build_observation, format_action, system_prompt
+from ...harness import (
+    HarnessAction,
+    build_observation,
+    format_action,
+    legal_action_lines,
+    model_actions,
+    shop_purchase_available,
+    system_prompt,
+)
 from ...recording.audit import RawRunIntegrityError, audit_human_run
 
 _CATEGORY_NAMES = {
@@ -190,6 +198,8 @@ def build_sft_dataset(
             "seed": mix_config.seed,
             "human_train_action_limits": mix_config.human_train_action_limits,
         }
+        if mix_config.human_game_version is not None:
+            mix_manifest["human_game_version"] = mix_config.human_game_version
     _validate_dataset_identity(splits)
     formal_manifest = Path(knowledge_root) / "_knowledge_manifest.json"
     is_formal = formal_manifest.is_file()
@@ -244,9 +254,15 @@ def build_sft_dataset(
             "validation_runs": sorted(run_splits["dev"]),
             "eval_runs": sorted(run_splits["test"]),
         },
+        "behavior_audit": _behavior_audit(splits),
     }
     if mix_manifest is not None:
         manifest["mix"] = mix_manifest
+        if mix_config.human_game_version is not None:
+            manifest["human"]["game_version"] = mix_config.human_game_version
+    arithmetic_provenance = _arithmetic_provenance(Path(knowledge_root))
+    if arithmetic_provenance is not None:
+        manifest["arithmetic"] = arithmetic_provenance
     manifest_path = _write_dataset_tree(destination, splits, manifest)
     return SftDatasetResult(
         output_root=destination,
@@ -258,6 +274,35 @@ def build_sft_dataset(
         dev_count=len(splits["dev"]),
         test_count=len(splits["test"]),
     )
+
+
+def _arithmetic_provenance(knowledge_root: Path) -> dict[str, Any] | None:
+    """提取合成算术候选的输入与随机种子血缘。
+
+    Args:
+        knowledge_root (Path): 同时包含知识和算术候选的根目录。
+
+    Raises:
+        DatasetBuildError: 算术 manifest 存在但缺少必需来源字段。
+
+    Returns:
+        dict[str, Any] | None: 可嵌入 SFT manifest 的精简来源；不存在时为空。
+    """
+    path = Path(knowledge_root) / "arithmetic/_manifest.json"
+    if not path.is_file():
+        return None
+    manifest = _read_json_object(path)
+    required = ("source", "human_root", "training_run_ids", "seed")
+    if any(field not in manifest for field in required):
+        raise DatasetBuildError(f"算术候选 manifest 缺少来源字段: {path}")
+    return {
+        "candidate_manifest": path.relative_to(knowledge_root).as_posix(),
+        "candidate_manifest_sha256": _sha256(path),
+        "source": manifest["source"],
+        "human_root": manifest["human_root"],
+        "training_run_ids": manifest["training_run_ids"],
+        "seed": manifest["seed"],
+    }
 
 
 def validate_sft_dataset(root: Path) -> dict[str, Any]:
@@ -275,6 +320,9 @@ def validate_sft_dataset(root: Path) -> dict[str, Any]:
     """
     root = Path(root)
     manifest = _read_json_object(root / "manifest.json")
+    behavior_audit = _read_json_object(root / "behavior-audit.json")
+    if behavior_audit != manifest.get("behavior_audit"):
+        raise DatasetBuildError("SFT 行为审计与 manifest 不一致")
     files = manifest.get("files")
     if not isinstance(files, Mapping):
         raise DatasetBuildError(f"SFT manifest 缺少 files: {root}")
@@ -392,10 +440,25 @@ def _validate_formal_coverage(
         raise DatasetBuildError("正式知识候选没有可训练事实")
     for fact_id, rows in fact_rows.items():
         roles = Counter(str(row.get("question_role", "")) for row in rows)
-        if roles["train"] < 1 or roles["validation"] != 1 or roles["eval"] != 1:
+        if roles["train"] != 5 or roles["validation"] != 1 or roles["eval"] != 1:
             raise DatasetBuildError(
-                f"事实 {fact_id} 必须有 train>=1、validation=1、eval=1: {dict(roles)}"
+                f"事实 {fact_id} 必须有 train=5、validation=1、eval=1: {dict(roles)}"
             )
+        training_epochs = sorted(
+            row.get("training_epoch")
+            for row in rows
+            if row.get("question_role") == "train"
+        )
+        if training_epochs != [1, 2, 3, 4, 5]:
+            raise DatasetBuildError(
+                f"事实 {fact_id} 的训练轮次必须为 [1, 2, 3, 4, 5]: {training_epochs}"
+            )
+        if any(
+            "training_epoch" in row
+            for row in rows
+            if row.get("question_role") != "train"
+        ):
+            raise DatasetBuildError(f"事实 {fact_id} 的留出问法不能声明训练轮次")
         answers = {_knowledge_answer_text(row) for row in rows}
         if len(answers) != 1:
             raise DatasetBuildError(f"事实 {fact_id} 的三套问法答案不一致")
@@ -612,6 +675,10 @@ def _write_dataset_tree(
             }
             for path, rows in sorted(file_rows.items(), key=lambda item: str(item[0]))
         }
+        _atomic_write_text(
+            staging / "behavior-audit.json",
+            json.dumps(manifest["behavior_audit"], ensure_ascii=False, indent=2) + "\n",
+        )
         _atomic_write_text(
             staging / "manifest.json",
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -942,6 +1009,18 @@ def _curated_knowledge_rows(root: Path) -> Iterator[dict[str, Any]]:
                     {"role": "assistant", "content": completion.strip()},
                 ],
             }
+            training_epoch = row.get("training_epoch")
+            if training_epoch is not None:
+                if (
+                    role != "train"
+                    or not isinstance(training_epoch, int)
+                    or isinstance(training_epoch, bool)
+                    or training_epoch not in {1, 2, 3, 4, 5}
+                ):
+                    raise DatasetBuildError(
+                        f"知识问答 training_epoch 无效: {path}:{line_number}"
+                    )
+                output["training_epoch"] = training_epoch
             detail = row.get("source_detail")
             if isinstance(detail, str) and detail.strip():
                 output["source_detail"] = detail
@@ -1048,10 +1127,15 @@ def _behavior_row(
         action_line = format_action(
             HarnessAction(name=action_name, parameters=dict(parameters))
         )
+        legal_lines = legal_action_lines(state)
     except ValueError as exc:
         raise DatasetBuildError(
             f"{resolved_run_id}:{sequence} 动作不符合 Harness"
         ) from exc
+    if action_line not in legal_lines:
+        raise DatasetBuildError(
+            f"{resolved_run_id}:{sequence} 动作参数不在当前合法边界: {action_line}"
+        )
     row = {
         "sample_id": f"human_play/{resolved_run_id}/{sequence}",
         "source": "human_play",
@@ -1059,6 +1143,8 @@ def _behavior_row(
         "layer": observation.layer.value,
         "screen": str(state.get("screen", "UNKNOWN")),
         "action": action_name,
+        "available_actions": list(observation.available_actions),
+        "legal_actions": list(legal_lines),
         "tags": _behavior_tags(state, action_name, parameters),
         "messages": [
             {
@@ -1090,8 +1176,11 @@ def _behavior_tags(
         list[str]: 按名称排序且不重复的行为标签。
     """
     tags = {action}
-    if action == "use_potion":
-        tags.add("potion_use")
+    available = set(model_actions(state))
+    if "use_potion" in available:
+        tags.add("potion:use" if action == "use_potion" else "potion:hold")
+    if action == "discard_potion":
+        tags.add("potion:discard")
     if action == "choose_rest_option":
         rest = state.get("rest")
         options = rest.get("options") if isinstance(rest, Mapping) else None
@@ -1109,7 +1198,108 @@ def _behavior_tags(
             option_id = selected.get("option_id") if selected is not None else None
             if isinstance(option_id, str) and option_id:
                 tags.add(f"rest:{option_id.casefold()}")
+    screen = state.get("screen")
+    if screen == "SHOP":
+        if action in {"buy_card", "buy_potion", "buy_relic"}:
+            tags.update({"shop:purchase", f"shop:{action}"})
+        elif action == "proceed":
+            tags.add("shop:leave")
+        elif action == "open_shop_inventory":
+            tags.add("shop:open")
+        elif action == "close_shop_inventory":
+            tags.add("shop:close")
+        elif action == "remove_card_at_shop":
+            tags.add("shop:remove_card")
+        shop = state.get("shop")
+        if isinstance(shop, Mapping):
+            purchase_available = shop_purchase_available(shop)
+            if purchase_available is not None:
+                tags.add(
+                    "shop:affordable" if purchase_available else "shop:no_affordable"
+                )
+    if screen == "CARD_SELECTION":
+        if action == "choose_reward_card":
+            tags.add("card_reward:choose")
+        elif action == "skip_reward_cards":
+            tags.add("card_reward:skip")
+        elif action == "choose_reward_alternative":
+            tags.add("card_reward:alternative")
     return sorted(tags)
+
+
+def _behavior_audit(
+    splits: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """汇总关键行为及训练分卷的成对决策覆盖。
+
+    Args:
+        splits (Mapping[str, list[dict[str, Any]]]): 最终三个 SFT 分卷。
+
+    Returns:
+        dict[str, Any]: 可单独审查的动作、页面、标签和训练对照计数。
+    """
+    split_reports: dict[str, dict[str, Any]] = {}
+    for split, rows in splits.items():
+        behavior_rows = [row for row in rows if row.get("source") == "human_play"]
+        actions = Counter(str(row.get("action", "")) for row in behavior_rows)
+        screens = Counter(str(row.get("screen", "")) for row in behavior_rows)
+        tags = Counter(
+            str(tag)
+            for row in behavior_rows
+            for tag in row.get("tags", [])
+            if isinstance(tag, str)
+        )
+        split_reports[_PUBLIC_SPLIT_NAMES[split]] = {
+            "samples": len(behavior_rows),
+            "actions": dict(sorted(actions.items())),
+            "screens": dict(sorted(screens.items())),
+            "tags": dict(sorted(tags.items())),
+        }
+
+    train_tags = split_reports["train"]["tags"]
+    contrast_specs = {
+        "card_reward_choose_vs_skip": {
+            "choose": "card_reward:choose",
+            "skip": "card_reward:skip",
+        },
+        "potion_use_vs_hold": {"hold": "potion:hold", "use": "potion:use"},
+        "rest_heal_vs_smith": {"heal": "rest:heal", "smith": "rest:smith"},
+        "shop_purchase_vs_leave": {
+            "leave": "shop:leave",
+            "purchase": "shop:purchase",
+        },
+    }
+    contrasts = {
+        name: _behavior_contrast(train_tags, tags)
+        for name, tags in sorted(contrast_specs.items())
+    }
+    return {
+        "format": "sft_behavior_audit_v1",
+        "splits": split_reports,
+        "training_contrasts": contrasts,
+        "missing_training_contrasts": [
+            name for name, record in contrasts.items() if not record["available"]
+        ],
+    }
+
+
+def _behavior_contrast(
+    tag_counts: Mapping[str, int],
+    variants: Mapping[str, str],
+) -> dict[str, Any]:
+    """把一组行为标签转换为成对覆盖记录。
+
+    Args:
+        tag_counts (Mapping[str, int]): 训练分卷的标签计数。
+        variants (Mapping[str, str]): 展示名称到稳定标签的映射。
+
+    Returns:
+        dict[str, Any]: 各分支计数及是否全部出现。
+    """
+    counts = {
+        name: int(tag_counts.get(tag, 0)) for name, tag in sorted(variants.items())
+    }
+    return {"available": all(count > 0 for count in counts.values()), "counts": counts}
 
 
 def _is_event_id(value: object) -> bool:

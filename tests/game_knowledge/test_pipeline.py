@@ -689,8 +689,8 @@ supplement_source: web_wiki:monster_moves_cycles;human_rl_cycle_lab:pending_obse
         .splitlines()
         if line.strip()
     ]
-    assert result.entry_count == len(rows) + len(power_rows) + len(monster_rows) + 64
-    assert result.categories["encounters"] == 64
+    assert result.entry_count == len(rows) + len(power_rows) + len(monster_rows) + 112
+    assert result.categories["encounters"] == 112
     assert len(rows) >= 5
     assert len({row["prompt"] for row in rows}) == len(rows)
     assert all(row["fact_id"].startswith("cards/DUALCAST/") for row in rows)
@@ -707,6 +707,21 @@ supplement_source: web_wiki:monster_moves_cycles;human_rl_cycle_lab:pending_obse
         and sum(row["question_role"] == "eval" for row in fact_rows) == 1
         for fact_rows in facts.values()
     )
+    assert all(
+        sorted(
+            int(row["training_epoch"])
+            for row in fact_rows
+            if row["question_role"] == "train"
+        )
+        == [1, 2, 3, 4, 5]
+        for fact_rows in facts.values()
+    )
+    assert all(
+        "training_epoch" not in row
+        for fact_rows in facts.values()
+        for row in fact_rows
+        if row["question_role"] != "train"
+    )
     assert all(row["source"] != "web_wiki" for row in rows)
     assert all("最右侧" not in row["completion"] for row in rows)
     assert any("最旧（队首）" in row["completion"] for row in rows)
@@ -720,7 +735,7 @@ supplement_source: web_wiki:monster_moves_cycles;human_rl_cycle_lab:pending_obse
     )
     assert manifest["question_roles"] == {
         "eval": manifest["facts"],
-        "train": len(rows + power_rows + monster_rows) + 64 - 2 * manifest["facts"],
+        "train": 5 * manifest["facts"],
         "validation": manifest["facts"],
     }
     assert all("1" in row["prompt"] for row in power_rows)
@@ -1402,7 +1417,7 @@ is_default: true
     hp_answers = [
         row["completion"] for row in monster_rows if row["completion"] == " 100。"
     ]
-    assert len(hp_answers) == 4
+    assert len(hp_answers) == 7
     assert not (output / "encounters/TEST_SUBJECT_BOSS.jsonl").exists()
     assert not (output / "encounters/OBSERVED_COMPOSITIONS.jsonl").exists()
     assert not (output / "acts/OVERGROWTH.jsonl").exists()
@@ -1412,13 +1427,13 @@ is_default: true
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert len(encounter_rows) == 16
+    assert len(encounter_rows) == 28
     assert {row["category"] for row in encounter_rows} == {"encounters"}
     assert all(
         sum(
             row["completion"] == candidate["completion"] for candidate in encounter_rows
         )
-        == 4
+        == 7
         for row in encounter_rows
     )
     assert any("全部怪池" in row["prompt"] for row in encounter_rows)
@@ -1741,13 +1756,13 @@ def test_rebuild_generates_complete_defect_orb_knowledge(tmp_path: Path) -> None
     )
     assert "## 充能球：闪电" in canonical
     assert "## 充能球：等离子" in canonical
-    assert len(rows) == 59
+    assert len(rows) == 91
     lightning_mechanics = [
         row
         for row in rows
         if "闪电" in row["prompt"] and "被动（回合结束）3，激发8" in row["completion"]
     ]
-    assert len(lightning_mechanics) == 5
+    assert len(lightning_mechanics) == 7
     answers = [row["completion"].strip() for row in rows]
     assert (
         "初始HP75，金币99，每回合能量3，充能球槽3。"

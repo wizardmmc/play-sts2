@@ -144,6 +144,7 @@ Mod 原始 `acts` 负责四张地图的分级怪池，生成后统一归入
 ```text
 data/datasets/sft/
 ├── manifest.json
+├── behavior-audit.json
 ├── train/
 │   ├── arithmetic/*.jsonl
 │   ├── cards/*.jsonl
@@ -158,7 +159,10 @@ data/datasets/sft/
 
 知识问答和每个人类动作各占一行。行为行统一为独立的
 `system/user/assistant`，通过当前 Harness 从 raw 重新生成观测和规范
-`ACTION:`。Dataset 不缓存 token ID，也不把一场战斗拼成增长的多轮历史。
+`ACTION:`，并保存当时的 `available_actions` 与精确展开的 `legal_actions`。
+参考动作不在合法集合时拒绝构建。Dataset 不缓存 token ID，也不把一场战斗拼成
+增长的多轮历史。`behavior-audit.json` 按分卷记录动作、页面、条件标签，以及药水
+使用/保留、营火休息/锻造、商店购买/离开和卡牌奖励选择/跳过的训练对照。
 知识候选使用可读 `fact_id` 和显式 `question_role`；每个正式事实至少有一条 train
 问法，并恰好有一条 validation 和 eval 问法。三种问题原文发生精确重合时拒绝
 发布。算术同样显式标记三种用途，并使用互不相同的随机种子；`case_id` 由题型和

@@ -87,12 +87,12 @@ _POTION_USAGE_NAMES = {
 
 @dataclass(frozen=True, slots=True)
 class _QuestionFact:
-    """保存一个事实及其三种明确用途的问法。
+    """保存一个事实及其七种明确用途的问法。
 
     Args:
         key (str): 实体内可读且稳定的事实名称。
         answer (str): 三套问法共享的规范答案。
-        train_questions (tuple[str, ...]): 一条或多条训练问法。
+        train_questions (tuple[str, ...]): 分别供五轮训练使用的自然问法。
         validation_question (str): 唯一验证问法。
         evaluation_question (str): 唯一最终评测问法。
     """
@@ -261,7 +261,7 @@ def _validate_map_catalog(snapshot_root: Path) -> None:
         if missing:
             raise ValueError(f"地图 {entry.object_id} 缺少怪池: {missing}")
         facts = _map_encounter_questions(entry)
-        if len(facts) != 4 or any(len(fact.train_questions) != 2 for fact in facts):
+        if len(facts) != 4 or any(len(fact.train_questions) != 5 for fact in facts):
             raise ValueError(f"地图 {entry.object_id} 必须生成 4 个怪池事实")
 
 
@@ -465,6 +465,11 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
     seen_keys: set[str] = set()
     for fact in facts:
         answer = _normalize_generated_answer(fact.answer)
+        if len(fact.train_questions) != 5:
+            raise ValueError(
+                "知识事实必须恰好提供五轮训练问法: "
+                f"{category}/{entry.object_id}/{fact.key}"
+            )
         questions = (
             ("train", fact.train_questions),
             ("validation", (fact.validation_question,)),
@@ -487,7 +492,7 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
                     f"知识事实缺少 {question_role} 问法: "
                     f"{category}/{entry.object_id}/{fact.key}"
                 )
-            for question in role_questions:
+            for question_index, question in enumerate(role_questions, start=1):
                 question = question.strip()
                 if not question or question in seen_questions:
                     raise ValueError(
@@ -504,6 +509,8 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
                     "prompt": f"Q: {question}\nA:",
                     "completion": f" {answer}",
                 }
+                if question_role == "train":
+                    row["training_epoch"] = question_index
                 supplement_source = _question_supplement_source(
                     category,
                     entry,
@@ -596,14 +603,26 @@ def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="description",
                 answer=full,
-                train_questions=(f"'{entry.name}'是什么牌？", detail_prompt),
+                train_questions=(
+                    f"'{entry.name}'是什么牌？",
+                    detail_prompt,
+                    f"请完整介绍不能主动打出的卡牌'{entry.name}'。",
+                    f"'{entry.name}'的归属、类型、效果和目标分别是什么？",
+                    f"如果要核对'{entry.name}'的整张卡面，应记录哪些信息？",
+                ),
                 validation_question=f"请完整说明卡牌'{entry.name}'的类别、归属与效果。",
                 evaluation_question=f"卡牌'{entry.name}'的完整卡面信息应如何描述？",
             ),
             _QuestionFact(
                 key="playability",
                 answer="不能直接打出。",
-                train_questions=(f"'{entry.name}'能否直接打出？",),
+                train_questions=(
+                    f"'{entry.name}'能否直接打出？",
+                    f"手牌中的'{entry.name}'可以由玩家主动使用吗？",
+                    f"'{entry.name}'是否属于正常可打出的卡牌？",
+                    f"玩家能直接选择并打出'{entry.name}'吗？",
+                    f"在没有额外规则时，'{entry.name}'具备可打出性吗？",
+                ),
                 validation_question=f"玩家可以从手牌中主动使用'{entry.name}'吗？",
                 evaluation_question=f"未受其他规则影响时，'{entry.name}'是不是可打出的牌？",
             ),
@@ -616,6 +635,9 @@ def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 train_questions=(
                     f"'{entry.name}'是什么牌？",
                     f"请给出'{entry.name}'的类别、归属、稀有度、费用和完整效果。",
+                    f"请完整介绍卡牌'{entry.name}'的卡面规则。",
+                    f"'{entry.name}'的身份、消耗、目标与作用分别是什么？",
+                    f"如果要核对'{entry.name}'的完整资料，应列出哪些内容？",
                 ),
                 validation_question=f"请完整介绍卡牌'{entry.name}'的身份、费用与效果。",
                 evaluation_question=f"如果要核对'{entry.name}'的完整卡面，应得到什么信息？",
@@ -625,6 +647,10 @@ def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 answer=f"{cost_text}。{effect}",
                 train_questions=(
                     f"'{entry.name}'在没有外界影响时的费用和效果是什么？",
+                    f"打出基础状态的'{entry.name}'要消耗什么，并会产生什么作用？",
+                    f"请同时说明'{entry.name}'的原始费用与卡牌效果。",
+                    f"未受任何费用修正时，'{entry.name}'如何消耗资源并结算？",
+                    f"'{entry.name}'的基础消耗和功能分别是什么？",
                 ),
                 validation_question=(
                     f"不受减费或加费影响时，'{entry.name}'消耗什么资源并产生什么效果？"
@@ -634,14 +660,26 @@ def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="cost-and-identity",
                 answer=f"{cost_text}，{card_type}({character}·{rarity})。",
-                train_questions=(f"'{entry.name}'这张牌的费用是多少？",),
+                train_questions=(
+                    f"'{entry.name}'这张牌的费用是多少？",
+                    f"请给出'{entry.name}'的基础消耗、类型、角色归属与稀有度。",
+                    f"'{entry.name}'需要多少资源，它属于什么卡牌分类？",
+                    f"核对'{entry.name}'的身份时，费用、类别和稀有度分别是什么？",
+                    f"不考虑效果文本，'{entry.name}'的卡牌身份和消耗如何记录？",
+                ),
                 validation_question=f"'{entry.name}'的基础费用、类型、归属和稀有度是什么？",
                 evaluation_question=f"查阅'{entry.name}'时，它的消耗与卡牌分类应如何记录？",
             ),
             _QuestionFact(
                 key="cost",
                 answer=f"{cost_text}。",
-                train_questions=(f"打出'{entry.name}'需要几点费用？",),
+                train_questions=(
+                    f"打出'{entry.name}'需要几点费用？",
+                    f"'{entry.name}'的基础资源消耗是多少？",
+                    f"未受增减费影响时，使用'{entry.name}'要付多少费用？",
+                    f"卡牌'{entry.name}'原本需要消耗多少能量或星能？",
+                    f"请只回答'{entry.name}'的基础费用。",
+                ),
                 validation_question=f"'{entry.name}'的基础能量或星能消耗是多少？",
                 evaluation_question=f"没有费用修正时，使用'{entry.name}'要支付多少资源？",
             ),
@@ -654,7 +692,13 @@ def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 _QuestionFact(
                     key="upgrade",
                     answer=compact_upgrade,
-                    train_questions=(f"'{entry.name}'升级后有什么变化？",),
+                    train_questions=(
+                        f"'{entry.name}'升级后有什么变化？",
+                        f"把'{entry.name}'升级为加强版会改动哪些内容？",
+                        f"'{entry.name}+'相较未升级版本提升了什么？",
+                        f"请说明卡牌'{entry.name}'的升级收益。",
+                        f"升级会怎样改变'{entry.name}'的费用、数值或效果？",
+                    ),
                     validation_question=f"'{entry.name}+'相较基础版本改动了什么？",
                     evaluation_question=(
                         f"将'{entry.name}'升级后，卡面数值或效果会如何变化？"
@@ -663,7 +707,13 @@ def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 _QuestionFact(
                     key="upgraded-description",
                     answer=f"基础效果:{effect}升级变化:{compact_upgrade}",
-                    train_questions=(f"升级后的'{entry.name}'怎么描述？",),
+                    train_questions=(
+                        f"升级后的'{entry.name}'怎么描述？",
+                        f"请对照说明'{entry.name}'升级前后的完整效果。",
+                        f"'{entry.name}'的基础作用是什么，升级又改变了什么？",
+                        f"完整比较普通'{entry.name}'与'{entry.name}+'。",
+                        f"要理解升级版'{entry.name}'，需要知道哪些基础效果和改动？",
+                    ),
                     validation_question=f"请同时说明'{entry.name}'的基础效果与升级改动。",
                     evaluation_question=f"完整比较'{entry.name}'升级前后的效果。",
                 ),
@@ -690,18 +740,26 @@ def _relic_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     if rarity == "None":
         rarity = ""
     full = f"{rarity}。{effect}" if rarity else effect
+    description_training = (
+        f"遗物'{entry.name}'的效果是什么？",
+        f"请完整介绍遗物'{entry.name}'。",
+        f"获得'{entry.name}'后会发生什么，它属于什么稀有度？",
+        f"'{entry.name}'的遗物分类与规则效果分别是什么？",
+        f"核对遗物'{entry.name}'时，应记录怎样的完整说明？",
+    )
+    if not rarity:
+        description_training = (
+            f"遗物'{entry.name}'的效果是什么？",
+            f"请完整介绍遗物'{entry.name}'。",
+            f"获得'{entry.name}'后会发生什么？",
+            f"'{entry.name}'会给玩家带来怎样的规则变化？",
+            f"核对遗物'{entry.name}'时，应记录怎样的完整说明？",
+        )
     facts = [
         _QuestionFact(
             key="effect" if not rarity else "description",
             answer=full,
-            train_questions=(
-                f"遗物'{entry.name}'的效果是什么？",
-                *(
-                    ()
-                    if not rarity
-                    else (f"请给出遗物'{entry.name}'的稀有度和完整效果。",)
-                ),
-            ),
+            train_questions=description_training,
             validation_question=f"取得遗物'{entry.name}'后会获得什么效果？",
             evaluation_question=f"遗物'{entry.name}'的完整规则说明是什么？",
         )
@@ -711,7 +769,13 @@ def _relic_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="effect",
                 answer=effect,
-                train_questions=(f"'{entry.name}'有什么作用？",),
+                train_questions=(
+                    f"'{entry.name}'有什么作用？",
+                    f"玩家取得遗物'{entry.name}'后会获得什么效果？",
+                    f"只看功能，'{entry.name}'会如何影响游戏？",
+                    f"遗物'{entry.name}'的规则能力具体是什么？",
+                    f"请说明'{entry.name}'实际提供的效果。",
+                ),
                 validation_question=f"'{entry.name}'会怎样影响玩家？",
                 evaluation_question=f"只看功能，遗物'{entry.name}'具体做什么？",
             )
@@ -721,7 +785,13 @@ def _relic_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="rarity",
                 answer=f"{rarity}。",
-                train_questions=(f"遗物'{entry.name}'是什么稀有度？",),
+                train_questions=(
+                    f"遗物'{entry.name}'是什么稀有度？",
+                    f"'{entry.name}'被划分到哪一档遗物？",
+                    f"游戏中的'{entry.name}'属于什么稀有度类别？",
+                    f"请只说明遗物'{entry.name}'的稀有度。",
+                    f"按遗物分类，'{entry.name}'是哪一级？",
+                ),
                 validation_question=f"'{entry.name}'属于哪个遗物稀有度？",
                 evaluation_question=f"游戏将遗物'{entry.name}'归入什么稀有度？",
             )
@@ -756,6 +826,9 @@ def _potion_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             train_questions=(
                 f"药水'{entry.name}'的效果是什么？",
                 f"使用'{entry.name}'会发生什么？",
+                f"'{entry.name}'结算后会产生哪些作用？",
+                f"请说明药水'{entry.name}'的具体功能。",
+                f"玩家使用'{entry.name}'时，游戏会执行什么效果？",
             ),
             validation_question=f"喝下或使用药水'{entry.name}'会产生什么作用？",
             evaluation_question=f"药水'{entry.name}'结算时具体执行什么效果？",
@@ -763,21 +836,39 @@ def _potion_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         _QuestionFact(
             key="rarity",
             answer=f"{rarity}。",
-            train_questions=(f"药水'{entry.name}'是什么稀有度？",),
+            train_questions=(
+                f"药水'{entry.name}'是什么稀有度？",
+                f"'{entry.name}'属于哪一级药水？",
+                f"游戏把'{entry.name}'划入什么药水稀有度？",
+                f"请只回答药水'{entry.name}'的稀有度分类。",
+                f"按药水等级，'{entry.name}'是哪一档？",
+            ),
             validation_question=f"'{entry.name}'属于哪一级药水稀有度？",
             evaluation_question=f"游戏把药水'{entry.name}'归类为什么稀有度？",
         ),
         _QuestionFact(
             key="usage-and-target",
             answer=f"使用方式:{usage}。目标:{target}。",
-            train_questions=(f"'{entry.name}'什么时候可以使用？",),
+            train_questions=(
+                f"'{entry.name}'什么时候可以使用？",
+                f"药水'{entry.name}'能在什么时机使用，并以谁为目标？",
+                f"使用'{entry.name}'有哪些阶段和目标限制？",
+                f"'{entry.name}'的可用时机与合法目标是什么？",
+                f"请说明药水'{entry.name}'何时可用以及需要指定什么目标。",
+            ),
             validation_question=f"药水'{entry.name}'的可用时机和目标限制是什么？",
             evaluation_question=f"在什么阶段能使用'{entry.name}'，又能指定谁为目标？",
         ),
         _QuestionFact(
             key="usage-and-effect",
             answer=f"{usage}。{effect}",
-            train_questions=(f"请给出药水'{entry.name}'的使用方式和完整效果。",),
+            train_questions=(
+                f"请给出药水'{entry.name}'的使用方式和完整效果。",
+                f"'{entry.name}'何时能够使用，使用后会怎样？",
+                f"请同时说明药水'{entry.name}'的时机规则与作用。",
+                f"完整介绍'{entry.name}'的使用条件和结算效果。",
+                f"玩家应在什么阶段使用'{entry.name}'，它具体做什么？",
+            ),
             validation_question=f"请连同使用时机说明'{entry.name}'的作用。",
             evaluation_question=f"完整介绍药水'{entry.name}'何时可用以及会发生什么。",
         ),
@@ -807,9 +898,24 @@ def _power_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         description_train = (
             f"{subject}是什么效果？",
             f"{subject}的类别和具体效果是什么？",
+            f"请完整解释{subject}会怎样结算。",
+            f"{subject}属于哪类状态，又会影响什么？",
+            f"核对{subject}时，应记录怎样的分类与规则说明？",
         )
-        effect_train = (f"{subject}会产生什么作用？",)
-        kind_train = (f"{subject}是增益还是减益？",)
+        effect_train = (
+            f"{subject}会产生什么作用？",
+            f"{subject}具体怎样影响目标？",
+            f"请只说明{subject}的实际效果。",
+            f"结算{subject}时游戏会执行什么规则？",
+            f"目标拥有{subject}后会发生怎样的变化？",
+        )
+        kind_train = (
+            f"{subject}是增益还是减益？",
+            f"应把{subject}归类为哪种能力？",
+            f"从状态类别看，{subject}属于增益还是减益？",
+            f"请只回答{subject}的能力类型。",
+            f"游戏将{subject}标记为什么类别？",
+        )
         validation_subject = f"当'{entry.name}'层数或强度为{amount}时"
         evaluation_subject = f"以强度{amount}结算'{entry.name}'时"
     else:
@@ -817,9 +923,24 @@ def _power_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         description_train = (
             f"{subject}是什么效果？",
             f"{subject}的类别和具体效果是什么？",
+            f"请完整解释{subject}的规则。",
+            f"{subject}属于哪类状态，又会影响什么？",
+            f"核对{subject}时，应记录怎样的分类与效果？",
         )
-        effect_train = (f"{subject}会产生什么作用？",)
-        kind_train = (f"{subject}是增益还是减益？",)
+        effect_train = (
+            f"{subject}会产生什么作用？",
+            f"{subject}具体怎样影响目标？",
+            f"请只说明{subject}的实际效果。",
+            f"拥有{subject}时游戏会执行什么规则？",
+            f"目标获得{subject}后会发生怎样的变化？",
+        )
+        kind_train = (
+            f"{subject}是增益还是减益？",
+            f"应把{subject}归类为哪种能力？",
+            f"从状态类别看，{subject}属于增益还是减益？",
+            f"请只回答{subject}的能力类型。",
+            f"游戏将{subject}标记为什么类别？",
+        )
         validation_subject = f"能力'{entry.name}'"
         evaluation_subject = f"游戏状态中的'{entry.name}'"
     return [
@@ -868,21 +989,39 @@ def _enchantment_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         _QuestionFact(
             key="description",
             answer=detail,
-            train_questions=(f"附魔'{entry.name}'的效果是什么？",),
+            train_questions=(
+                f"附魔'{entry.name}'的效果是什么？",
+                f"请完整介绍附魔'{entry.name}'的规则与卡面附加。",
+                f"卡牌带有'{entry.name}'时，应怎样描述它的全部变化？",
+                f"'{entry.name}'会增加哪些效果或卡面文字？",
+                f"核对附魔'{entry.name}'时，需要记录哪些完整信息？",
+            ),
             validation_question=f"请说明附魔'{entry.name}'的完整规则与卡面附加。",
             evaluation_question=f"检查附魔'{entry.name}'时，应记录哪些完整效果？",
         ),
         _QuestionFact(
             key="effect",
             answer=effect,
-            train_questions=(f"卡牌获得'{entry.name}'后会怎样？",),
+            train_questions=(
+                f"卡牌获得'{entry.name}'后会怎样？",
+                f"附魔'{entry.name}'具体会怎样改变一张牌？",
+                f"请只说明'{entry.name}'施加到卡牌后的规则效果。",
+                f"一张牌带有'{entry.name}'时会获得什么作用？",
+                f"'{entry.name}'对承载它的卡牌产生什么影响？",
+            ),
             validation_question=f"一张牌被赋予'{entry.name}'后会获得什么作用？",
             evaluation_question=f"'{entry.name}'会怎样改变承载它的卡牌？",
         ),
         _QuestionFact(
             key="stackable",
             answer=f"可叠加:{stackable}。",
-            train_questions=(f"附魔'{entry.name}'能否叠加？",),
+            train_questions=(
+                f"附魔'{entry.name}'能否叠加？",
+                f"同一张牌可以拥有多层'{entry.name}'吗？",
+                f"重复施加'{entry.name}'是否会继续累加？",
+                f"请说明附魔'{entry.name}'的叠加许可。",
+                f"'{entry.name}'在一张牌上的多次附加如何处理？",
+            ),
             validation_question=f"同一张牌可以重复获得'{entry.name}'吗？",
             evaluation_question=f"'{entry.name}'的叠加规则是什么？",
         ),
@@ -913,7 +1052,13 @@ def _character_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         _QuestionFact(
             key="starting-loadout",
             answer=base,
-            train_questions=(f"'{entry.name}'的初始配置是什么？",),
+            train_questions=(
+                f"'{entry.name}'的初始配置是什么？",
+                f"新开一局选择'{entry.name}'时，会带着哪些资源、遗物和卡牌？",
+                f"请列出角色'{entry.name}'的开局生命、金币、能量与牌组。",
+                f"'{entry.name}'在游戏开始时的完整配置如何？",
+                f"核对'{entry.name}'的初始存档，应看到怎样的属性和装备？",
+            ),
             validation_question=f"新开一局时，'{entry.name}'拥有怎样的初始资源和牌组？",
             evaluation_question=f"请列出'{entry.name}'开局的生命、金币、能量、遗物与卡组。",
         )
@@ -924,7 +1069,13 @@ def _character_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="description",
                 answer=description,
-                train_questions=(f"'{entry.name}'是什么角色？",),
+                train_questions=(
+                    f"'{entry.name}'是什么角色？",
+                    f"请介绍一下角色'{entry.name}'。",
+                    f"游戏如何描述'{entry.name}'的定位？",
+                    f"'{entry.name}'的角色特色和背景简介是什么？",
+                    f"如果向新玩家说明'{entry.name}'，应怎样概括？",
+                ),
                 validation_question=f"游戏如何介绍角色'{entry.name}'？",
                 evaluation_question=f"'{entry.name}'的角色定位和简介是什么？",
             )
@@ -936,7 +1087,13 @@ def _character_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="orb-types",
                 answer="、".join(names) + "。",
-                train_questions=(f"'{entry.name}'的充能球有哪几种？",),
+                train_questions=(
+                    f"'{entry.name}'的充能球有哪几种？",
+                    f"角色'{entry.name}'可以生成哪些类型的充能球？",
+                    f"请枚举'{entry.name}'能使用的全部充能球。",
+                    f"'{entry.name}'的充能球体系包含哪些种类？",
+                    f"游戏为'{entry.name}'提供了哪几类充能球？",
+                ),
                 validation_question=f"'{entry.name}'能够生成哪些类型的充能球？",
                 evaluation_question=f"请列出'{entry.name}'可使用的全部充能球种类。",
             )
@@ -1016,6 +1173,8 @@ def _character_orb_questions(body: str) -> list[_QuestionFact]:
                         f"游戏如何描述'{name}'充能球？",
                         f"'{name}'充能球的效果是什么？",
                         f"生成'{name}'充能球后，它会提供什么效果？",
+                        f"请说明'{name}'充能球按规则会怎样生效。",
+                        f"故障机器人拥有'{name}'充能球时会获得什么作用？",
                     ),
                     validation_question=f"请用游戏规则说明'{name}'充能球的作用。",
                     evaluation_question=f"'{name}'充能球生成后会按什么规则生效？",
@@ -1031,6 +1190,8 @@ def _character_orb_questions(body: str) -> list[_QuestionFact]:
                         f"实机测得'{name}'充能球的基础数值和集中关系是什么？",
                         f"'{name}'充能球的被动、激发和集中加成分别怎样？",
                         f"集中会如何影响'{name}'充能球的基础数值？",
+                        f"请列出'{name}'充能球的被动值、激发值与集中修正。",
+                        f"'{name}'充能球在零集中和增加集中后分别怎样计算？",
                     ),
                     validation_question=(
                         f"请给出'{name}'充能球的被动值、激发值以及集中修正。"
@@ -1065,6 +1226,9 @@ def _monster_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             train_questions=(
                 f"怪物'{entry.name}'在A0下的初始生命值范围是什么？",
                 f"'{entry.name}'在0进阶时开场可能有多少生命？",
+                f"不考虑进阶加成，'{entry.name}'的基础HP区间是多少？",
+                f"A0遭遇'{entry.name}'时，它会以多少生命进入战斗？",
+                f"请给出怪物'{entry.name}'在零进阶下的生命上下限。",
             ),
             validation_question=f"A0战斗开始时，'{entry.name}'可能拥有多少HP？",
             evaluation_question=f"不加进阶生命修正时，怪物'{entry.name}'的生命范围是多少？",
@@ -1072,14 +1236,26 @@ def _monster_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         _QuestionFact(
             key="room",
             answer=f"{room}。",
-            train_questions=(f"'{entry.name}'属于普通、精英还是Boss？",),
+            train_questions=(
+                f"'{entry.name}'属于普通、精英还是Boss？",
+                f"怪物'{entry.name}'对应哪一级战斗房间？",
+                f"应把'{entry.name}'归类为普通敌人、精英还是首领？",
+                f"'{entry.name}'的怪物等级是什么？",
+                f"遇到'{entry.name}'时，这场战斗属于普通、精英或Boss中的哪类？",
+            ),
             validation_question=f"怪物'{entry.name}'会被归为普通、精英还是首领？",
             evaluation_question=f"'{entry.name}'对应哪一种战斗房间等级？",
         ),
         _QuestionFact(
             key="summary",
             answer=f"怪物类型:{room}。基础HP:{hp}",
-            train_questions=(f"不考虑进阶难度，'{entry.name}'的基础信息是什么？",),
+            train_questions=(
+                f"不考虑进阶难度，'{entry.name}'的基础信息是什么？",
+                f"请同时给出'{entry.name}'的战斗类型与A0生命范围。",
+                f"怪物'{entry.name}'属于哪类房间，零进阶HP是多少？",
+                f"概括'{entry.name}'的基础分类和生命值。",
+                f"核对'{entry.name}'的基础战斗资料时，应记录什么？",
+            ),
             validation_question=f"请同时说明'{entry.name}'的怪物类型与A0生命值。",
             evaluation_question=f"'{entry.name}'的基础战斗分类和HP信息是什么？",
         ),
@@ -1089,7 +1265,13 @@ def _monster_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="moves",
                 answer=moves,
-                train_questions=(f"怪物'{entry.name}'有哪些招式？",),
+                train_questions=(
+                    f"怪物'{entry.name}'有哪些招式？",
+                    f"战斗中'{entry.name}'可能采取哪些行动？",
+                    f"请列出'{entry.name}'的所有已知招式及效果。",
+                    f"'{entry.name}'的行动表包含什么？",
+                    f"玩家面对'{entry.name}'时需要防备哪些招式？",
+                ),
                 validation_question=f"战斗中，'{entry.name}'可能使用哪些行动？",
                 evaluation_question=f"请列出怪物'{entry.name}'的全部已知招式。",
             )
@@ -1099,7 +1281,13 @@ def _monster_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             _QuestionFact(
                 key="cycle",
                 answer=cycle,
-                train_questions=(f"怪物'{entry.name}'的行动循环是什么？",),
+                train_questions=(
+                    f"怪物'{entry.name}'的行动循环是什么？",
+                    f"'{entry.name}'会按什么顺序重复出招？",
+                    f"请说明怪物'{entry.name}'的完整行动模式。",
+                    f"战斗拖长后，'{entry.name}'的招式循环怎样运转？",
+                    f"'{entry.name}'各回合行动的固定顺序是什么？",
+                ),
                 validation_question=f"'{entry.name}'会按照怎样的顺序重复行动？",
                 evaluation_question=f"怪物'{entry.name}'的出招循环如何运转？",
             )
@@ -1136,6 +1324,9 @@ def _map_encounter_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 train_questions=(
                     f"请汇总地图'{entry.name}'的全部怪池。",
                     f"地图'{entry.name}'的普通、精英和Boss怪池分别有哪些遭遇？",
+                    f"请完整列出'{entry.name}'各房间等级可能抽到的战斗。",
+                    f"'{entry.name}'的弱遭遇、常规遭遇、精英与首领池如何组成？",
+                    f"在地图'{entry.name}'推进时，全部类型的怪池分别包含什么？",
                 ),
                 validation_question=f"请按普通、精英和首领分类列出'{entry.name}'的怪池。",
                 evaluation_question=f"'{entry.name}'整张地图可能从哪些遭遇池抽取战斗？",
@@ -1149,6 +1340,9 @@ def _map_encounter_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 train_questions=(
                     f"地图'{entry.name}'的普通怪池有哪些遭遇？",
                     f"地图'{entry.name}'普通战斗的前期弱池和常规池分别是什么？",
+                    f"请区分列出'{entry.name}'的弱遭遇池与常规遭遇池。",
+                    f"'{entry.name}'前期和后续普通房间分别会抽到哪些战斗？",
+                    f"在'{entry.name}'走普通节点时，两个阶段的怪池怎样组成？",
                 ),
                 validation_question=f"'{entry.name}'的前期弱遭遇池和常规遭遇池各包含什么？",
                 evaluation_question=f"普通房间在'{entry.name}'前期与后续分别从哪些怪池取样？",
@@ -1162,6 +1356,9 @@ def _map_encounter_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 train_questions=(
                     f"地图'{entry.name}'的精英怪池有哪些遭遇？",
                     f"在地图'{entry.name}'进入精英房可能遇到哪些遭遇？",
+                    f"请列出'{entry.name}'所有可能的精英战斗。",
+                    f"'{entry.name}'的精英节点从什么遭遇池抽取？",
+                    f"玩家在'{entry.name}'挑战精英时可能面对哪些战斗？",
                 ),
                 validation_question=f"'{entry.name}'的精英节点会从哪些战斗中抽取？",
                 evaluation_question=f"请列出地图'{entry.name}'所有可能的精英遭遇。",
@@ -1175,6 +1372,9 @@ def _map_encounter_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
                 train_questions=(
                     f"地图'{entry.name}'的Boss池有哪些遭遇？",
                     f"地图'{entry.name}'末尾可能是哪几场Boss战？",
+                    f"请列出'{entry.name}'的全部首领候选。",
+                    f"'{entry.name}'最终会从哪些Boss遭遇中选择？",
+                    f"走到地图'{entry.name}'终点时可能面对哪些首领战？",
                 ),
                 validation_question=f"'{entry.name}'最终首领会从哪些Boss遭遇中选出？",
                 evaluation_question=f"请列出地图'{entry.name}'可能出现的全部Boss战。",
@@ -1216,6 +1416,9 @@ def _event_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             train_questions=(
                 f"事件'{entry.name}'有哪些已解析选项？",
                 f"在'{entry.name}'事件中可以选择什么？",
+                f"请列出事件'{entry.name}'当前确认过的全部选择。",
+                f"玩家进入'{entry.name}'后会看到哪些可选分支？",
+                f"'{entry.name}'已经验证的事件选项分别是什么？",
             ),
             validation_question=f"进入事件'{entry.name}'后，玩家会看到哪些已验证选择？",
             evaluation_question=f"请列出'{entry.name}'事件当前确认过的全部选项。",
@@ -1223,7 +1426,13 @@ def _event_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
         _QuestionFact(
             key="description-and-options",
             answer=f"{description}{options}",
-            train_questions=(f"请说明事件'{entry.name}'当前已验证的文本和选项。",),
+            train_questions=(
+                f"请说明事件'{entry.name}'当前已验证的文本和选项。",
+                f"完整介绍'{entry.name}'已经确认的情境与选择分支。",
+                f"事件'{entry.name}'会显示什么说明，又允许玩家做什么？",
+                f"请复述'{entry.name}'的已知事件文本及全部可选项。",
+                f"核对事件'{entry.name}'时，应记录怎样的描述和选择？",
+            ),
             validation_question=f"请完整复述'{entry.name}'已确认的事件文本和可选项。",
             evaluation_question=f"'{entry.name}'事件的已验证说明与选择分支是什么？",
         ),
@@ -1249,6 +1458,9 @@ def _keyword_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
             train_questions=(
                 f"游戏关键词'{entry.name}'是什么意思？",
                 f"解释一下'{entry.name}'。",
+                f"请给出《杀戮尖塔 2》中'{entry.name}'的规则定义。",
+                f"在游戏语境里，应怎样理解'{entry.name}'？",
+                f"'{entry.name}'这个关键词具体表示什么机制？",
             ),
             validation_question=f"在游戏规则中，'{entry.name}'应如何理解？",
             evaluation_question=f"请给出《杀戮尖塔 2》关键词'{entry.name}'的准确定义。",

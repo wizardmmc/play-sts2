@@ -23,10 +23,13 @@ SSE 精确人类动作 ─→ combat/strategy ─→ Harness ┘
 构建命令：
 
 ```bash
-uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
+uv run play-sts2-train build-sft \
+  --knowledge-root data/game_knowledge/generated-v0.111.0 \
+  --mix configs/sft-e4-mix.toml
 ```
 
-默认知识入口是 `generated-v0.107.1`。地图怪池由固定版本 Mod 的四张地图模型
+CLI 的兼容默认值仍是 `generated-v0.107.1`；E4 必须显式选择
+`generated-v0.111.0`。地图怪池由固定版本 Mod 的四张地图模型
 导出，并统一写成 `encounters/{地图ID}.jsonl` 候选；进场后已经可见的敌人数和
 敌人组合不生成监督题。算术只从 `data/raw/human/splits.json` 的训练
 名册读取通过 raw 审计的真实攻击意图后确定性生成，不读取验证、测试、不合格或
@@ -34,15 +37,17 @@ uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
 可训练局如果没有明确归属，构建会失败。审计失败的
 `A7L5LAXFYJ` 在 raw meta 中标记 `training_eligible=false`，保留追溯但不训练。
 
-当前数据共有 11,485 条训练样本、6,509 条验证样本和 6,736 条最终评测样本。
-远古者不进入正式数据；全部 1,347 个知识实体和 5,856 个显式事实进入 train，
-validation/eval 使用同一事实的独立自然改写。六类算术题分别使用三个随机种子，
+当前 E4 数据共有 34,123 条训练候选、6,622 条验证样本和 6,849 条最终评测样本；
+两轮训练各自实际选择 10,247 条，其中知识问法不重复，算术和行为锚点复用。
+E4 的远古者不进入正式数据；全部 1,552 个知识实体和 5,969 个显式事实进入 train。
+每个事实提供 `training_epoch=1..5` 五条训练问法，训练器第 N 轮只读取第 N 条；
+validation/eval 再使用同一事实的两条独立自然改写。六类算术题分别使用三个随机种子，
 高频常规动作只在 train 按配置上限抽样，未列出的低频动作全部保留。
 
 知识、算术和人类行为都直接位于三棵目录中，不再维护独立 probe 文件。任何知识
-问题跨 train/validation/eval 精确重合、事实缺少一种用途、类别或算术桶为空，
-都会令构建失败。
-当前训练继承 e2，且真实
+问题跨用途精确重合、事实缺少五轮训练或任一留出问法、类别或算术桶为空，都会令
+构建失败。算术与行为不声明 `training_epoch`，因此每轮作为回放锚点复用。
+当前训练继承冻结的 E3，且真实
 战斗、商店和奖励状态本来就会出现实体名称与效果，无法在不删除有价值行为数据
 的前提下证明实体从未进入模型。组合算术仍作为独立、可精确评分的泛化指标。
 
@@ -68,15 +73,16 @@ checkpoint 格式，但 CUDA 基座固定使用 BF16，并单独保存 CUDA RNG�
 
 ## 当前 LoRA 配方
 
-`configs/sft.toml` 继承第二轮 adapter：
+E4 CUDA 候选从冻结 E3 adapter 初始化：
 
 ```toml
-init_adapter = "models/adapters/sft-clean-20260827-native-r16-e2"
-epochs = 1
-learning_rate = 0.0001
+init_adapter = "models/adapters/20260828-sft-clean-native-r16-e3"
+epochs = 2
+learning_rate = 0.00005  # 对照组为 0.0001
 lora_rank = 16
 lora_alpha = 32
-warmup_steps = 4
+gradient_accumulation_steps = 8
+warmup_steps = 100
 max_length = 12288
 logits_chunk_size = 2048
 checkpoint_steps = 2000
@@ -113,34 +119,34 @@ SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 a
 
 ## 训练
 
-当前落盘数据已按 `configs/sft-e3-mix.toml` 构建为 E3 定向混合。修改候选数据或
-配比后，应重新生成知识与算术候选并运行同一混合命令。构建器会逐事实检查三种
-用途，并拒绝知识题面或算术案例跨分卷泄漏。
+当前落盘数据已按 `configs/sft-e4-mix.toml` 从 `generated-v0.111.0` 构建。修改
+候选数据或配比后，应重新生成知识与算术候选并运行同一混合命令。构建器会逐事实
+检查五轮训练与两套留出问法，并拒绝知识题面或算术案例跨用途泄漏。
 
 ```bash
 uv sync --group training
-uv run --group training play-sts2-train sft \
-  --config configs/sft.toml \
-  --name 20260828-sft-clean-native-r16-e3
+uv run --group training play-sts2-train sft-cuda \
+  --config configs/sft-e4-cuda-lr5e5.toml \
+  --name 20260829-sft-e4-knowledge-r16-lr5e5
 ```
 
-在 CUDA 机器上使用对应独立入口：
+第二张空闲 CUDA 卡使用同数据、同起点的 `1e-4` 对照配置：
 
 ```bash
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-cuda.toml \
-  --name 20260828-sft-clean-native-r16-e3
+  --config configs/sft-e4-cuda-lr1e4.toml \
+  --name 20260829-sft-e4-knowledge-r16-lr1e4
 ```
 
-训练名必须以 `YYYYMMDD-` 开头。`init_adapter` 表示“用 E2 LoRA 初始化一个新的
-E3 运行”，不是恢复中断的同一运行，所以 manifest 仍记录
-`approximate_resume=true`。E3 运行中断后使用同名 `--resume`，会恢复优化器、
+训练名必须以 `YYYYMMDD-` 开头。`init_adapter` 表示“用 E3 LoRA 初始化一个新的
+E4 运行”，不是恢复中断的同一运行，所以 manifest 仍记录
+`approximate_resume=true`。E4 运行中断后使用同名 `--resume`，会恢复优化器、
 数据游标和随机状态，并把 `metrics.jsonl` 从 checkpoint 的下一步继续追加：
 
 ```bash
-uv run --group training play-sts2-train sft \
-  --config configs/sft.toml \
-  --name 20260828-sft-clean-native-r16-e3 \
+uv run --group training play-sts2-train sft-cuda \
+  --config configs/sft-e4-cuda-lr5e5.toml \
+  --name 20260829-sft-e4-knowledge-r16-lr5e5 \
   --resume
 ```
 
@@ -148,8 +154,8 @@ CUDA 续训使用同一名称和独立子命令：
 
 ```bash
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-cuda.toml \
-  --name 20260828-sft-clean-native-r16-e3 \
+  --config configs/sft-e4-cuda-lr5e5.toml \
+  --name 20260829-sft-e4-knowledge-r16-lr5e5 \
   --resume
 ```
 
@@ -172,12 +178,19 @@ uv run --group training play-sts2-train eval-sft-loss \
 ```
 
 生成式验证用于检查完整输出、截断与 `ACTION:` 外形，但不能把动作外形合法等同
-于策略正确：
+于策略正确。行为行会使用数据中保存的可见动作和精确合法动作集合，分别统计空输出、
+格式错误、不可用动作与越界参数；不从 reasoning 恢复，也不重试。报告同时写明
+`enable_thinking=false` 和 `max_retries=0`：
 
 ```bash
 uv run --group training play-sts2-train eval-sft \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split validation
+  --split validation \
+  --temperature 0
+uv run --group training play-sts2-train eval-sft \
+  --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
+  --split validation \
+  --temperature 0.8
 ```
 
 ## 合并模型

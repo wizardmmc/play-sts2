@@ -16,10 +16,12 @@ class SftMixConfig:
 
     Args:
         seed (int): 确定性人类动作抽样种子。
+        human_game_version (str | None): 人类行为录制时的游戏版本声明。
         human_train_action_limits (dict[str, int]): 训练高频动作上限。
     """
 
     seed: int
+    human_game_version: str | None
     human_train_action_limits: dict[str, int]
 
 
@@ -42,13 +44,24 @@ def load_sft_mix(path: Path) -> SftMixConfig:
     try:
         seed = int(data["seed"])
         human = data["human"]
+        raw_game_version = human.get("game_version")
+        if raw_game_version is not None and (
+            not isinstance(raw_game_version, str) or not raw_game_version.strip()
+        ):
+            raise TypeError("human.game_version 必须是非空字符串")
         actions = _integer_mapping(
             human["train_max_per_action"],
             "human.train_max_per_action",
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DatasetBuildError(f"无效 SFT 混合配方: {path}: {exc}") from exc
-    config = SftMixConfig(seed=seed, human_train_action_limits=actions)
+    config = SftMixConfig(
+        seed=seed,
+        human_game_version=(
+            raw_game_version.strip() if isinstance(raw_game_version, str) else None
+        ),
+        human_train_action_limits=actions,
+    )
     apply_sft_mix(
         {"train": [], "dev": [], "test": []},
         seed=config.seed,

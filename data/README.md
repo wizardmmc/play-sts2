@@ -43,7 +43,8 @@ raw/{agent,human,human_combat_solver}/ ──────┘
   `human_combat_solver` 来源分组，不参与训练事实判定。
 - `datasets/sft/`：知识与人类动作经当前 Harness 渲染后的训练、验证和最终评测
   目录树。三棵树都按知识类别与实体拆分，并包含 `arithmetic/`、`combat/` 和
-  `strategy/`。
+  `strategy/`。根目录的 `behavior-audit.json` 按分卷汇总药水、营火、商店和
+  卡牌奖励的条件行为对照。
 
 当前 `datasets/sft/` 已按 `configs/sft-e3-mix.toml` 构建，共 11,485 条训练样本、
 6,509 条验证样本和 6,736 条最终评测样本。修改知识候选、算术候选或
@@ -52,6 +53,9 @@ raw/{agent,human,human_combat_solver}/ ──────┘
 构建器按显式 `question_role` 路由问法，要求每个正式知识事实至少一条 train 问法、
 恰好一条 validation 问法和一条 eval 问法，并拒绝三棵树之间的问题原文重合。
 混合配置只允许限制训练集中的高频人类动作，不能截断知识类别。
+每条行为样本还记录模型当时可见的 `available_actions` 和展开到具体索引的
+`legal_actions`；参考动作不在合法集合时，整次构建会失败。行为审计与 manifest
+保存相同内容，验证入口会拒绝二者不一致的数据树。
 
 不要直接修补派生产物。状态渲染错误应修 Harness；知识事实错误应修 Mod 导出器
 或 `src/play_sts2/game_knowledge/curated/v0.107.1.json`；人类行为准入由对应局

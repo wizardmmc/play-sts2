@@ -150,6 +150,9 @@ def test_load_sft_mix_reads_small_toml_recipe(tmp_path: Path) -> None:
     path.write_text(
         """seed = 20260828
 
+[human]
+game_version = "v0.107.1"
+
     [human.train_max_per_action]
 play_card = 600
 """,
@@ -159,6 +162,7 @@ play_card = 600
     config = load_sft_mix(path)
 
     assert config.seed == 20260828
+    assert config.human_game_version == "v0.107.1"
     assert config.human_train_action_limits == {"play_card": 600}
 
 

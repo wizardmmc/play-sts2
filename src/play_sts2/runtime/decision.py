@@ -155,7 +155,11 @@ class DecisionEngine:
             )
             replies.append(reply)
             try:
-                action = parse_action(reply.text, observation.available_actions)
+                action = parse_action(
+                    reply.text,
+                    observation.available_actions,
+                    reasoning=reply.reasoning,
+                )
                 _validate_action_for_state(action, state)
             except ActionParseError as exc:
                 errors.append(str(exc))
@@ -209,6 +213,9 @@ def _validate_action_for_state(
     state: Mapping[str, Any],
 ) -> None:
     """在提交 Mod 前核对模型动作引用的当前状态索引。"""
+    if action.name == "claim_reward":
+        _validate_claim_reward(action, state)
+        return
     if action.name != "play_card":
         return
 
@@ -246,6 +253,36 @@ def _validate_action_for_state(
     if target_index not in valid_targets:
         raise ActionParseError(
             f"target_index {target_index} 不在合法目标 {valid_targets}"
+        )
+
+
+def _validate_claim_reward(
+    action: HarnessAction,
+    state: Mapping[str, Any],
+) -> None:
+    """确认奖励索引仍存在于交给模型的奖励列表。
+
+    与手牌索引校验一致，观测中不存在的普通越界、已领取或已遮蔽索引都在
+    提交 Mod 前拒绝；可见但暂不可领取的奖励仍由 Mod 返回真实业务错误。
+
+    Args:
+        action (HarnessAction): 已通过文本协议解析的领取奖励动作。
+        state (Mapping[str, Any]): 生成当前模型观测的状态。
+
+    Raises:
+        ActionParseError: 模型引用了观测中不存在的奖励。
+    """
+    reward = state.get("reward")
+    rewards = reward.get("rewards") or [] if isinstance(reward, Mapping) else []
+    visible_indices = [
+        item.get("index", fallback_index)
+        for fallback_index, item in enumerate(rewards)
+        if isinstance(item, Mapping)
+    ]
+    option_index = action.parameters["option_index"]
+    if option_index not in visible_indices:
+        raise ActionParseError(
+            f"option_index {option_index} 不在当前奖励选项 {visible_indices}"
         )
 
 

@@ -96,8 +96,26 @@ def test_smoke_model_verifies_running_artifact_and_generates_legal_action(
         assert body["max_tokens"] == 512
         assert body["temperature"] == 0.2
         assert body["chat_template_kwargs"] == {"enable_thinking": True}
-        assert "战斗决策模型" in body["messages"][0]["content"]
-        assert body["messages"][1]["content"].endswith("可执行动作:\n- end_turn")
+        system_message = body["messages"][0]["content"]
+        assert "战斗决策模型" in system_message
+        user_message = body["messages"][1]["content"]
+        assert "可执行动作:\n- end_turn" in user_message
+        if "ACTION 绝不能写在思考区内" not in user_message:
+            return httpx.Response(
+                200,
+                json={
+                    "model": str(serving_model.resolve()),
+                    "choices": [
+                        {
+                            "message": {
+                                "reasoning": "ACTION: end_turn",
+                                "content": "",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
         return httpx.Response(
             200,
             json={

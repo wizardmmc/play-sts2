@@ -11,6 +11,10 @@ from .models import ChatMessage, ModelReply
 
 _DEFAULT_TIMEOUT_SECONDS = 120.0
 _CHAT_PATH = "/v1/chat/completions"
+_THINKING_OUTPUT_INSTRUCTION = (
+    "重要：ACTION 绝不能写在思考区内。完成分析后先输出 `</think>`，"
+    "然后输出 `ACTION: <动作> <参数>`。"
+)
 
 
 class InferenceProtocolError(RuntimeError):
@@ -133,10 +137,10 @@ class OpenAICompatibleProvider:
             ModelReply: 服务端生成的原始文本及可选用量信息。
         """
         body: dict[str, Any] = {
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in messages
-            ],
+            "messages": _request_messages(
+                messages,
+                enable_thinking=self._enable_thinking is True,
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
@@ -170,6 +174,34 @@ class OpenAICompatibleProvider:
         if reply.finish_reason == "length":
             raise InferenceGenerationTruncated(reply)
         return reply
+
+
+def _request_messages(
+    messages: Sequence[ChatMessage],
+    *,
+    enable_thinking: bool,
+) -> list[dict[str, str]]:
+    """构造请求消息，并为显式思考模式补充最终输出约束。
+
+    Args:
+        messages (Sequence[ChatMessage]): 调用方提供的完整对话。
+        enable_thinking (bool): 是否启用推理服务的隐藏思考模板。
+
+    Returns:
+        list[dict[str, str]]: 可直接放入 chat completion 请求的消息列表。
+    """
+    request_messages = [
+        {"role": message.role, "content": message.content} for message in messages
+    ]
+    if not enable_thinking:
+        return request_messages
+    for message in reversed(request_messages):
+        if message["role"] == "user":
+            message["content"] = (
+                f"{message['content']}\n\n{_THINKING_OUTPUT_INSTRUCTION}"
+            )
+            break
+    return request_messages
 
 
 def _parse_reply(
