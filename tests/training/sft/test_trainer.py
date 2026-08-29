@@ -11,13 +11,17 @@ from play_sts2.training.sft import (
     ChunkedCrossEntropy,
     MaskedTokenStats,
     OptimizationCheckpoint,
+    SftConfig,
     SftTrainingError,
     TokenizedSample,
     adapter_source_files,
+    attach_expanded_lora,
     attach_lora,
     chunked_masked_stats,
+    expand_lora_state_dict,
     optimize,
     publish_adapter,
+    save_epoch_checkpoint,
     save_last_checkpoint,
 )
 from play_sts2.training.sft import trainer as trainer_module
@@ -83,6 +87,7 @@ def test_optimize_updates_a_tiny_causal_model(tmp_path: Path) -> None:
     ]
 
     checkpoints: list[OptimizationCheckpoint] = []
+    epoch_checkpoints: list[OptimizationCheckpoint] = []
     result = optimize(
         model,
         samples,
@@ -94,11 +99,15 @@ def test_optimize_updates_a_tiny_causal_model(tmp_path: Path) -> None:
         trace_path=tmp_path / "metrics.jsonl",
         checkpoint_steps=1,
         checkpoint=checkpoints.append,
+        epoch_checkpoint=epoch_checkpoints.append,
     )
 
     assert result.optimizer_steps == 1
     assert result.samples_seen == 2
     assert [checkpoint.optimizer_steps for checkpoint in checkpoints] == [1]
+    assert [checkpoint.optimizer_steps for checkpoint in epoch_checkpoints] == [1]
+    assert epoch_checkpoints[0].epoch_index == 1
+    assert epoch_checkpoints[0].order == ()
     assert not torch.equal(before, model.head.weight)
     trace = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
     assert trace["samples"] == 2
@@ -159,8 +168,8 @@ def test_optimize_uses_matching_knowledge_question_in_each_epoch(
             return SimpleNamespace(loss=loss)
 
     samples = [
-        TokenizedSample("knowledge-e1", "knowledge", (0, 1), (-100, 1), 1),
-        TokenizedSample("knowledge-e2", "knowledge", (0, 2), (-100, 2), 2),
+        TokenizedSample("knowledge-e3", "knowledge", (0, 1), (-100, 1), 3),
+        TokenizedSample("knowledge-e4", "knowledge", (0, 2), (-100, 2), 4),
         TokenizedSample("behavior-anchor", "human_play", (0, 3), (-100, 3)),
     ]
 
@@ -173,6 +182,7 @@ def test_optimize_uses_matching_knowledge_question_in_each_epoch(
         gradient_accumulation_steps=1,
         seed=7,
         trace_path=tmp_path / "metrics.jsonl",
+        knowledge_epoch_start=3,
     )
 
     rows = [
@@ -185,6 +195,30 @@ def test_optimize_uses_matching_knowledge_question_in_each_epoch(
     assert result.optimizer_steps == 4
     assert [row["epoch"] for row in rows].count(1) == 2
     assert [row["epoch"] for row in rows].count(2) == 2
+
+
+def test_sample_indices_can_start_from_third_knowledge_question() -> None:
+    """独立 E5 运行的首轮应选择第 3 套知识问法并保留通用锚点。
+
+    Raises:
+        AssertionError: 本地 epoch 1 仍误选 E4 的第 1 套知识问法。
+
+    Returns:
+        None: 此测试只检查稳定样本索引选择。
+    """
+    samples = [
+        TokenizedSample("knowledge-e1", "knowledge", (0, 1), (-100, 1), 1),
+        TokenizedSample("knowledge-e3", "knowledge", (0, 2), (-100, 2), 3),
+        TokenizedSample("behavior-anchor", "human_play", (0, 3), (-100, 3)),
+    ]
+
+    indices = trainer_module._sample_indices_for_epoch(
+        samples,
+        0,
+        knowledge_epoch_start=3,
+    )
+
+    assert indices == [1, 2]
 
 
 def test_training_rejects_base_model_changed_after_fingerprint(
@@ -462,6 +496,89 @@ def test_attach_lora_seeds_adapter_initialization() -> None:
     assert first_lora.dtype == torch.float32
 
 
+@pytest.mark.filterwarnings("ignore:Could not find a config file in")
+def test_attach_expanded_lora_starts_with_identical_logits(tmp_path: Path) -> None:
+    """函数等价 r32 分支在训练前应与原低秩 adapter 输出一致。
+
+    Args:
+        tmp_path (Path): Pytest 提供的低秩 adapter 目录。
+
+    Raises:
+        AssertionError: 扩容改变模型 logits 或没有得到目标 rank。
+
+    Returns:
+        None: 此测试使用微型 Llama 和真实 PEFT 保存/加载路径。
+    """
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    def build_base() -> object:
+        """创建权重一致的微型 Llama 基座。
+
+        Returns:
+            object: 一层全注意力因果语言模型。
+        """
+        torch.manual_seed(101)
+        return transformers.LlamaForCausalLM(
+            transformers.LlamaConfig(
+                vocab_size=16,
+                max_position_embeddings=16,
+                hidden_size=8,
+                intermediate_size=16,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+            )
+        )
+
+    base = build_base()
+    base_config = tmp_path / "base/config.json"
+    base_config.parent.mkdir()
+    base.config.to_json_file(base_config)
+    base.config._name_or_path = str(base_config.parent)
+    source = attach_lora(
+        base,
+        rank=2,
+        alpha=4,
+        seed=7,
+        target_modules=("q_proj",),
+    )
+    source.peft_config["default"].base_model_name_or_path = str(base_config.parent)
+    with torch.no_grad():
+        for name, parameter in source.named_parameters():
+            if "lora_B" in name:
+                parameter.copy_(
+                    torch.arange(parameter.numel(), dtype=parameter.dtype).reshape_as(
+                        parameter
+                    )
+                    / 100
+                )
+    adapter = tmp_path / "r2"
+    source.save_pretrained(adapter, safe_serialization=True)
+    expanded_base = build_base()
+    expanded_base.config._name_or_path = str(base_config.parent)
+    expanded = attach_expanded_lora(
+        expanded_base,
+        adapter_path=adapter,
+        rank=4,
+        alpha=8,
+        seed=7,
+    )
+    input_ids = torch.tensor([[1, 2, 3]])
+
+    source.eval()
+    expanded.eval()
+    with torch.no_grad():
+        source_logits = source(input_ids=input_ids, use_cache=False).logits
+        expanded_logits = expanded(input_ids=input_ids, use_cache=False).logits
+
+    assert torch.allclose(source_logits, expanded_logits, atol=1e-6, rtol=0)
+    expanded_a = next(
+        parameter for name, parameter in expanded.named_parameters() if "lora_A" in name
+    )
+    assert expanded_a.shape[0] == 4
+
+
 def test_publish_adapter_does_not_leave_partial_destination(tmp_path: Path) -> None:
     """tokenizer 保存失败时最终 adapter 目录保持不存在。
 
@@ -701,6 +818,32 @@ def test_exact_resume_rejects_changed_resolved_device_or_dtype() -> None:
         )
 
 
+def test_exact_resume_accepts_legacy_config_without_new_default_fields() -> None:
+    """旧运行缺少 E5 新增默认字段时仍应允许精确恢复。
+
+    Raises:
+        AssertionError: 默认值归一化后仍被误判为配置变化。
+
+    Returns:
+        None: 此测试只检查跨版本恢复配置的兼容比较。
+    """
+    current = {
+        "epochs": 2,
+        "learning_rate": 0.0001,
+        "knowledge_epoch_start": 1,
+        "expand_init_adapter": False,
+    }
+    legacy = {"epochs": 2, "learning_rate": 0.0001}
+
+    trainer_module._validate_resume_config(legacy, current)
+
+    with pytest.raises(SftTrainingError, match="精确续训配置与原运行不一致"):
+        trainer_module._validate_resume_config(
+            legacy,
+            {**current, "knowledge_epoch_start": 3},
+        )
+
+
 def test_training_run_lock_rejects_concurrent_same_name(tmp_path: Path) -> None:
     """同名训练运行持锁期间第二个进程入口必须立即失败。
 
@@ -763,6 +906,50 @@ def test_training_run_name_requires_date_prefix() -> None:
         trainer_module._validate_run_name("e3-smoke-20260828")
 
 
+def test_validate_init_adapter_accepts_function_preserving_rank_expansion(
+    tmp_path: Path,
+) -> None:
+    """父 r16/alpha32 应允许扩成保持缩放比例的 r32/alpha64。
+
+    Args:
+        tmp_path (Path): Pytest 提供的父 adapter 目录。
+
+    Returns:
+        None: 配置满足扩容契约时不得抛出异常。
+    """
+    adapter = tmp_path / "e4"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "r": 16,
+                "lora_alpha": 32,
+                "target_modules": list(trainer_module.LORA_TARGET_MODULES),
+                "use_rslora": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = SftConfig(
+        base_model=tmp_path / "base",
+        dataset_root=tmp_path / "dataset",
+        adapter_root=tmp_path / "adapters",
+        runs_root=tmp_path / "runs",
+        device="cpu",
+        epochs=1,
+        learning_rate=1e-4,
+        max_length=128,
+        gradient_accumulation_steps=1,
+        seed=7,
+        lora_rank=32,
+        lora_alpha=64,
+        init_adapter=adapter,
+        expand_init_adapter=True,
+    )
+
+    trainer_module._validate_init_adapter(config)
+
+
 def test_save_last_checkpoint_replaces_one_fixed_directory(tmp_path: Path) -> None:
     """周期保存原子切换固定链接，不按步数积累 adapter 副本。
 
@@ -813,6 +1000,164 @@ def test_save_last_checkpoint_replaces_one_fixed_directory(tmp_path: Path) -> No
     )
     assert state["optimizer_steps"] == 2
     assert not (destination.parent / ".checkpoint-last-previous").exists()
+
+
+def test_save_epoch_checkpoint_publishes_one_immutable_directory(
+    tmp_path: Path,
+) -> None:
+    """完整轮末 checkpoint 应原子发布且拒绝覆盖同一轮。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离运行目录。
+
+    Raises:
+        AssertionError: 轮末产物不是实体目录或允许静默覆盖。
+
+    Returns:
+        None: 此测试只检查轮末 checkpoint 发布语义。
+    """
+
+    class FakeEpochModel:
+        """写出可辨认的最小 adapter 权重。"""
+
+        def save_pretrained(
+            self,
+            directory: Path,
+            *,
+            safe_serialization: bool,
+        ) -> None:
+            """把权重标记写入轮末暂存目录。
+
+            Args:
+                directory (Path): 自动创建的暂存目录。
+                safe_serialization (bool): 是否要求安全权重格式。
+
+            Returns:
+                None: 标记写入完成后返回。
+            """
+            assert safe_serialization is True
+            Path(directory, "adapter_model.safetensors").write_text(
+                "epoch",
+                encoding="utf-8",
+            )
+
+    destination = tmp_path / "run/checkpoint-epoch-1"
+    save_epoch_checkpoint(FakeEpochModel(), destination, {"optimizer_steps": 3})
+
+    assert destination.is_dir()
+    assert not destination.is_symlink()
+    assert (destination / "adapter_model.safetensors").read_text() == "epoch"
+    with pytest.raises(FileExistsError):
+        save_epoch_checkpoint(FakeEpochModel(), destination, {"optimizer_steps": 4})
+
+
+def test_resume_materializes_missing_epoch_snapshot_from_boundary_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """轮末指针已推进但不可变快照缺失时应从同一状态自愈。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离运行目录。
+
+    Raises:
+        AssertionError: 恢复没有复制物理快照或破坏原 checkpoint 指针。
+
+    Returns:
+        None: 此测试模拟轮末两步发布之间的进程中断。
+    """
+
+    class FakeBoundaryModel:
+        """写出可辨认的轮末 adapter 权重。"""
+
+        def save_pretrained(
+            self,
+            directory: Path,
+            *,
+            safe_serialization: bool,
+        ) -> None:
+            """把权重标记写入 checkpoint 暂存目录。
+
+            Args:
+                directory (Path): checkpoint 暂存目录。
+                safe_serialization (bool): 是否要求安全权重格式。
+
+            Returns:
+                None: 标记写入完成后返回。
+            """
+            assert safe_serialization is True
+            Path(directory, "adapter_model.safetensors").write_text(
+                "boundary",
+                encoding="utf-8",
+            )
+
+    torch = pytest.importorskip("torch")
+    run_path = tmp_path / "run"
+    checkpoint_last = run_path / "checkpoint-last"
+    payload = {
+        "format_version": 1,
+        "optimizer_steps": 3,
+        "samples_seen": 8,
+        "loss_sum": 1.0,
+        "epoch_index": 1,
+        "order": [],
+        "next_begin": 0,
+        "random_state": None,
+        "torch_rng_state": torch.get_rng_state(),
+        "device_rng_state": None,
+        "optimizer_state": {},
+    }
+    save_last_checkpoint(FakeBoundaryModel(), checkpoint_last, payload)
+    state = trainer_module.load_training_checkpoint(checkpoint_last, device="cpu")
+
+    trainer_module._reconcile_epoch_checkpoint(checkpoint_last, run_path, state)
+
+    snapshot = run_path / "checkpoint-epoch-1"
+    assert checkpoint_last.is_symlink()
+    assert snapshot.is_dir()
+    assert not snapshot.is_symlink()
+    assert (snapshot / "adapter_model.safetensors").read_text() == "boundary"
+    saved = torch.load(snapshot / "training_state.pt", weights_only=True)
+    assert saved["epoch_index"] == 1
+    assert saved["order"] == []
+    trainer_module._reconcile_epoch_checkpoint(checkpoint_last, run_path, state)
+
+
+def test_expand_lora_state_dict_preserves_old_delta_and_activates_new_rank() -> None:
+    """r32 扩容应复制旧通道、保留新 A 初始化并让新 B 从零开始。
+
+    Raises:
+        AssertionError: 扩容改变旧 LoRA 函数或把新增通道初始化成死零。
+
+    Returns:
+        None: 此测试使用手工矩阵检查扩容语义。
+    """
+    torch = pytest.importorskip("torch")
+    source = {
+        "layer.lora_A.weight": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        "layer.lora_B.weight": torch.tensor([[5.0, 6.0], [7.0, 8.0]]),
+    }
+    target = {
+        "layer.lora_A.weight": torch.tensor(
+            [[9.0, 9.0], [9.0, 9.0], [0.1, 0.2], [0.3, 0.4]]
+        ),
+        "layer.lora_B.weight": torch.zeros((2, 4)),
+    }
+
+    expanded = expand_lora_state_dict(source, target)
+
+    assert torch.equal(
+        expanded["layer.lora_A.weight"][:2], source["layer.lora_A.weight"]
+    )
+    assert torch.equal(
+        expanded["layer.lora_A.weight"][2:], target["layer.lora_A.weight"][2:]
+    )
+    assert torch.equal(
+        expanded["layer.lora_B.weight"][:, :2], source["layer.lora_B.weight"]
+    )
+    assert torch.count_nonzero(expanded["layer.lora_B.weight"][:, 2:]) == 0
+    old_delta = source["layer.lora_B.weight"] @ source["layer.lora_A.weight"]
+    new_delta = expanded["layer.lora_B.weight"] @ expanded["layer.lora_A.weight"]
+    assert torch.equal(old_delta, new_delta)
 
 
 def test_save_last_checkpoint_keeps_generation_for_relative_run_root(

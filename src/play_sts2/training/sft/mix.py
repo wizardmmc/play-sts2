@@ -18,11 +18,13 @@ class SftMixConfig:
         seed (int): 确定性人类动作抽样种子。
         human_game_version (str | None): 人类行为录制时的游戏版本声明。
         human_train_action_limits (dict[str, int]): 训练高频动作上限。
+        arithmetic_train_per_kind (dict[str, int]): 每类算术训练样本数。
     """
 
     seed: int
     human_game_version: str | None
     human_train_action_limits: dict[str, int]
+    arithmetic_train_per_kind: dict[str, int]
 
 
 def load_sft_mix(path: Path) -> SftMixConfig:
@@ -53,6 +55,11 @@ def load_sft_mix(path: Path) -> SftMixConfig:
             human["train_max_per_action"],
             "human.train_max_per_action",
         )
+        arithmetic = data.get("arithmetic", {})
+        arithmetic_per_kind = _integer_mapping(
+            arithmetic.get("train_per_kind", {}),
+            "arithmetic.train_per_kind",
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise DatasetBuildError(f"无效 SFT 混合配方: {path}: {exc}") from exc
     config = SftMixConfig(
@@ -61,6 +68,7 @@ def load_sft_mix(path: Path) -> SftMixConfig:
             raw_game_version.strip() if isinstance(raw_game_version, str) else None
         ),
         human_train_action_limits=actions,
+        arithmetic_train_per_kind=arithmetic_per_kind,
     )
     apply_sft_mix(
         {"train": [], "dev": [], "test": []},
@@ -84,7 +92,10 @@ def _integer_mapping(value: object, name: str) -> dict[str, int]:
         dict[str, int]: 保留 TOML 字段顺序的整数映射。
     """
     if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) or not isinstance(item, int) or isinstance(item, bool)
+        not isinstance(key, str)
+        or not isinstance(item, int)
+        or isinstance(item, bool)
+        or item < 0
         for key, item in value.items()
     ):
         raise TypeError(f"{name} 必须是整数表")
@@ -96,6 +107,7 @@ def apply_sft_mix(
     *,
     seed: int,
     human_train_action_limits: Mapping[str, int],
+    arithmetic_train_per_kind: Mapping[str, int] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """保留全部知识和留出行为，只裁剪训练集指定高频动作。
 
@@ -103,6 +115,7 @@ def apply_sft_mix(
         splits (Mapping[str, Sequence[dict[str, Any]]]): 已完成知识与整局分卷的样本。
         seed (int): 确定性抽样种子。
         human_train_action_limits (Mapping[str, int]): 训练行为动作上限。
+        arithmetic_train_per_kind (Mapping[str, int] | None): 可选的每类算术数量。
 
     Raises:
         DatasetBuildError: 分卷缺失或行为上限不是非负整数。
@@ -120,22 +133,63 @@ def apply_sft_mix(
     ]
     if invalid_actions:
         raise DatasetBuildError(f"SFT 人类动作上限无效: {invalid_actions}")
+    arithmetic_limits = dict(arithmetic_train_per_kind or {})
+    invalid_arithmetic = [
+        kind
+        for kind, limit in arithmetic_limits.items()
+        if not isinstance(kind, str)
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or limit < 0
+    ]
+    if invalid_arithmetic:
+        raise DatasetBuildError(f"SFT 算术数量无效: {invalid_arithmetic}")
 
     rows = list(splits["train"])
     selected = {
         index
         for index, row in enumerate(rows)
-        if row.get("source") != "human_play"
-        or str(row.get("action", "")) not in human_train_action_limits
+        if not (
+            row.get("source") == "human_play"
+            and row.get("behavior_origin", "human") != "human_combat_solver"
+            and str(row.get("action", "")) in human_train_action_limits
+        )
+        and not (arithmetic_limits and row.get("source") == "synthetic_arithmetic")
     }
     rng = random.Random(seed)
     for action in sorted(human_train_action_limits):
         indices = [
             index
             for index, row in enumerate(rows)
-            if row.get("source") == "human_play" and row.get("action") == action
+            if row.get("source") == "human_play"
+            and row.get("behavior_origin", "human") != "human_combat_solver"
+            and row.get("action") == action
         ]
         selected.update(_take_indices(indices, human_train_action_limits[action], rng))
+    if arithmetic_limits:
+        observed_kinds = {
+            str(row.get("object_id"))
+            for row in rows
+            if row.get("source") == "synthetic_arithmetic"
+        }
+        if observed_kinds != set(arithmetic_limits):
+            raise DatasetBuildError(
+                "SFT 算术配方与实际题型不一致: "
+                f"expected={sorted(arithmetic_limits)}, actual={sorted(observed_kinds)}"
+            )
+        for kind in sorted(arithmetic_limits):
+            indices = [
+                index
+                for index, row in enumerate(rows)
+                if row.get("source") == "synthetic_arithmetic"
+                and row.get("object_id") == kind
+            ]
+            limit = arithmetic_limits[kind]
+            if len(indices) < limit:
+                raise DatasetBuildError(
+                    f"SFT 算术题型 {kind} 只有 {len(indices)} 条，少于要求 {limit}"
+                )
+            selected.update(_take_indices(indices, limit, rng))
     return {
         "train": [row for index, row in enumerate(rows) if index in selected],
         "dev": list(splits["dev"]),

@@ -31,6 +31,91 @@ def _directory_rows(root: Path) -> list[dict[str, object]]:
     ]
 
 
+def _write_minimal_map_run(
+    root: Path,
+    *,
+    run_id: str,
+    source: str,
+    split: str,
+    action_source: str | None = None,
+) -> None:
+    """写入一局可由 Harness 重建的最小地图决策。
+
+    Args:
+        root (Path): raw 来源根目录。
+        run_id (str): 稳定局 ID。
+        source (str): meta 中的录制来源。
+        split (str): ``train``、``dev`` 或 ``test``。
+        action_source (str | None): 可选的精确动作提交者。
+
+    Returns:
+        None: meta、战略分片和 splits 均写入完成。
+    """
+    run_dir = root / run_id
+    (run_dir / "strategy").mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_id": run_id,
+                "source": source,
+                "termination_reason": "game_over",
+                "training_eligible": True,
+                "recording_complete": True,
+                "victory": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                    "recording_gaps": [],
+                },
+                "battle_count": 0,
+                "battle_sample_count": 0,
+                "strategic_sample_count": 1,
+                "action_source_counts": {
+                    action_source or "human_ui": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    decision = {
+        "event_id": 1,
+        "observed_at": "2026-08-29T00:00:00Z",
+        "before_state": {
+            "screen": "MAP",
+            "available_actions": ["choose_map_node"],
+            "run": {
+                "character_name": "故障机器人",
+                "ascension": 0,
+                "act_id": 0,
+                "floor": 1,
+                "current_hp": 75,
+                "max_hp": 75,
+                "gold": 99,
+                "relics": [],
+                "potions": [],
+                "deck": [],
+            },
+            "map": {
+                "available_nodes": [
+                    {"index": 0, "row": 1, "col": 2, "node_type": "Monster"}
+                ]
+            },
+        },
+        "action": "choose_map_node",
+        "parameters": {"option_index": 0},
+    }
+    if action_source is not None:
+        decision["action_source"] = action_source
+    (run_dir / "strategy/decisions.jsonl").write_text(
+        json.dumps(decision, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    splits = {"train": [], "dev": [], "test": []}
+    splits[split].append(run_id)
+    (root / "splits.json").write_text(json.dumps(splits), encoding="utf-8")
+
+
 def test_formal_coverage_requires_every_arithmetic_and_behavior_bucket() -> None:
     """正式分卷缺少任一事实、算术题型或行为层都应拒绝发布。
 
@@ -299,6 +384,10 @@ cost: 1
     }
     assert behavior_row["available_actions"] == ["choose_map_node"]
     assert behavior_row["legal_actions"] == ["ACTION: choose_map_node 0"]
+    assert behavior_row["behavior_origin"] == "human"
+    assert behavior_row["action_source"] == "human_ui"
+    assert behavior_row["recording_complete"] is False
+    assert behavior_row["run_victory"] is None
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["splits"] == {"train": 1, "validation": 1, "eval": 0}
     assert manifest["sources"] == {"human_play": 1, "web_wiki": 1}
@@ -317,6 +406,113 @@ cost: 1
         "train/cards/ZAP.jsonl",
         "validation/strategy/RUN-001.jsonl",
     }
+
+
+def test_build_sft_dataset_combines_human_and_solver_roots_without_losing_source(
+    tmp_path: Path,
+) -> None:
+    """E5 应整局合并旧人类与人机协作 raw，并保留动作教师身份。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 附加 raw 未进入分卷或来源字段被压成同一标签。
+
+    Returns:
+        None: 此测试只检查多 raw 根构建契约。
+    """
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    human = tmp_path / "raw/human"
+    teacher = tmp_path / "raw/human_combat_solver"
+    _write_minimal_map_run(
+        human,
+        run_id="HUMAN-RUN",
+        source="human",
+        split="dev",
+    )
+    _write_minimal_map_run(
+        teacher,
+        run_id="TEACHER-RUN",
+        source="human_combat_solver",
+        split="train",
+        action_source="human_ui",
+    )
+    _write_minimal_map_run(
+        teacher,
+        run_id="FUTURE-RUN",
+        source="human_combat_solver",
+        split="train",
+        action_source="human_ui",
+    )
+    (teacher / "splits.json").write_text(
+        json.dumps({"train": ["TEACHER-RUN"], "dev": [], "test": []}),
+        encoding="utf-8",
+    )
+
+    result = build_sft_dataset(
+        knowledge_root=knowledge,
+        human_root=human,
+        additional_human_roots=(teacher,),
+        output_root=tmp_path / "dataset",
+    )
+
+    train = _directory_rows(result.train_path)
+    validation = _directory_rows(result.dev_path)
+    assert [row["run_id"] for row in train] == ["TEACHER-RUN"]
+    assert [row["run_id"] for row in validation] == ["HUMAN-RUN"]
+    assert train[0]["behavior_origin"] == "human_combat_solver"
+    assert train[0]["action_source"] == "human_ui"
+    assert "human_combat_solver" not in json.dumps(train[0]["messages"])
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["human"]["root"] == str(human)
+    assert manifest["human"]["additional_roots"] == [str(teacher)]
+    assert manifest["human"]["train_runs"] == ["TEACHER-RUN"]
+    assert manifest["human"]["validation_runs"] == ["HUMAN-RUN"]
+    assert manifest["human"]["roots"] == [
+        {
+            "root": str(human),
+            "splits": {
+                "train": [],
+                "validation": ["HUMAN-RUN"],
+                "eval": [],
+            },
+        },
+        {
+            "root": str(teacher),
+            "splits": {
+                "train": ["TEACHER-RUN"],
+                "validation": [],
+                "eval": [],
+            },
+        },
+    ]
+    assert manifest["human"]["runs"] == {
+        "HUMAN-RUN": {
+            "root": str(human),
+            "split": "validation",
+            "origin": "human",
+            "victory": True,
+            "recording_complete": True,
+            "recording_gaps": [],
+            "samples": 1,
+            "action_sources": {"human_ui": 1},
+        },
+        "TEACHER-RUN": {
+            "root": str(teacher),
+            "split": "train",
+            "origin": "human_combat_solver",
+            "victory": True,
+            "recording_complete": True,
+            "recording_gaps": [],
+            "samples": 1,
+            "action_sources": {"human_ui": 1},
+        },
+    }
+    train_audit = manifest["behavior_audit"]["splits"]["train"]
+    assert train_audit["origins"] == {"human_combat_solver": 1}
+    assert train_audit["action_sources"] == {"human_ui": 1}
 
 
 def test_behavior_audit_captures_explicit_decision_contrasts() -> None:
@@ -1022,6 +1218,7 @@ def test_build_sft_dataset_applies_explicit_mix_recipe(tmp_path: Path) -> None:
     assert manifest["mix"] == {
         "seed": 3,
         "human_train_action_limits": {},
+        "arithmetic_train_per_kind": {},
     }
 
 

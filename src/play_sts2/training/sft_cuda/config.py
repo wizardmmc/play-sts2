@@ -26,6 +26,9 @@ def load_cuda_sft_config(path: Path) -> CudaSftConfig:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     try:
         init_adapter = data.get("init_adapter")
+        expand_init_adapter = data.get("expand_init_adapter", False)
+        if not isinstance(expand_init_adapter, bool):
+            raise TypeError("expand_init_adapter 必须是布尔值")
         config = SftConfig(
             base_model=Path(data["base_model"]),
             dataset_root=Path(data["dataset_root"]),
@@ -45,6 +48,8 @@ def load_cuda_sft_config(path: Path) -> CudaSftConfig:
             logits_chunk_size=int(data.get("logits_chunk_size", 2048)),
             checkpoint_steps=int(data.get("checkpoint_steps", 2000)),
             init_adapter=Path(init_adapter) if init_adapter else None,
+            knowledge_epoch_start=int(data.get("knowledge_epoch_start", 1)),
+            expand_init_adapter=expand_init_adapter,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SftTrainingError(f"无效 CUDA SFT 配置: {exc}") from exc
@@ -64,6 +69,12 @@ def load_cuda_sft_config(path: Path) -> CudaSftConfig:
         invalid.append("warmup_steps")
     if config.checkpoint_steps < 0:
         invalid.append("checkpoint_steps")
+    if not 1 <= config.knowledge_epoch_start <= 5:
+        invalid.append("knowledge_epoch_start")
+    if config.knowledge_epoch_start + config.epochs - 1 > 5:
+        invalid.append("knowledge_epoch_range")
+    if config.expand_init_adapter and config.init_adapter is None:
+        invalid.append("expand_init_adapter")
     if invalid or re.fullmatch(r"cuda(?::\d+)?", config.device) is None:
         detail = ", ".join(invalid) if invalid else f"device={config.device}"
         raise SftTrainingError(f"CUDA SFT 配置值无效: {detail}")

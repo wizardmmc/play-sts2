@@ -31,6 +31,9 @@ gradient_accumulation_steps = 1
 seed = 20260828
 lora_rank = 16
 lora_alpha = 32
+knowledge_epoch_start = 3
+init_adapter = "models/adapters/e4"
+expand_init_adapter = true
 ''',
         encoding="utf-8",
     )
@@ -56,6 +59,8 @@ def test_load_cuda_sft_config_accepts_numbered_cuda_device(tmp_path: Path) -> No
     assert config.device == "cuda:0"
     assert config.base_model == Path("models/base/qwen3.5-4b")
     assert config.lora_rank == 16
+    assert config.knowledge_epoch_start == 3
+    assert config.expand_init_adapter is True
 
 
 def test_load_cuda_sft_config_rejects_cpu(tmp_path: Path) -> None:

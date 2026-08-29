@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from collections import Counter
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -128,6 +128,7 @@ def build_sft_dataset(
     *,
     knowledge_root: Path,
     human_root: Path,
+    additional_human_roots: Sequence[Path] = (),
     output_root: Path,
     train_run_ids: Collection[str] = (),
     dev_run_ids: Collection[str] = (),
@@ -143,6 +144,7 @@ def build_sft_dataset(
     Args:
         knowledge_root (Path): 含规范事实或生成问答候选的知识根目录。
         human_root (Path): 含按局、战斗和战略分片的人类精确决策目录。
+        additional_human_roots (Sequence[Path]): 需要按各自 splits 合并的附加 raw 根。
         output_root (Path): 数据集输出目录。
         train_run_ids (Collection[str]): 整局进入训练集的 run ID。
         dev_run_ids (Collection[str]): 整局进入 validation 的 run ID。
@@ -157,7 +159,14 @@ def build_sft_dataset(
     Returns:
         SftDatasetResult: 三个分卷目录、清单路径与样本计数。
     """
-    declared_splits = _read_run_splits(Path(human_root) / "splits.json")
+    human_roots = (Path(human_root), *(Path(root) for root in additional_human_roots))
+    declared_splits = {"train": [], "dev": [], "test": []}
+    root_declared_splits: list[dict[str, list[str]]] = []
+    for root in human_roots:
+        root_splits = _read_run_splits(root / "splits.json")
+        root_declared_splits.append(root_splits)
+        for name, runs in declared_splits.items():
+            runs.extend(root_splits[name])
     explicit = any((train_run_ids, dev_run_ids, test_run_ids))
     run_splits = {
         "train": set(train_run_ids) if explicit else set(declared_splits["train"]),
@@ -174,7 +183,17 @@ def build_sft_dataset(
         "dev": [row for row in knowledge_rows if row.get("dataset_split") == "dev"],
         "test": [row for row in knowledge_rows if row.get("dataset_split") == "test"],
     }
-    human_rows = list(_human_rows(Path(human_root)))
+    if explicit:
+        human_rows = [row for root in human_roots for row in _human_rows(root)]
+    else:
+        human_rows = list(_human_rows(human_roots[0]))
+        for root, root_splits in zip(
+            human_roots[1:],
+            root_declared_splits[1:],
+            strict=True,
+        ):
+            selected_runs = set().union(*root_splits.values())
+            human_rows.extend(_human_rows(root, included_run_ids=selected_runs))
     observed_runs = {str(row["run_id"]) for row in human_rows}
     assigned_runs = set().union(*run_splits.values())
     unassigned = observed_runs - assigned_runs
@@ -193,10 +212,12 @@ def build_sft_dataset(
             splits,
             seed=mix_config.seed,
             human_train_action_limits=mix_config.human_train_action_limits,
+            arithmetic_train_per_kind=mix_config.arithmetic_train_per_kind,
         )
         mix_manifest = {
             "seed": mix_config.seed,
             "human_train_action_limits": mix_config.human_train_action_limits,
+            "arithmetic_train_per_kind": mix_config.arithmetic_train_per_kind,
         }
         if mix_config.human_game_version is not None:
             mix_manifest["human_game_version"] = mix_config.human_game_version
@@ -250,9 +271,11 @@ def build_sft_dataset(
         },
         "human": {
             "root": str(human_root),
+            "additional_roots": [str(root) for root in human_roots[1:]],
             "train_runs": sorted(run_splits["train"]),
             "validation_runs": sorted(run_splits["dev"]),
             "eval_runs": sorted(run_splits["test"]),
+            **_human_provenance_manifest(human_roots, human_rows, run_splits),
         },
         "behavior_audit": _behavior_audit(splits),
     }
@@ -711,7 +734,8 @@ def _published_row(row: Mapping[str, Any]) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 只保留可供人工审查和训练消费的公开字段。
     """
-    return {key: value for key, value in row.items() if key != "dataset_split"}
+    internal = {"dataset_split", "_human_root"}
+    return {key: value for key, value in row.items() if key not in internal}
 
 
 def _row_output_path(row: Mapping[str, Any]) -> Path:
@@ -1073,6 +1097,7 @@ def _behavior_row(
     *,
     run_id: str | None = None,
     battle_key: str | None = None,
+    run_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """用当前 Harness 把一条精确决策渲染成行为监督样本。
 
@@ -1080,6 +1105,7 @@ def _behavior_row(
         decision (Mapping[str, Any]): Raw 中的一条精确人类决策。
         run_id (str | None): 从当前局 meta 取得的稳定局 ID。
         battle_key (str | None): 战斗分片名；战略动作省略。
+        run_metadata (Mapping[str, Any] | None): 当前局来源、胜负与完整性元数据。
 
     Raises:
         DatasetBuildError: 状态、层级、动作或参数不再符合当前 Harness。
@@ -1157,6 +1183,31 @@ def _behavior_row(
     }
     if battle_key is not None:
         row["battle_key"] = battle_key
+    if run_metadata is not None:
+        origin = str(run_metadata.get("source") or "human")
+        action_source = decision.get("action_source")
+        if action_source is None and origin == "human":
+            action_source = "human_ui"
+        if action_source not in {"human_ui", "combat_solver"}:
+            raise DatasetBuildError(f"{resolved_run_id}:{sequence} 缺少可审计动作来源")
+        integrity = run_metadata.get("integrity")
+        gaps = (
+            integrity.get("recording_gaps", [])
+            if isinstance(integrity, Mapping)
+            else []
+        )
+        if not isinstance(gaps, list) or any(not isinstance(gap, str) for gap in gaps):
+            raise DatasetBuildError(f"{resolved_run_id} recording_gaps 结构无效")
+        victory = run_metadata.get("victory")
+        row.update(
+            {
+                "behavior_origin": origin,
+                "action_source": action_source,
+                "run_victory": victory if isinstance(victory, bool) else None,
+                "recording_complete": run_metadata.get("recording_complete") is True,
+                "recording_gaps": list(gaps),
+            }
+        )
     return row
 
 
@@ -1227,6 +1278,78 @@ def _behavior_tags(
     return sorted(tags)
 
 
+def _human_provenance_manifest(
+    human_roots: Sequence[Path],
+    human_rows: Sequence[Mapping[str, Any]],
+    run_splits: Mapping[str, set[str]],
+) -> dict[str, Any]:
+    """生成逐根分卷和逐局完整性血缘。
+
+    Args:
+        human_roots (Sequence[Path]): 按构建参数顺序排列的 raw 根。
+        human_rows (Sequence[Mapping[str, Any]]): 混合裁剪前的全部行为样本。
+        run_splits (Mapping[str, set[str]]): 当前构建实际采用的整局分卷。
+
+    Raises:
+        DatasetBuildError: 同一 run 跨 root，或逐样本元数据互相矛盾。
+
+    Returns:
+        dict[str, Any]: 可合并到 manifest ``human`` 字段的 roots 与 runs。
+    """
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in human_rows:
+        grouped.setdefault(str(row["run_id"]), []).append(row)
+
+    runs: dict[str, dict[str, Any]] = {}
+    for run_id, rows in sorted(grouped.items()):
+        roots = {str(row.get("_human_root", "")) for row in rows}
+        origins = {str(row.get("behavior_origin", "human")) for row in rows}
+        victories = {row.get("run_victory") for row in rows}
+        completion = {row.get("recording_complete") is True for row in rows}
+        gaps = {tuple(row.get("recording_gaps", ())) for row in rows}
+        if not all(
+            len(values) == 1 for values in (roots, origins, victories, completion, gaps)
+        ):
+            raise DatasetBuildError(f"人类局血缘不一致: {run_id}")
+        root = next(iter(roots))
+        if not root:
+            raise DatasetBuildError(f"人类局缺少来源根: {run_id}")
+        split = next(name for name, values in run_splits.items() if run_id in values)
+        runs[run_id] = {
+            "root": root,
+            "split": _PUBLIC_SPLIT_NAMES[split],
+            "origin": next(iter(origins)),
+            "victory": next(iter(victories)),
+            "recording_complete": next(iter(completion)),
+            "recording_gaps": list(next(iter(gaps))),
+            "samples": len(rows),
+            "action_sources": dict(
+                sorted(
+                    Counter(
+                        str(row.get("action_source", "human_ui")) for row in rows
+                    ).items()
+                )
+            ),
+        }
+
+    root_records = []
+    for root in human_roots:
+        root_text = str(root)
+        owned = {
+            run_id for run_id, record in runs.items() if record["root"] == root_text
+        }
+        root_records.append(
+            {
+                "root": root_text,
+                "splits": {
+                    _PUBLIC_SPLIT_NAMES[name]: sorted(values & owned)
+                    for name, values in run_splits.items()
+                },
+            }
+        )
+    return {"roots": root_records, "runs": runs}
+
+
 def _behavior_audit(
     splits: Mapping[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
@@ -1243,6 +1366,12 @@ def _behavior_audit(
         behavior_rows = [row for row in rows if row.get("source") == "human_play"]
         actions = Counter(str(row.get("action", "")) for row in behavior_rows)
         screens = Counter(str(row.get("screen", "")) for row in behavior_rows)
+        origins = Counter(
+            str(row.get("behavior_origin", "human")) for row in behavior_rows
+        )
+        action_sources = Counter(
+            str(row.get("action_source", "human_ui")) for row in behavior_rows
+        )
         tags = Counter(
             str(tag)
             for row in behavior_rows
@@ -1253,6 +1382,8 @@ def _behavior_audit(
             "samples": len(behavior_rows),
             "actions": dict(sorted(actions.items())),
             "screens": dict(sorted(screens.items())),
+            "origins": dict(sorted(origins.items())),
+            "action_sources": dict(sorted(action_sources.items())),
             "tags": dict(sorted(tags.items())),
         }
 
@@ -1319,11 +1450,16 @@ def _is_event_id(value: object) -> bool:
     )
 
 
-def _human_rows(root: Path) -> Iterator[dict[str, Any]]:
+def _human_rows(
+    root: Path,
+    *,
+    included_run_ids: Collection[str] | None = None,
+) -> Iterator[dict[str, Any]]:
     """读取按局分片的人类精确动作并恢复训练消息。
 
     Args:
         root (Path): ``data/raw/human`` 风格的人类数据根目录。
+        included_run_ids (Collection[str] | None): 可选的显式入选局 ID。
 
     Raises:
         DatasetBuildError: 元数据、分片或消息不符合当前数据契约。
@@ -1341,6 +1477,9 @@ def _human_rows(root: Path) -> Iterator[dict[str, Any]]:
         if not meta_path.is_file():
             continue
         metadata = _read_json_object(meta_path)
+        run_id = metadata.get("run_id", run_dir.name)
+        if included_run_ids is not None and run_id not in included_run_ids:
+            continue
         termination_reason = metadata.get("termination_reason")
         if not isinstance(termination_reason, str) or not termination_reason.strip():
             continue
@@ -1356,14 +1495,19 @@ def _human_rows(root: Path) -> Iterator[dict[str, Any]]:
             raise DatasetBuildError(f"人类局缺少 run_id: {meta_path}")
         for battle_path in audit.battle_paths:
             for row in _read_jsonl(battle_path):
-                yield _behavior_row(
+                behavior = _behavior_row(
                     row,
                     run_id=run_id,
                     battle_key=battle_path.stem,
+                    run_metadata=metadata,
                 )
+                behavior["_human_root"] = str(root)
+                yield behavior
         if audit.strategy_path is not None:
             for row in _read_jsonl(audit.strategy_path):
-                yield _behavior_row(row, run_id=run_id)
+                behavior = _behavior_row(row, run_id=run_id, run_metadata=metadata)
+                behavior["_human_root"] = str(root)
+                yield behavior
 
 
 def _read_run_splits(path: Path) -> dict[str, list[str]]:

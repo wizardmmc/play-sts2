@@ -33,12 +33,18 @@ def _knowledge(
     }
 
 
-def _human(sample_id: str, action: str) -> dict[str, object]:
+def _human(
+    sample_id: str,
+    action: str,
+    *,
+    origin: str = "human",
+) -> dict[str, object]:
     """构造一个最小人类行为行。
 
     Args:
         sample_id (str): 样本身份。
         action (str): 精确动作名。
+        origin (str): 行为来自旧人类 raw 或人机协作 raw。
 
     Returns:
         dict[str, object]: 可供混合器分类的人类行为样本。
@@ -47,6 +53,25 @@ def _human(sample_id: str, action: str) -> dict[str, object]:
         "sample_id": sample_id,
         "source": "human_play",
         "action": action,
+        "behavior_origin": origin,
+    }
+
+
+def _arithmetic(sample_id: str, kind: str) -> dict[str, object]:
+    """构造一个最小算术训练行。
+
+    Args:
+        sample_id (str): 样本身份。
+        kind (str): 算术题型。
+
+    Returns:
+        dict[str, object]: 可供分层抽样的算术行。
+    """
+    return {
+        "sample_id": sample_id,
+        "source": "synthetic_arithmetic",
+        "category": "arithmetic",
+        "object_id": kind,
     }
 
 
@@ -132,6 +157,53 @@ def test_apply_sft_mix_is_deterministic_without_knowledge_limits() -> None:
     assert sft.apply_sft_mix(splits, **arguments) == mixed
 
 
+def test_apply_sft_mix_keeps_solver_data_and_stratifies_arithmetic() -> None:
+    """E5 只裁剪旧行为，并按题型精确抽取算术锚点。
+
+    Raises:
+        AssertionError: Solver 行为被旧上限裁剪或算术数量不符合配方。
+
+    Returns:
+        None: 此测试只检查内存中的 E5 混合。
+    """
+    splits = {
+        "train": [
+            _human("old-play-1", "play_card"),
+            _human("old-play-2", "play_card"),
+            _human(
+                "solver-play-1",
+                "play_card",
+                origin="human_combat_solver",
+            ),
+            _human(
+                "solver-play-2",
+                "play_card",
+                origin="human_combat_solver",
+            ),
+            _arithmetic("orb-1", "orb_focus"),
+            _arithmetic("orb-2", "orb_focus"),
+            _arithmetic("status-1", "status_math"),
+            _arithmetic("status-2", "status_math"),
+            _arithmetic("status-3", "status_math"),
+        ],
+        "dev": [],
+        "test": [],
+    }
+
+    mixed = sft.apply_sft_mix(
+        splits,
+        seed=7,
+        human_train_action_limits={"play_card": 1},
+        arithmetic_train_per_kind={"orb_focus": 1, "status_math": 2},
+    )
+
+    ids = {row["sample_id"] for row in mixed["train"]}
+    assert {"solver-play-1", "solver-play-2"} <= ids
+    assert len(ids & {"old-play-1", "old-play-2"}) == 1
+    assert len(ids & {"orb-1", "orb-2"}) == 1
+    assert len(ids & {"status-1", "status-2", "status-3"}) == 2
+
+
 def test_load_sft_mix_reads_small_toml_recipe(tmp_path: Path) -> None:
     """混合配方只需种子和高频动作上限。
 
@@ -155,6 +227,10 @@ game_version = "v0.107.1"
 
     [human.train_max_per_action]
 play_card = 600
+
+[arithmetic.train_per_kind]
+orb_focus = 100
+status_math = 120
 """,
         encoding="utf-8",
     )
@@ -164,6 +240,10 @@ play_card = 600
     assert config.seed == 20260828
     assert config.human_game_version == "v0.107.1"
     assert config.human_train_action_limits == {"play_card": 600}
+    assert config.arithmetic_train_per_kind == {
+        "orb_focus": 100,
+        "status_math": 120,
+    }
 
 
 def test_load_sft_mix_rejects_knowledge_limits(tmp_path: Path) -> None:

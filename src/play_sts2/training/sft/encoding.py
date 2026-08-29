@@ -56,6 +56,8 @@ class SftConfig:
         logits_chunk_size (int): 分块词表投影与交叉熵的序列长度。
         checkpoint_steps (int): 覆盖 ``checkpoint-last`` 的优化步间隔；零为关闭。
         init_adapter (Path | None): 可选的近似续训 LoRA adapter。
+        knowledge_epoch_start (int): 本次运行首轮对应的知识问法轮次。
+        expand_init_adapter (bool): 是否把父 adapter 函数等价扩容到配置 rank。
     """
 
     base_model: Path
@@ -76,6 +78,8 @@ class SftConfig:
     logits_chunk_size: int = 2048
     checkpoint_steps: int = 2000
     init_adapter: Path | None = None
+    knowledge_epoch_start: int = 1
+    expand_init_adapter: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +127,9 @@ def load_sft_config(path: Path) -> SftConfig:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     try:
         init_adapter = data.get("init_adapter")
+        expand_init_adapter = data.get("expand_init_adapter", False)
+        if not isinstance(expand_init_adapter, bool):
+            raise TypeError("expand_init_adapter 必须是布尔值")
         config = SftConfig(
             base_model=Path(data["base_model"]),
             dataset_root=Path(data["dataset_root"]),
@@ -142,6 +149,8 @@ def load_sft_config(path: Path) -> SftConfig:
             logits_chunk_size=int(data.get("logits_chunk_size", 2048)),
             checkpoint_steps=int(data.get("checkpoint_steps", 2000)),
             init_adapter=Path(init_adapter) if init_adapter else None,
+            knowledge_epoch_start=int(data.get("knowledge_epoch_start", 1)),
+            expand_init_adapter=expand_init_adapter,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SftTrainingError(f"无效 SFT 配置: {exc}") from exc
@@ -161,6 +170,12 @@ def load_sft_config(path: Path) -> SftConfig:
         invalid.append("warmup_steps")
     if config.checkpoint_steps < 0:
         invalid.append("checkpoint_steps")
+    if not 1 <= config.knowledge_epoch_start <= 5:
+        invalid.append("knowledge_epoch_start")
+    if config.knowledge_epoch_start + config.epochs - 1 > 5:
+        invalid.append("knowledge_epoch_range")
+    if config.expand_init_adapter and config.init_adapter is None:
+        invalid.append("expand_init_adapter")
     cuda_device = config.device == "cuda" or (
         config.device.startswith("cuda:") and config.device[5:].isdigit()
     )

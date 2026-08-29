@@ -279,8 +279,10 @@ def optimize(
     logits_chunk_size: int = 2048,
     checkpoint_steps: int = 0,
     checkpoint: Callable[[OptimizationCheckpoint], None] | None = None,
+    epoch_checkpoint: Callable[[OptimizationCheckpoint], None] | None = None,
     max_steps: int | None = None,
     resume_from: OptimizationCheckpoint | None = None,
+    knowledge_epoch_start: int = 1,
 ) -> OptimizationResult:
     """用 batch=1、梯度累积和可选分块 CE 执行可靠训练。
 
@@ -299,8 +301,11 @@ def optimize(
         checkpoint_steps (int): checkpoint 的优化步间隔；零为关闭。
         checkpoint (Callable[[OptimizationCheckpoint], None] | None): 接收精确训练
             状态的保存回调。
+        epoch_checkpoint (Callable[[OptimizationCheckpoint], None] | None): 每轮完整
+            结束后接收精确训练状态的保存回调。
         max_steps (int | None): 可选优化步上限，主要用于真实模型冒烟。
         resume_from (OptimizationCheckpoint | None): 可选的精确恢复状态。
+        knowledge_epoch_start (int): 本次运行首轮对应的知识问法轮次。
 
     Raises:
         SftTrainingError: 输入无效、模型无可训练参数或出现非有限数值。
@@ -313,6 +318,8 @@ def optimize(
         raise SftTrainingError("max_steps 必须为正数")
     if checkpoint_steps < 0 or (checkpoint_steps and checkpoint is None):
         raise SftTrainingError("checkpoint_steps 需要非负数和保存回调")
+    if knowledge_epoch_start <= 0:
+        raise SftTrainingError("knowledge_epoch_start 必须为正数")
 
     import torch
 
@@ -330,7 +337,12 @@ def optimize(
     model.train()
     optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
     if resume_from is not None:
-        _validate_optimization_checkpoint(resume_from, samples, epochs)
+        _validate_optimization_checkpoint(
+            resume_from,
+            samples,
+            epochs,
+            knowledge_epoch_start=knowledge_epoch_start,
+        )
         optimizer.load_state_dict(resume_from.optimizer_state)
         randomizer.setstate(resume_from.random_state)
         torch.set_rng_state(resume_from.torch_rng_state.cpu())
@@ -363,7 +375,11 @@ def optimize(
                 order = resumed_order
                 first_begin = resumed_begin
             else:
-                order = _sample_indices_for_epoch(samples, epoch)
+                order = _sample_indices_for_epoch(
+                    samples,
+                    epoch,
+                    knowledge_epoch_start=knowledge_epoch_start,
+                )
                 if not order:
                     raise SftTrainingError(f"第 {epoch + 1} 轮没有可训练样本")
                 randomizer.shuffle(order)
@@ -465,6 +481,21 @@ def optimize(
                         samples_seen,
                         loss_sum / samples_seen,
                     )
+            if epoch_checkpoint is not None:
+                epoch_checkpoint(
+                    OptimizationCheckpoint(
+                        optimizer_steps=optimizer_steps,
+                        samples_seen=samples_seen,
+                        loss_sum=loss_sum,
+                        epoch_index=epoch + 1,
+                        order=(),
+                        next_begin=0,
+                        random_state=randomizer.getstate(),
+                        torch_rng_state=torch.get_rng_state(),
+                        device_rng_state=_device_rng_state(device),
+                        optimizer_state=optimizer.state_dict(),
+                    )
+                )
     return OptimizationResult(optimizer_steps, samples_seen, loss_sum / samples_seen)
 
 
@@ -519,6 +550,8 @@ def _validate_optimization_checkpoint(
     checkpoint: OptimizationCheckpoint,
     samples: Sequence[TokenizedSample],
     epochs: int,
+    *,
+    knowledge_epoch_start: int = 1,
 ) -> None:
     """确认恢复状态的数据位置适用于当前训练任务。
 
@@ -526,6 +559,7 @@ def _validate_optimization_checkpoint(
         checkpoint (OptimizationCheckpoint): 待恢复的训练状态。
         samples (Sequence[TokenizedSample]): 当前 token 化样本及训练轮次。
         epochs (int): 当前配置的总 epoch 数。
+        knowledge_epoch_start (int): 本次运行首轮对应的知识问法轮次。
 
     Raises:
         SftTrainingError: epoch、游标或样本顺序与当前任务不一致。
@@ -539,7 +573,11 @@ def _validate_optimization_checkpoint(
         if checkpoint.epoch_index >= epochs:
             raise SftTrainingError("checkpoint 已完成全部 epoch 却仍带样本顺序")
         expected_indices = set(
-            _sample_indices_for_epoch(samples, checkpoint.epoch_index)
+            _sample_indices_for_epoch(
+                samples,
+                checkpoint.epoch_index,
+                knowledge_epoch_start=knowledge_epoch_start,
+            )
         )
         if (
             len(checkpoint.order) != len(expected_indices)
@@ -554,17 +592,20 @@ def _validate_optimization_checkpoint(
 def _sample_indices_for_epoch(
     samples: Sequence[TokenizedSample],
     epoch_index: int,
+    *,
+    knowledge_epoch_start: int = 1,
 ) -> list[int]:
     """选择当前轮知识问法和每轮复用的通用锚点。
 
     Args:
         samples (Sequence[TokenizedSample]): 全部已编码训练样本。
         epoch_index (int): 从零开始的当前训练轮次。
+        knowledge_epoch_start (int): 本次运行首轮对应的知识问法轮次。
 
     Returns:
         list[int]: 可以直接索引 ``samples`` 的稳定位置列表。
     """
-    training_epoch = epoch_index + 1
+    training_epoch = knowledge_epoch_start + epoch_index
     return [
         index
         for index, sample in enumerate(samples)
@@ -703,6 +744,130 @@ def attach_lora(
     )
 
 
+def expand_lora_state_dict(
+    source: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> dict[str, Any]:
+    """把低秩 LoRA 状态函数等价地扩展到高秩初始化状态。
+
+    旧 A/B 通道复制到前部；新增 A 保留目标模型的标准随机初始化，新增 B 置零，
+    因而扩容瞬间的 ``B @ A`` 与原 adapter 完全一致。
+
+    Args:
+        source (Mapping[str, Any]): 低秩 adapter 的 PEFT 状态字典。
+        target (Mapping[str, Any]): 已按高秩配置初始化的 PEFT 状态字典。
+
+    Raises:
+        SftTrainingError: 键集合或任一 LoRA 矩阵形状不兼容。
+
+    Returns:
+        dict[str, Any]: 可加载到高秩 PEFT 模型的扩容状态。
+    """
+    if set(source) != set(target):
+        raise SftTrainingError("LoRA 扩容前后的参数键不一致")
+    expanded: dict[str, Any] = {}
+    for name, target_tensor in target.items():
+        source_tensor = source[name]
+        output = target_tensor.detach().clone()
+        if name.endswith(".lora_A.weight"):
+            if (
+                source_tensor.ndim != 2
+                or output.ndim != 2
+                or source_tensor.shape[1] != output.shape[1]
+                or source_tensor.shape[0] >= output.shape[0]
+            ):
+                raise SftTrainingError(f"LoRA A 扩容形状不兼容: {name}")
+            output[: source_tensor.shape[0]] = source_tensor
+        elif name.endswith(".lora_B.weight"):
+            if (
+                source_tensor.ndim != 2
+                or output.ndim != 2
+                or source_tensor.shape[0] != output.shape[0]
+                or source_tensor.shape[1] >= output.shape[1]
+            ):
+                raise SftTrainingError(f"LoRA B 扩容形状不兼容: {name}")
+            output.zero_()
+            output[:, : source_tensor.shape[1]] = source_tensor
+        elif source_tensor.shape == output.shape:
+            output.copy_(source_tensor)
+        else:
+            raise SftTrainingError(f"LoRA 扩容参数形状不兼容: {name}")
+        expanded[name] = output
+    return expanded
+
+
+def attach_expanded_lora(
+    base_model: Any,
+    *,
+    adapter_path: Path,
+    rank: int,
+    alpha: int,
+    seed: int,
+) -> Any:
+    """加载低秩 adapter，并以相同初始函数装配更高秩 LoRA。
+
+    Args:
+        base_model (Any): 与父 adapter 对应的 Hugging Face 基座。
+        adapter_path (Path): 低秩 PEFT adapter 目录。
+        rank (int): 目标 LoRA rank。
+        alpha (int): 目标 LoRA alpha。
+        seed (int): 新增 A 通道的确定性初始化种子。
+
+    Raises:
+        SftTrainingError: 父配置、缩放关系、目标模块或状态加载不兼容。
+
+    Returns:
+        Any: 已加载函数等价高秩状态的可训练 PEFT 模型。
+    """
+    adapter_path = Path(adapter_path)
+    config = _read_json(adapter_path / "adapter_config.json")
+    try:
+        source_rank = int(config["r"])
+        source_alpha = int(config["lora_alpha"])
+        target_modules = tuple(str(value) for value in config["target_modules"])
+        use_rslora = config.get("use_rslora", False)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SftTrainingError(f"父 adapter 配置无法扩容: {adapter_path}") from exc
+    if (
+        rank <= source_rank
+        or source_alpha * rank != alpha * source_rank
+        or use_rslora is not False
+        or not target_modules
+    ):
+        raise SftTrainingError(
+            "LoRA 扩容要求目标 rank 更大、alpha/rank 不变且未启用 rsLoRA"
+        )
+
+    from peft import get_peft_model_state_dict
+    from safetensors.torch import load_file
+
+    model = attach_lora(
+        base_model,
+        rank=rank,
+        alpha=alpha,
+        seed=seed,
+        target_modules=target_modules,
+    )
+    source = load_file(str(adapter_path / "adapter_model.safetensors"))
+    target = get_peft_model_state_dict(model)
+    expanded = expand_lora_state_dict(source, target)
+    loadable = {
+        name.replace(".lora_A.weight", ".lora_A.default.weight").replace(
+            ".lora_B.weight",
+            ".lora_B.default.weight",
+        ): tensor
+        for name, tensor in expanded.items()
+    }
+    result = model.load_state_dict(loadable, strict=False)
+    missing_lora = [key for key in result.missing_keys if ".lora_" in key]
+    if result.unexpected_keys or missing_lora:
+        raise SftTrainingError(
+            "LoRA 扩容状态没有完整加载: "
+            f"missing={sorted(missing_lora)}, unexpected={sorted(result.unexpected_keys)}"
+        )
+    return model
+
+
 def publish_adapter(
     model: Any,
     tokenizer: Any,
@@ -791,6 +956,89 @@ def save_last_checkpoint(
             pointer.unlink()
         if not published:
             shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def save_epoch_checkpoint(
+    model: Any,
+    destination: Path,
+    training_state: Mapping[str, Any],
+) -> None:
+    """原子发布一个不可覆盖的完整轮末 checkpoint。
+
+    Args:
+        model (Any): 当前可训练的 PEFT 模型。
+        destination (Path): 带轮次编号的最终实体目录。
+        training_state (Mapping[str, Any]): 优化器、数据游标与随机数状态。
+
+    Raises:
+        FileExistsError: 同一轮 checkpoint 已经存在。
+        OSError: 权重、状态或目录发布失败。
+
+    Returns:
+        None: 完整轮末 checkpoint 已发布时返回。
+    """
+    destination = Path(destination)
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"轮末 checkpoint 已存在: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}-",
+            dir=destination.parent,
+        )
+    )
+    try:
+        import torch
+
+        model.save_pretrained(staging, safe_serialization=True)
+        torch.save(dict(training_state), staging / "training_state.pt")
+        staging.rename(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _reconcile_epoch_checkpoint(
+    checkpoint_root: Path,
+    run_path: Path,
+    checkpoint: OptimizationCheckpoint,
+) -> None:
+    """从轮末 checkpoint-last 补齐中断时遗漏的不可变快照。
+
+    只有 ``order`` 为空的完整轮末状态才可物化；轮中 checkpoint 不产生轮末快照。
+
+    Args:
+        checkpoint_root (Path): 当前 ``checkpoint-last`` 目录或符号链接。
+        run_path (Path): 当前训练运行目录。
+        checkpoint (OptimizationCheckpoint): 已校验的精确恢复状态。
+
+    Raises:
+        SftTrainingError: 目标被非目录或符号链接占用。
+        OSError: checkpoint 复制或原子发布失败。
+
+    Returns:
+        None: 无需补齐或快照已经原子发布时返回。
+    """
+    if checkpoint.epoch_index <= 0 or checkpoint.order:
+        return
+    destination = Path(run_path) / f"checkpoint-epoch-{checkpoint.epoch_index}"
+    if destination.is_symlink() or destination.exists() and not destination.is_dir():
+        raise SftTrainingError(f"轮末 checkpoint 目标无效: {destination}")
+    if destination.is_dir():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}-reconcile-",
+            dir=destination.parent,
+        )
+    )
+    try:
+        shutil.copytree(Path(checkpoint_root), staging, dirs_exist_ok=True)
+        staging.rename(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
         raise
 
 
@@ -965,8 +1213,7 @@ def _train_sft_locked(
         if saved_provenance != current_comparable:
             raise SftTrainingError("精确续训的基座、数据集或父 adapter 血缘已变化")
         saved_config = _read_json(run_path / "config.json")
-        if saved_config != config_as_json(config):
-            raise SftTrainingError("精确续训配置与原运行不一致")
+        _validate_resume_config(saved_config, config_as_json(config))
         provenance = saved_provenance
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -1031,12 +1278,27 @@ def _train_sft_locked(
             checkpoint_files,
             checkpoint_snapshot,
         )
+        _reconcile_epoch_checkpoint(checkpoint_path, run_path, resume_state)
     elif config.init_adapter is None:
         model = attach_lora(
             base_model,
             rank=config.lora_rank,
             alpha=config.lora_alpha,
             seed=config.seed,
+        )
+    elif config.expand_init_adapter:
+        model = attach_expanded_lora(
+            base_model,
+            adapter_path=config.init_adapter,
+            rank=config.lora_rank,
+            alpha=config.lora_alpha,
+            seed=config.seed,
+        )
+        _require_unchanged_sources(
+            "父 adapter",
+            adapter_source_files(config.init_adapter),
+            init_adapter_files,
+            init_adapter_snapshot,
         )
     else:
         from peft import PeftModel
@@ -1060,6 +1322,24 @@ def _train_sft_locked(
         run_path.mkdir(parents=True)
         _write_json(run_path / "config.json", config_as_json(config))
         _write_json(run_path / "provenance.json", provenance)
+
+    def save_completed_epoch(state: OptimizationCheckpoint) -> None:
+        """同时更新可恢复指针并冻结不可变轮末 checkpoint。
+
+        Args:
+            state (OptimizationCheckpoint): 已完整结束一轮的精确训练状态。
+
+        Returns:
+            None: 两种 checkpoint 都发布完成时返回。
+        """
+        payload = state.to_payload()
+        save_last_checkpoint(model, checkpoint_path, payload)
+        save_epoch_checkpoint(
+            model,
+            run_path / f"checkpoint-epoch-{state.epoch_index}",
+            payload,
+        )
+
     result = optimize(
         model,
         samples,
@@ -1078,8 +1358,10 @@ def _train_sft_locked(
             checkpoint_path,
             state.to_payload(),
         ),
+        epoch_checkpoint=save_completed_epoch,
         max_steps=max_steps,
         resume_from=resume_state,
+        knowledge_epoch_start=config.knowledge_epoch_start,
     )
     manifest = {
         "run_name": run_name,
@@ -1117,6 +1399,7 @@ def _train_sft_locked(
         "logits_chunk_size": config.logits_chunk_size,
         "gradient_accumulation_steps": config.gradient_accumulation_steps,
         "checkpoint_steps": config.checkpoint_steps,
+        "knowledge_epoch_start": config.knowledge_epoch_start,
         "seed": config.seed,
         "lora": {
             "rank": config.lora_rank,
@@ -1224,6 +1507,29 @@ def _validate_execution_runtime(
         raise SftTrainingError(
             f"精确续训设备或精度已变化: saved={expected}, current={dict(actual)}"
         )
+
+
+def _validate_resume_config(
+    saved: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> None:
+    """兼容新增默认字段地核对精确续训配置。
+
+    Args:
+        saved (Mapping[str, Any]): 原运行保存的配置对象。
+        current (Mapping[str, Any]): 当前解析后的完整配置对象。
+
+    Raises:
+        SftTrainingError: 默认值归一化后配置仍不一致。
+
+    Returns:
+        None: 两份配置表示相同训练任务时返回。
+    """
+    normalized = dict(saved)
+    normalized.setdefault("knowledge_epoch_start", 1)
+    normalized.setdefault("expand_init_adapter", False)
+    if normalized != dict(current):
+        raise SftTrainingError("精确续训配置与原运行不一致")
 
 
 def _require_unchanged_sources(
@@ -1360,11 +1666,22 @@ def _validate_init_adapter(config: SftConfig) -> None:
     value = json.loads(adapter_config.read_text(encoding="utf-8"))
     actual_targets = set(value.get("target_modules", ()))
     expected_targets = set(LORA_TARGET_MODULES)
-    if (
-        value.get("r") != config.lora_rank
-        or value.get("lora_alpha") != config.lora_alpha
-        or actual_targets != expected_targets
-    ):
+    source_rank = value.get("r")
+    source_alpha = value.get("lora_alpha")
+    exact_shape = (
+        not config.expand_init_adapter
+        and source_rank == config.lora_rank
+        and source_alpha == config.lora_alpha
+    )
+    expanded_shape = (
+        config.expand_init_adapter
+        and isinstance(source_rank, int)
+        and isinstance(source_alpha, int)
+        and config.lora_rank > source_rank
+        and source_alpha * config.lora_rank == config.lora_alpha * source_rank
+        and value.get("use_rslora", False) is False
+    )
+    if actual_targets != expected_targets or not (exact_shape or expanded_shape):
         raise SftTrainingError("续训 adapter 的 rank/alpha/target_modules 与配置不一致")
 
 

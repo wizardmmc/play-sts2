@@ -1,12 +1,11 @@
 # 当前工作：可交付 SFT 基模
 
-- 状态：第一、二阶段已经验收，E3 全量基线和五局实机检查也已完成。E4 两组
-  两轮 r16 候选已经训练并完成完整 validation，选择 `1e-4` 第 2 轮 adapter；
-  训练、checkpoint、日志和逐题报告均已回传本机，尚未读取最终 eval。
-- 最后更新：2026-08-29
-- 当前目标：交付一份基于 `0.111.0` 完整可验证知识的通用 no-thinking E4，作为
-  CombatSolver 教师轨迹 E5 的父 policy。E5 及后续强化学习使用独立 adapter，
-  不覆盖这份通用基模。
+- 状态：E5 r16/r32 单变量 A/B 已完成训练和完整 validation；选择 r16，已回传、
+  合并并转换为 MLX 8-bit。五局 v0.111.0 Agent-only 无头实机和 SSE 竞态定向重放
+  已完成，冻结 eval 仍未读取。
+- 最后更新：2026-08-30
+- 当前目标：冻结 E5-r16 作为 no-thinking 战斗 GRPO 起点；整盘 GiGPO 保留分层
+  奖励，并在批量长局采集前处理已经实机复现的 Mod/SSE 漏事件竞态。
 
 ## 已经确定的边界
 
@@ -461,6 +460,153 @@ validation 却降到 58.74%/64.45%/69.36%，主要是问法泛化和类别干扰
 r16/r32 同起点容量 A/B，但不能期待扩大 rank 单独解决所有问题。完整逐题结果和
 汇总位于 `runs/eval/20260829-e4-capacity/`。
 
+## E5：知识与教师行为融合 A/B
+
+E5 不覆盖已经冻结的 E4。两路候选必须从完全相同的 E4 函数开始，只改变 LoRA
+容量：
+
+| 配置 | E5-r16 | E5-r32 |
+| --- | --- | --- |
+| 父 policy | E4 `1e-4` 第 2 轮 | 同一个 E4 |
+| rank / alpha | r16 / alpha32 | r32 / alpha64 |
+| 起始输出 | E4 原 adapter | 函数等价扩容，训练前 logits 对齐 |
+| 优化器 | 重新初始化 | 重新初始化 |
+| 学习率 | `1e-4` | `1e-4` |
+| epoch | 1 | 1 |
+| seed、样本顺序 | 完全相同 | 完全相同 |
+
+r32 扩容把原 A/B 权重复制到前 16 个通道，新增 A 使用标准 LoRA 初始化，新增 B
+置零；alpha 同步扩大以保持 `alpha/rank=2`。这样扩容前后初始增量函数一致，同时
+新增通道能够在训练中获得梯度。不得用随机 r32 从 E3 重训后与已经训练两轮的 r16
+比较。r64 只有在 r32 明确改善且没有扩大遗忘后才考虑。
+
+### E5 数据
+
+E5 使用独立的 `data/datasets/e5/sft/`，不改写 `data/datasets/e4/sft/`。所有派生
+数据从 canonical knowledge 与 raw 重建，`data/transcripts/human_combat_solver/`
+只供人工 review，不作为训练事实源。
+
+训练混合固定为：
+
+- 全部 5,969 个知识事实各取 `training_epoch=3` 问法；这套问题没有进入 E4；
+- 从 train 算术候选确定性分层抽取 500 条，保证六类都有覆盖并提高
+  `orb_focus`、`multihit` 与 `status_math` 的代表性；
+- 从 A0～A5 的 `data/raw/human_combat_solver/` 重建行为；战斗主体是
+  CombatSolver，战略全部是人的决策，少数人工接管战斗保持 `human_ui + battle`；
+- 保留 E4 旧人类训练行为作为小比例回放，防止新教师分布覆盖既有动作边界。
+
+A0～A5 实际有七局，因为 A2 有两个 seed。整局分卷为：
+
+- train：A0、A1、两盘 A2、A5；
+- validation：完整 A3；
+- eval：完整 A4。
+
+同一 run 的战斗与战略不能跨卷。A1、通关 A2 与 A5 虽有已知 capture gap，但已经
+收到的 stateless 样本均通过 Harness 审计，可以进入 train；gap、victory、
+`recording_complete` 与 `action_source` 必须留在数据元信息和 manifest 中。
+`combat_solver`/`human_ui` 不进入 system 或 user 文本，只用于构建、采样和分层评测。
+
+### 必须实现的训练契约
+
+1. 配置显式声明 `knowledge_epoch_start=3`。新运行只有一个 epoch，不能误选
+   `training_epoch=1`。
+2. 每个 epoch 结束时保存不可变 adapter 和带优化器/游标/RNG 的精确 checkpoint；
+   不能再用接近轮末的 step checkpoint 冒充轮末模型。
+3. E5 两路使用同一数据 manifest、同一随机顺序和同一 peak LR；训练前分别执行
+   一步 CUDA smoke，r32 还必须验证扩容前后固定 prompt logits 一致。
+4. validation 分别报告知识微平均、宏平均和类别结果，500 条算术、旧行为回放、
+   Solver 战斗动作、人工战略动作、人工接管战斗以及满药水不可领取奖励定向题。
+5. 只用 validation 选择 r16/r32；eval 保持冻结，直到 E5 候选和配方已经确定。
+
+### E5 实施记录
+
+2026-08-30 已完成数据与训练前门禁。E5 派生数据共有 36,087 条 train 候选、
+7,358 条 validation 和 7,675 条冻结 eval；本轮 `knowledge_epoch_start=3` 的实际
+训练集合为 12,211 条：
+
+| 来源 | 数量 |
+| --- | ---: |
+| 第 3 套完整知识问法 | 5,969 |
+| 六类分层算术 | 500 |
+| E4 旧行为回放 | 1,478 |
+| A0～A5 新行为 | 4,264 |
+| 其中 CombatSolver 动作 | 3,076 |
+| 其中新人工动作 | 1,188 |
+
+新行为的来源字段只保存在 JSONL 元数据和 manifest，完整 messages 中没有
+`combat_solver` 或 `human_combat_solver`。正式 tokenizer 审计的最长样本为 2,047
+token、P99 为 1,778，没有触及 12,288 上限。validation 同时包含旧行为 373 条和
+完整 A3 的 736 条；eval 包含旧行为 600 条和完整 A4 的 826 条。
+最终 manifest 还按两个 raw 根保存实际分卷，并逐局记录 origin、胜负、
+`recording_complete`、gap、样本数和动作来源计数。补充该审计字段后重新构建，
+36,087/7,358/7,675 条三分卷及全部 JSONL 文件摘要与训练时完全一致；训练时原始
+manifest 也已按其既有 SHA-256 快照到两路 run 目录，因此不需要重训或重跑
+validation。
+
+r32 扩容先用真实微型 Llama 做红绿回归，再在同一 A100 上按正式 CPU 注入 → CUDA
+迁移顺序检查 Qwen3.5-4B：304 个旧 LoRA 张量逐元素一致，新增 B 全零，
+`alpha/rank` 都为 2；固定 prompt 的 25/25 个位置 top-1 token 一致，末 token KL
+为 0.0044。BF16 因 rank16/rank32 GEMM 形状不同仍有小幅 logits 舍入差异，双卡
+一步 smoke 的首批 loss 分别为 0.17528/0.17655，不把它误写成 bitwise 等价。
+
+正式运行名为 `20260830-sft-e5-teacher-r16` 和
+`20260830-sft-e5-teacher-r32`，使用 GPU 0/2。两路都从同一 E4、同一数据与 seed
+开始一轮 `1e-4` 训练，并由进程退出 watcher 直接衔接 validation。
+
+冻结 E4 已先在同一份 E5 validation 上完成基线生成：知识严格 69.83%、含数字题
+完整 82.36%、算术 98.57%。1,109 条行为总体精确匹配 62.31%、合法率 99.37%；
+其中 A3 的 493 条 Solver 战斗动作精确 49.90%/合法 100%，243 条人工战略动作精确
+76.54%/合法 97.12%。满药水且奖励 0 不可领取的 9 个定向状态中，E4 仅 2 次输出
+合法动作，7 次仍选择 `ACTION: claim_reward 0`。E5 必须在不牺牲知识和算术的前提
+下改善这些行为指标；报告位于 `runs/eval/20260830-e5-validation/`。
+
+两路都正常完成 12,211 个训练样本、1,527 个优化步，并保存精确
+`checkpoint-epoch-1`。只使用同一份 7,358 条 validation 的最终结果为：
+
+| 指标 | E4 父模型 | E5-r16 | E5-r32 |
+| --- | ---: | ---: | ---: |
+| 知识严格全文 | 69.83% | **80.21%** | 74.92% |
+| 含数字知识完整 | 82.36% | **89.80%** | 85.15% |
+| 知识类别宏平均 | 52.77% | **66.32%** | 63.98% |
+| 算术结构化正确 | **98.57%** | 97.50% | 96.79% |
+| 全部行为精确匹配 | 62.31% | 64.56% | **64.74%** |
+| 全部行为合法 | 99.37% | **100%** | **100%** |
+| A3 Solver 战斗精确 | 49.90% | 58.22% | **59.43%** |
+| A3 人工战略精确 | 76.54% | **80.66%** | **80.66%** |
+| 满药水奖励死点合法 | 2/9 | **9/9** | **9/9** |
+| 错误 `claim_reward 0` | 7 | **0** | **0** |
+
+选择 `20260830-sft-e5-teacher-r16`。r32 在 493 条 Solver 战斗动作上只多命中
+6 条，却相对 r16 丢失 5.29 个百分点知识严格率和 0.71 个百分点算术正确率；扩大
+rank 没有形成值得这些退化的收益。逐题生成、类别细分和选择说明位于
+`runs/eval/20260830-e5-validation/`。
+
+胜出 r16 已合并为独立 Hugging Face 模型并转换为本机 MLX 8-bit；模型协议 smoke
+输出合法 `ACTION: end_turn`。五个固定新 seed 的实机结果为：
+
+| Seed | 结果 | 楼层 | 战斗 | 决策 | 模型重试 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| E5TEST0001 | 死亡 | 8 | 5 | 106 | 0 |
+| E5TEST0002 | 死亡 | 11 | 6 | 144 | 0 |
+| E5TEST0003 | 死亡 | 13 | 6 | 173 | 0 |
+| E5TEST0004 | SSE 竞态后续跑死亡 | 17 | 9 | 240 | 0 |
+| E5TEST0005 | 死亡 | 9 | 6 | 104 | 0 |
+
+E5TEST0004 在 10 层 `open_chest` 后稳定复现 Mod/SSE 竞态：动作响应是 revision
+2294 的过渡态，自动领取完成后的 `/state` 已是 revision 2295、`CHEST + proceed`，
+但 SSE 订阅没有收到该更新。直接从 2295 原样续跑，又完成 4 场战斗并在 17 层死亡，
+全程仍是 0 模型重试。这排除了模型非法动作和战略确定性死循环。已经实机 smoke 的
+最小方案是：SSE 超时时补读一次 `/state`，只有 revision 严格变大且现有 router
+可处理时才继续，否则维持原超时错误；它不重试模型、不接受非法动作，也不修改提示
+词。本轮按既定边界只记录方案，不改生产 Harness。完整现场位于
+`runs/eval/20260830-e5-headless/`。
+
+因此 E5-r16 可以作为 no-thinking 战斗 GRPO 父 policy：validation 行为合法率
+100%，五局共 767 次动作没有模型重试，Solver 战斗精确率相对 E4 提高 8.32 个百分
+点。它还不能证明整盘策略已经足够强：五局没有通关，整盘 GiGPO 不能只用通关稀疏
+奖励，仍需战斗、楼层、构筑和终局分层信号。大规模长局收集前还应先落地上述 SSE
+竞态修复。
+
 ## no-thinking 输出与 RL 的边界
 
 SFT 只训练和验收最终单行 `ACTION:`：
@@ -581,14 +727,15 @@ adapter 和评测报告，不把教师数据回灌到 E4，也不覆盖 E3 基�
   r64 A/B；
 - [x] 把 adapter、checkpoint、训练日志和评测报告回传本机；
 - [x] 合并 Hugging Face 模型，并转换/测试本地 MLX 8-bit 部署格式；
-- [ ] 重跑知识、算术、动作基线和整局 smoke，单列满药水栏混合奖励死点。
+- [x] 完成 E5 r16/r32 同卷 validation、满药水栏奖励死点和五局整局 smoke；只用
+  validation 选择 r16，保持 eval 冻结。
 
 ### 第四阶段：冻结交付
 
-- [ ] 固定最终 adapter 和合并模型，不再用 eval 结果反向修改本轮；
-- [ ] 保存训练配置、数据 manifest、父模型/adapter 血缘和完整评测报告；
-- [ ] 在当前 Harness 上完成完整 run smoke；
-- [ ] 把 E4 模型标识交给 CombatSolver 数据第三阶段；E5 和后续 RL 从独立分支继续。
+- [x] 固定 E5-r16 adapter、合并模型和 MLX 8-bit 模型，不用 eval 反向修改本轮；
+- [x] 保存训练配置、数据 manifest、父模型/adapter 血缘和完整 validation 报告；
+- [x] 在当前 Harness 上完成五局 run smoke，并定向复现、续跑 SSE 漏事件现场；
+- [x] 明确 E5-r16 进入战斗 GRPO；整盘 Tree-GRPO/GiGPO 继续使用独立 adapter。
 
 ## 交付验收线
 

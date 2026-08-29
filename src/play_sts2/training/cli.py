@@ -58,6 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/raw/human"),
     )
     build.add_argument(
+        "--additional-human-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="按附加 raw 根自己的 splits.json 合并行为样本",
+    )
+    build.add_argument(
         "--output-root",
         type=Path,
         default=Path("data/datasets/sft"),
@@ -179,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = build_sft_dataset(
             knowledge_root=args.knowledge_root,
             human_root=args.human_root,
+            additional_human_roots=tuple(args.additional_human_root),
             output_root=args.output_root,
             train_run_ids=args.train_run,
             dev_run_ids=args.dev_run,

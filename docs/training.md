@@ -88,6 +88,24 @@ logits_chunk_size = 2048
 checkpoint_steps = 2000
 ```
 
+E5 从冻结 E4 开始一轮单变量容量 A/B。两路使用同一数据、seed、`1e-4` 和第 3
+套知识问法；r32 使用函数等价扩容，不随机重训父 adapter：
+
+```toml
+init_adapter = "models/adapters/20260829-sft-e4-knowledge-r16-lr1e4"
+epochs = 1
+knowledge_epoch_start = 3
+learning_rate = 0.0001
+lora_rank = 16       # 对照组为 32
+lora_alpha = 32      # 对照组为 64
+expand_init_adapter = false  # r32 对照组为 true
+```
+
+`knowledge_epoch_start` 只改变本次运行首轮选择的训练问法；没有轮次的算术和行为
+仍作为通用锚点加入。`expand_init_adapter=true` 要求目标 rank 更高、
+`alpha/rank` 不变且父 adapter 未启用 rsLoRA；扩容复制旧通道、保留新增 A 的标准
+初始化并把新增 B 置零。
+
 `1e-4` 是 Qwen LoRA 的常见量级，也是前两轮实际使用的设置；它不是裸全参数微调
 的通用学习率。“全层 LoRA”指 adapter 覆盖 Qwen3.5-4B 的全部 32 个 decoder
 layer，并不是解冻 4B 基座：24 个 linear-attention layer 覆盖
@@ -109,6 +127,13 @@ checkpoint 同时保存约 55 MB LoRA 权重、约 110 MB AdamW 状态、样本�
 暂存目录写完后再原子切换，避免恢复到不同 step。最终 adapter 仍通过暂存目录
 原子发布。若中断发生在 checkpoint 之后，恢复会原子截掉领先于 checkpoint 的
 指标行，再从对应下一步重算；不会把没有对应权重的日志误当作已完成进度。
+此外，每个完整 epoch 结束后都会更新 `checkpoint-last`，并原子发布不可覆盖的
+`checkpoint-epoch-N` 实体目录。它保存完全相同的 adapter、AdamW、游标和 RNG
+状态，用于逐轮 validation；中途 step checkpoint 不再冒充轮末模型。
+若进程恰好在轮末指针更新后、不可变目录发布前中断，精确恢复会识别
+`order=[]` 的轮末状态，从 `checkpoint-last` 原子补齐对应实体目录再继续。旧运行的
+`config.json` 没有 `knowledge_epoch_start`/`expand_init_adapter` 时按默认
+`1`/`false` 归一化，非默认变化仍会被拒绝。
 
 父 adapter 的血缘记录实际被 PEFT 加载的 `adapter_config.json` 与 LoRA 权重
 SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 adapter 的硬锁。
@@ -122,6 +147,25 @@ SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 a
 当前落盘数据已按 `configs/sft-e4-mix.toml` 从 `generated-v0.111.0` 构建。修改
 候选数据或配比后，应重新生成知识与算术候选并运行同一混合命令。构建器会逐事实
 检查五轮训练与两套留出问法，并拒绝知识题面或算术案例跨用途泄漏。
+
+E5 同时读取旧人类 raw 与人机协作 raw，附加根使用自己的 `splits.json` 选择固定
+局集合；未列入该附加名册的后续录制不会静默进入已经冻结的 E5：
+
+```bash
+uv run play-sts2-train build-sft \
+  --knowledge-root data/game_knowledge/generated-v0.111.0 \
+  --human-root data/raw/human \
+  --additional-human-root data/raw/human_combat_solver \
+  --output-root data/datasets/e5/sft \
+  --mix configs/sft-e5-mix.toml
+```
+
+行为 JSONL 保留 `behavior_origin`、`action_source`、胜负与录制 gap，但这些字段不
+进入模型 messages。混合器的旧行为上限不裁剪 `human_combat_solver` 来源；算术可
+通过 `[arithmetic.train_per_kind]` 按六类确定性抽样。
+manifest 的 `human.roots` 保存每个 raw 根实际采用的整局分卷，`human.runs` 逐局保存
+root、split、胜负、录制完整性、gap、样本数和动作来源计数；仅用于构建审计的 root
+字段不会写入训练 JSONL。
 
 ```bash
 uv sync --group training

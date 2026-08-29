@@ -16,10 +16,16 @@ E3 adapter 初始化新运行，使用 `5e-5`/`1e-4` 两组对照、r16/alpha32�
 知识实体与事实必须全部保留，远古者由上游知识生成范围排除；未列出的低频动作全部
 保留。构建时显式指定 `generated-v0.111.0`。
 
+`sft-e5-mix.toml` 在相同旧行为上限之外，按六类固定 500 条算术；
+`human_combat_solver` 来源不受旧行为上限裁剪。E5 CUDA 的 r16/r32 配置都从选定
+E4 开始，使用 `knowledge_epoch_start=3` 和一轮 `1e-4`；r32/alpha64 额外设置
+`expand_init_adapter=true`，保持与 r16/alpha32 相同的缩放。
+
 `sft-cuda.toml` 使用同一数据和 LoRA 配方，但只允许 `cuda` 或 `cuda:N`，基座以
 BF16 加载，LoRA 可训练参数仍强制为 FP32。通过独立的 `sft-cuda` 子命令运行，
 不改变 Mac 默认配置和 `sft` 命令。E4 每轮实际使用 10,247 条样本，梯度累积 8 后
 约 1,281 个优化步；CUDA 配置每 250 步覆盖一次 `checkpoint-last`。
+每个完整 epoch 还会保存不可覆盖的 `checkpoint-epoch-N`，供逐轮验证和精确恢复。
 
 `inference.toml` 是本地模型转换、服务、冒烟和游戏 Runner 共用的唯一模型选择。
 `artifact_id`、合并目录和 MLX 目录必须对应；默认预先指向下一轮 e3，因此 e3
