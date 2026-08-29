@@ -63,6 +63,22 @@ def test_default_profile_does_not_depend_on_working_directory(
     assert (profile / "progress.save").is_file()
 
 
+def test_parser_allows_explicit_rl_debug_actions() -> None:
+    """RL 场景 worker 必须由用户显式开放受保护的调试动作。
+
+    Raises:
+        AssertionError: 正式游戏 CLI 无法为 scenario collector 开启调试入口。
+
+    Returns:
+        None: 此测试只验证显式开关，默认值由启动测试继续覆盖。
+    """
+    cli = importlib.import_module("play_sts2.game_cli")
+
+    args = cli._parser().parse_args(["--enable-debug-actions"])
+
+    assert args.enable_debug_actions is True
+
+
 def test_main_launches_isolated_game_and_waits_for_exit(
     monkeypatch: Any,
     tmp_path: Path,

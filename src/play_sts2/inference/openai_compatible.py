@@ -1,5 +1,6 @@
 """通过 OpenAI-compatible chat completions 协议调用推理服务。"""
 
+import math
 from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, Self
@@ -45,6 +46,7 @@ class OpenAICompatibleProvider:
         *,
         model: str | None = None,
         enable_thinking: bool | None = None,
+        capture_token_metadata: bool = False,
         timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -56,6 +58,8 @@ class OpenAICompatibleProvider:
                 完全相同的模型标识。
             enable_thinking (bool | None): 显式传给支持该扩展的 chat template；
                 ``None`` 表示保持通用 OpenAI-compatible 请求。
+            capture_token_metadata (bool): 是否请求 vLLM 扩展的生成 token ID
+                和逐 token 行为策略 log-prob。
             timeout (float): 单次生成请求允许等待的秒数。
             transport (httpx.BaseTransport | None): 可选的 HTTP 传输实现。
 
@@ -69,6 +73,7 @@ class OpenAICompatibleProvider:
         )
         self._model = model
         self._enable_thinking = enable_thinking
+        self._capture_token_metadata = capture_token_metadata
 
     def __enter__(self) -> Self:
         """进入持有底层 HTTP 会话的上下文。
@@ -142,10 +147,21 @@ class OpenAICompatibleProvider:
             body["chat_template_kwargs"] = {
                 "enable_thinking": self._enable_thinking,
             }
+        if self._capture_token_metadata:
+            body.update(
+                {
+                    "logprobs": True,
+                    "top_logprobs": 0,
+                    "return_token_ids": True,
+                }
+            )
 
         response = self._http.post(_CHAT_PATH, json=body)
         response.raise_for_status()
-        reply = _parse_reply(response)
+        reply = _parse_reply(
+            response,
+            require_token_metadata=self._capture_token_metadata,
+        )
         if self._model is not None and reply.model != self._model:
             raise InferenceModelIdentityError(
                 f"chat completion model 不一致: expected={self._model!r}, "
@@ -156,11 +172,16 @@ class OpenAICompatibleProvider:
         return reply
 
 
-def _parse_reply(response: httpx.Response) -> ModelReply:
+def _parse_reply(
+    response: httpx.Response,
+    *,
+    require_token_metadata: bool = False,
+) -> ModelReply:
     """把 chat completion 响应解析为统一回复对象。
 
     Args:
         response (httpx.Response): 状态码已经校验成功的 HTTP 响应。
+        require_token_metadata (bool): 是否要求并解析 vLLM rollout 元数据。
 
     Raises:
         InferenceProtocolError: 响应 JSON 或必需字段不符合协议。
@@ -213,6 +234,10 @@ def _parse_reply(response: httpx.Response) -> ModelReply:
     model = payload.get("model")
     if model is not None and not isinstance(model, str):
         raise InferenceProtocolError("invalid chat completion response")
+    token_ids, behavior_logprobs = _token_metadata(
+        choice,
+        required=require_token_metadata,
+    )
     reply = ModelReply(
         text=text,
         prompt_tokens=_optional_int(usage, "prompt_tokens"),
@@ -221,8 +246,57 @@ def _parse_reply(response: httpx.Response) -> ModelReply:
         reasoning=reasoning,
         finish_reason=finish_reason,
         model=model,
+        token_ids=token_ids,
+        behavior_logprobs=behavior_logprobs,
     )
     return reply
+
+
+def _token_metadata(
+    choice: Mapping[object, object],
+    *,
+    required: bool,
+) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    """读取并核对 vLLM chat completion 的 rollout token 元数据。
+
+    Args:
+        choice (Mapping[object, object]): 已校验为对象的首个生成 choice。
+        required (bool): 缺少元数据时是否按协议错误处理。
+
+    Raises:
+        InferenceProtocolError: token ID、log-prob 或两者长度不合法。
+
+    Returns:
+        tuple[tuple[int, ...], tuple[float, ...]]: 对齐的 token ID 与
+        行为策略 log-prob；普通推理不要求时返回两个空 tuple。
+    """
+    raw_ids = choice.get("token_ids")
+    raw_logprobs = choice.get("logprobs")
+    if raw_ids is None and raw_logprobs is None and not required:
+        return (), ()
+    if not isinstance(raw_ids, list) or not isinstance(raw_logprobs, Mapping):
+        raise InferenceProtocolError("invalid chat completion response")
+    content = raw_logprobs.get("content")
+    if not isinstance(content, list) or len(content) != len(raw_ids):
+        raise InferenceProtocolError("invalid chat completion response")
+
+    token_ids: list[int] = []
+    behavior_logprobs: list[float] = []
+    for raw_id, entry in zip(raw_ids, content, strict=True):
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id < 0:
+            raise InferenceProtocolError("invalid chat completion response")
+        if not isinstance(entry, Mapping):
+            raise InferenceProtocolError("invalid chat completion response")
+        raw_logprob = entry.get("logprob")
+        if (
+            isinstance(raw_logprob, bool)
+            or not isinstance(raw_logprob, (int, float))
+            or not math.isfinite(raw_logprob)
+        ):
+            raise InferenceProtocolError("invalid chat completion response")
+        token_ids.append(raw_id)
+        behavior_logprobs.append(float(raw_logprob))
+    return tuple(token_ids), tuple(behavior_logprobs)
 
 
 def _optional_int(data: Mapping[object, object], field: str) -> int | None:

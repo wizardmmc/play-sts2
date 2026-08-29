@@ -34,6 +34,10 @@ class BattleRunError(RuntimeError):
     """表示当前战斗无法继续形成可靠的模型决策闭环。"""
 
 
+class BattleStepLimitExceeded(BattleRunError):
+    """表示策略未能在动作预算内结束战斗。"""
+
+
 class BattleOutcome(str, Enum):
     """表示战斗循环的正常离场原因。"""
 
@@ -67,6 +71,7 @@ class BattleRunner:
         max_tokens: int = 128,
         temperature: float = 0.0,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        max_conflict_retries: int | None = None,
         max_steps: int = _DEFAULT_MAX_STEPS,
         state_timeout: float = _DEFAULT_STATE_TIMEOUT,
     ) -> None:
@@ -78,6 +83,8 @@ class BattleRunner:
             max_tokens (int): 每次模型生成允许使用的最大输出 token 数。
             temperature (float): 每次模型生成使用的采样温度。
             max_retries (int): 每个动作首次失败后允许的重试次数。
+            max_conflict_retries (int | None): 瞬时动作窗口冲突的独立重试次数；
+                省略时沿用 `max_retries`。
             max_steps (int): 单场战斗允许执行的最大动作数。
             state_timeout (float): 单次动作后等待稳定状态的最长秒数。
 
@@ -92,6 +99,9 @@ class BattleRunner:
             temperature=temperature,
         )
         self._max_retries = max_retries
+        self._max_conflict_retries = (
+            max_retries if max_conflict_retries is None else max_conflict_retries
+        )
         self._max_steps = max_steps
         self._state_timeout = state_timeout
 
@@ -103,7 +113,8 @@ class BattleRunner:
                 从 Mod 读取当前状态。
 
         Raises:
-            BattleRunError: 初始状态不在战斗中、状态等待超时或动作数超限。
+            BattleRunError: 初始状态不在战斗中或状态等待超时。
+            BattleStepLimitExceeded: 策略执行达到动作数上限。
             DecisionRetriesExhausted: 某一步的模型输出耗尽重试仍然非法。
             httpx.HTTPStatusError: 推理服务或 Mod 拒绝 HTTP 请求。
 
@@ -119,7 +130,7 @@ class BattleRunner:
 
         while _fight_ongoing(state):
             if len(steps) >= self._max_steps:
-                raise BattleRunError(f"战斗动作数超过上限: {self._max_steps}")
+                raise BattleStepLimitExceeded(f"战斗动作数超过上限: {self._max_steps}")
             try:
                 step = self._engine.step(
                     state,
@@ -129,7 +140,7 @@ class BattleRunner:
                 latest = stale_state_from_conflict(exc)
                 if latest is None and not is_action_window_conflict(exc):
                     raise
-                if conflict_retries >= self._max_retries:
+                if conflict_retries >= self._max_conflict_retries:
                     raise
                 conflict_retries += 1
                 state = self._wait_for_state(

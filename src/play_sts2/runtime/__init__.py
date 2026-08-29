@@ -1,6 +1,12 @@
 """提供在线玩游戏所需的运行时编排。"""
 
-from .battle import BattleOutcome, BattleResult, BattleRunError, BattleRunner
+from .battle import (
+    BattleOutcome,
+    BattleResult,
+    BattleRunError,
+    BattleRunner,
+    BattleStepLimitExceeded,
+)
 from .decision import DecisionEngine, DecisionRetriesExhausted, DecisionStep
 from .router import RunRoute, classify_run_state
 from .run import RunDecision, RunError, RunOutcome, RunResult, RunRunner
@@ -11,6 +17,7 @@ __all__ = [
     "BattleResult",
     "BattleRunError",
     "BattleRunner",
+    "BattleStepLimitExceeded",
     "DecisionEngine",
     "DecisionRetriesExhausted",
     "DecisionStep",

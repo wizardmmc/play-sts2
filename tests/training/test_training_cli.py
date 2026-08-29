@@ -5,6 +5,84 @@ from pathlib import Path
 from play_sts2.training import cli
 
 
+def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """战斗采样命令把场景、多个游戏端点和冻结策略交给 collector。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Raises:
+        AssertionError: CLI 丢失 worker、policy version 或采样预算。
+
+    Returns:
+        None: 此测试不连接真实游戏或 A100 服务。
+    """
+    calls: list[dict[str, object]] = []
+
+    def collect(**kwargs: object) -> dict[str, object]:
+        """记录 collector 参数并返回最小摘要。
+
+        Args:
+            **kwargs (object): CLI 传入的采样参数。
+
+        Returns:
+            dict[str, object]: 可直接输出为 JSON 的采样摘要。
+        """
+        calls.append(kwargs)
+        return {"group_id": kwargs["group_id"], "arms": kwargs["group_size"]}
+
+    monkeypatch.setattr(cli, "collect_battle_rollout_group", collect)
+
+    result = cli.main(
+        [
+            "collect-rl-battle",
+            "--scenario",
+            "configs/scenarios/cultists.json",
+            "--game-url",
+            "http://127.0.0.1:8080",
+            "--game-url",
+            "http://127.0.0.1:8081",
+            "--model-url",
+            "http://127.0.0.1:8900",
+            "--policy-model",
+            "policy-e3-r1",
+            "--vllm-logprobs-mode",
+            "processed_logprobs",
+            "--group-id",
+            "battle-demo-001",
+            "--output",
+            "runs/rl/battle-demo-001.json",
+            "--temperature",
+            "0.8",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        {
+            "scenario_path": Path("configs/scenarios/cultists.json"),
+            "game_urls": (
+                "http://127.0.0.1:8080",
+                "http://127.0.0.1:8081",
+            ),
+            "model_url": "http://127.0.0.1:8900",
+            "policy_model": "policy-e3-r1",
+            "vllm_logprobs_mode": "processed_logprobs",
+            "group_id": "battle-demo-001",
+            "output_path": Path("runs/rl/battle-demo-001.json"),
+            "group_size": 8,
+            "max_tokens": 128,
+            "temperature": 0.8,
+            "infrastructure_attempts": 3,
+        }
+    ]
+    assert '"arms": 8' in capsys.readouterr().out
+
+
 def test_build_sft_command_passes_explicit_mix_recipe(
     monkeypatch: object,
     capsys: object,

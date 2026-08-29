@@ -1,5 +1,6 @@
 """编排一次状态到游戏动作的在线决策闭环。"""
 
+import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -51,6 +52,7 @@ class DecisionStep:
 
     Args:
         observation (Observation): 从动作前状态生成的模型观测。
+        before_state (dict[str, Any]): 生成观测时的完整游戏状态副本。
         messages (tuple[ChatMessage, ...]): 本次实际发送给 Provider 的消息。
         replies (tuple[ModelReply, ...]): Provider 每次尝试返回的原始回复。
         retry_errors (tuple[str, ...]): 成功前各次动作失败或拒绝原因。
@@ -59,6 +61,7 @@ class DecisionStep:
     """
 
     observation: Observation
+    before_state: dict[str, Any]
     messages: tuple[ChatMessage, ...]
     replies: tuple[ModelReply, ...]
     retry_errors: tuple[str, ...]
@@ -190,6 +193,7 @@ class DecisionEngine:
                 continue
             return DecisionStep(
                 observation=observation,
+                before_state=copy.deepcopy(dict(state)),
                 messages=tuple(messages),
                 replies=tuple(replies),
                 retry_errors=tuple(errors),

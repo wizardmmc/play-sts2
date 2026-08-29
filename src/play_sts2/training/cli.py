@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from .rl import collect_battle_rollout_group
 from .sft import (
     build_sft_dataset,
     evaluate_sft,
@@ -25,6 +26,26 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(prog="play-sts2-train")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    collect_rl = subparsers.add_parser(
+        "collect-rl-battle",
+        help="从本地游戏 workers 收集严格同入口的战斗 rollout group",
+    )
+    collect_rl.add_argument("--scenario", type=Path, required=True)
+    collect_rl.add_argument("--game-url", action="append", required=True)
+    collect_rl.add_argument("--model-url", required=True)
+    collect_rl.add_argument("--policy-model", required=True)
+    collect_rl.add_argument(
+        "--vllm-logprobs-mode",
+        choices=("processed_logprobs",),
+        required=True,
+        help="确认 vLLM 已用 --logprobs-mode processed_logprobs 启动",
+    )
+    collect_rl.add_argument("--group-id", required=True)
+    collect_rl.add_argument("--output", type=Path, required=True)
+    collect_rl.add_argument("--group-size", type=int, default=8)
+    collect_rl.add_argument("--max-tokens", type=int, default=128)
+    collect_rl.add_argument("--temperature", type=float, default=0.8)
+    collect_rl.add_argument("--infrastructure-attempts", type=int, default=3)
     build = subparsers.add_parser("build-sft", help="构建可读 SFT messages")
     build.add_argument(
         "--knowledge-root",
@@ -136,7 +157,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         int: 所选命令成功完成时返回 ``0``。
     """
     args = build_parser().parse_args(argv)
-    if args.command == "build-sft":
+    if args.command == "collect-rl-battle":
+        output = collect_battle_rollout_group(
+            scenario_path=args.scenario,
+            game_urls=tuple(args.game_url),
+            model_url=args.model_url,
+            policy_model=args.policy_model,
+            vllm_logprobs_mode=args.vllm_logprobs_mode,
+            group_id=args.group_id,
+            output_path=args.output,
+            group_size=args.group_size,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            infrastructure_attempts=args.infrastructure_attempts,
+        )
+    elif args.command == "build-sft":
         result = build_sft_dataset(
             knowledge_root=args.knowledge_root,
             human_root=args.human_root,

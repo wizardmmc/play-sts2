@@ -5,12 +5,15 @@ from pathlib import Path
 import pytest
 
 
-def test_repository_inference_config_preserves_canonical_evaluation_profiles() -> None:
-    """仓库默认配置必须始终以 no-think 对齐 SFT，同时保留 think 对照组。"""
+def test_local_inference_config_preserves_canonical_evaluation_profiles() -> None:
+    """已配置的本地推理文件以 no-think 对齐 SFT，并保留 think 对照组。"""
     from play_sts2.inference.config import (
         DEFAULT_INFERENCE_CONFIG,
         load_inference_config,
     )
+
+    if not DEFAULT_INFERENCE_CONFIG.is_file():
+        pytest.skip("本地 inference.toml 不进入 Git")
 
     config = load_inference_config(DEFAULT_INFERENCE_CONFIG)
 

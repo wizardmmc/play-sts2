@@ -1,0 +1,20 @@
+{
+  "character_id": "DEFECT",
+  "seed": "ABCDEF1234",
+  "floor": 7,
+  "encounter_id": "CULTISTS_NORMAL",
+  "deck": [
+    "ZAP",
+    "DUALCAST",
+    "STRIKE_DEFECTx4",
+    "DEFEND_DEFECTx4"
+  ],
+  "relics": [
+    "CRACKED_CORE"
+  ],
+  "potions": [],
+  "potion_slots": 3,
+  "current_hp": 70,
+  "max_hp": 70,
+  "ascension": 0
+}

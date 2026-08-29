@@ -96,6 +96,65 @@ def test_openai_provider_posts_messages_and_reads_reply() -> None:
     )
 
 
+def test_openai_provider_requests_and_reads_rollout_token_metadata() -> None:
+    """RL 采样显式取得生成 token ID 与行为策略 log-prob。
+
+    Raises:
+        AssertionError: 请求未启用 vLLM token 元数据，或回复没有保持逐 token 对齐。
+
+    Returns:
+        None: 此测试钉住远程 rollout 的最小通信契约。
+    """
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """核对 rollout 扩展字段并返回三个生成 token。
+
+        Args:
+            request (httpx.Request): Provider 发出的生成请求。
+
+        Returns:
+            httpx.Response: 带 token ID 和采样 log-prob 的 vLLM 兼容响应。
+        """
+        body = json.loads(request.content)
+        assert body["logprobs"] is True
+        assert body["top_logprobs"] == 0
+        assert body["return_token_ids"] is True
+        return httpx.Response(
+            200,
+            json={
+                "model": "policy-e3-r1",
+                "choices": [
+                    {
+                        "message": {"content": "ACTION: end_turn"},
+                        "finish_reason": "stop",
+                        "token_ids": [741, 25, 1289],
+                        "logprobs": {
+                            "content": [
+                                {"token": "ACTION", "logprob": -0.1},
+                                {"token": ":", "logprob": -0.2},
+                                {"token": " end_turn", "logprob": -0.3},
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+
+    inference = importlib.import_module("play_sts2.inference")
+    provider = inference.OpenAICompatibleProvider(
+        "http://127.0.0.1:8900",
+        model="policy-e3-r1",
+        capture_token_metadata=True,
+        transport=httpx.MockTransport(respond),
+    )
+
+    with provider:
+        reply = provider.chat((inference.ChatMessage(role="user", content="状态"),))
+
+    assert reply.token_ids == (741, 25, 1289)
+    assert reply.behavior_logprobs == (-0.1, -0.2, -0.3)
+
+
 @pytest.mark.parametrize("reported_model", [None, "default_model", "/models/e2"])
 def test_openai_provider_rejects_unbound_response_model(
     reported_model: str | None,

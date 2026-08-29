@@ -28,6 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             home=home,
             profile=args.profile,
             mode=args.mode,
+            enable_debug_actions=args.enable_debug_actions,
         ) as game:
             print(f"游戏已就绪: {game.base_url}", flush=True)
             print(f"隔离 HOME: {game.home}", flush=True)
@@ -71,6 +72,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_PROFILE,
         help=f"隔离存档模板目录，默认为 {DEFAULT_PROFILE}",
+    )
+    parser.add_argument(
+        "--enable-debug-actions",
+        action="store_true",
+        help="显式开放 scenario 重置动作，仅用于合成 RL 采样",
     )
     return parser
 

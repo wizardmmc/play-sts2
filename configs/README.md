@@ -1,6 +1,9 @@
 # 配置
 
-`sft.toml` 保存 Qwen LoRA SFT 的默认数据、模型和超参数。配置文件进入 Git；
+本目录下的 TOML 是按机器维护的本地配置，不进入 Git；已有工作区会继续保留这些
+文件，新环境首次运行前需要按下面的契约创建对应配置。
+
+`sft.toml` 保存 Qwen LoRA SFT 的默认数据、模型和超参数。
 训练日志写入 `runs/sft/<name>/`，最终 adapter 写入
 `models/adapters/<name>/`，名称必须以 `YYYYMMDD-` 开头。当前配置用 round-2
 e2 adapter 初始化新的 E3 运行，使用

@@ -479,7 +479,8 @@ def test_battle_runner_stops_after_action_window_retry_limit() -> None:
         runtime.BattleRunner(
             game,
             provider,
-            max_retries=1,
+            max_retries=0,
+            max_conflict_retries=1,
             state_timeout=1,
         ).run(_combat_state())
 
@@ -647,7 +648,10 @@ def test_battle_runner_stops_at_action_limit() -> None:
     runtime = importlib.import_module("play_sts2.runtime")
     provider = BattleProvider(["ACTION: end_turn"])
 
-    with pytest.raises(runtime.BattleRunError, match="战斗动作数超过上限: 1"):
+    with pytest.raises(
+        runtime.BattleStepLimitExceeded,
+        match="战斗动作数超过上限: 1",
+    ):
         runtime.BattleRunner(
             FinishingBattleGame(_combat_state(turn=2)),
             provider,

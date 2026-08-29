@@ -29,6 +29,9 @@ class ModelReply:
         reasoning (str | None): 服务端分离返回的思考文本。
         finish_reason (str | None): 服务端报告的生成停止原因。
         model (str | None): 服务端报告的实际模型标识。
+        token_ids (tuple[int, ...]): 生成内容的 token ID；普通推理可为空。
+        behavior_logprobs (tuple[float, ...]): 与 token ID 对齐的行为策略
+            log-prob；普通推理可为空。
     """
 
     text: str
@@ -38,3 +41,5 @@ class ModelReply:
     reasoning: str | None = None
     finish_reason: str | None = None
     model: str | None = None
+    token_ids: tuple[int, ...] = ()
+    behavior_logprobs: tuple[float, ...] = ()

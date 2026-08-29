@@ -532,6 +532,7 @@ internal sealed class GameEventService
 
     private void OnCombatSetUp(CombatState state, long generation)
     {
+        GameActionService.ResetCardPlayCounters(state.RoundNumber);
         GameStateService.MarkCombatTurnClosed();
         BindCombatState(state, generation);
         NotifyStateChanged();

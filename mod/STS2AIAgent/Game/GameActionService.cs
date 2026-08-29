@@ -75,6 +75,16 @@ internal static class GameActionService
     /// </summary>
     private static int _pendingCardRewardChoice = -1;
 
+    /// <summary>开始新战斗时清空 Mod 自行维护的回合出牌计数。</summary>
+    /// <param name="currentTurn">新战斗设置阶段的当前回合编号。</param>
+    internal static void ResetCardPlayCounters(int currentTurn)
+    {
+        CardsPlayedThisTurn = 0;
+        AttacksPlayedThisTurn = 0;
+        SkillsPlayedThisTurn = 0;
+        LastTurnNumber = currentTurn;
+    }
+
     internal static void SyncCardPlayCounters(int currentTurn)
     {
         if (currentTurn == LastTurnNumber)

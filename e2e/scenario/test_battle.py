@@ -69,6 +69,93 @@ def test_battle_scenario_repeats_entry_and_fixed_second_turn(
     assert first_second_turn == second_second_turn
 
 
+def test_battle_scenario_matches_across_two_independent_games(
+    running_games: tuple[RunningGame, RunningGame],
+) -> None:
+    """两个同时存活的隔离进程构造完全相同的模型入口。
+
+    Args:
+        running_games (tuple[RunningGame, RunningGame]): 独立 HOME 和端口的游戏实例。
+
+    Raises:
+        AssertionError: 两个游戏产生的入口快照不同或实际共享了隔离目录。
+
+    Returns:
+        None: 此测试验证同入口多 worker 采样的真实环境前提。
+    """
+    scenario = BattleScenario(
+        character_id="DEFECT",
+        seed="ABCDEF1234",
+        floor=7,
+        encounter_id="CULTISTS_NORMAL",
+        deck=(
+            "ZAP",
+            "DUALCAST",
+            "STRIKE_DEFECTx4",
+            "DEFEND_DEFECTx4",
+        ),
+        relics=("CRACKED_CORE",),
+        potion_slots=3,
+        current_hp=70,
+        max_hp=70,
+    )
+    snapshots = []
+    for game in running_games:
+        with GameClient(game.base_url) as client:
+            snapshots.append(BattleResetter(client).reset(scenario).snapshot)
+
+    assert running_games[0].home != running_games[1].home
+    assert running_games[0].base_url != running_games[1].base_url
+    assert snapshots[0] == snapshots[1]
+
+
+def test_battle_scenario_resets_card_counters_between_fights(
+    running_game: RunningGame,
+) -> None:
+    """新战斗不会继承上一场同回合编号的 Mod 出牌计数。
+
+    Args:
+        running_game (RunningGame): 测试进程启动的隔离游戏实例。
+
+    Raises:
+        AssertionError: 重置前没有记录出牌，或重置后入口仍带旧计数。
+
+    Returns:
+        None: 此测试验证反复采样时模型入口不会因 Mod 计数残留而漂移。
+    """
+    scenario = BattleScenario(
+        character_id="DEFECT",
+        seed="ABCDEF1234",
+        floor=7,
+        encounter_id="CULTISTS_NORMAL",
+        deck=(
+            "ZAP",
+            "DUALCAST",
+            "STRIKE_DEFECTx4",
+            "DEFEND_DEFECTx4",
+        ),
+        relics=("CRACKED_CORE",),
+        potion_slots=3,
+        current_hp=70,
+        max_hp=70,
+    )
+
+    with GameClient(running_game.base_url) as client:
+        resetter = BattleResetter(client)
+        first = resetter.reset(scenario)
+        dirty_state = _play_first_card(client, first.state)
+        assert dirty_state["combat"]["player"]["cards_played_this_turn"] == 1
+
+        second = resetter.reset(
+            scenario,
+            expected_snapshot=first.snapshot,
+        )
+
+    assert second.state["combat"]["player"]["cards_played_this_turn"] == 0
+    assert second.state["combat"]["player"]["attacks_played_this_turn"] == 0
+    assert second.state["combat"]["player"]["skills_played_this_turn"] == 0
+
+
 def test_combat_state_exposes_card_glow_and_relic_ui_counter(
     running_game: RunningGame,
 ) -> None:

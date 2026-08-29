@@ -103,6 +103,8 @@ def test_decision_engine_executes_model_action() -> None:
     assert step.action.name == "play_card"
     assert step.action.parameters == {"card_index": 0, "target_index": 1}
     assert step.action_result == action_result
+    state["combat"]["player"]["energy"] = 0
+    assert step.before_state["combat"]["player"]["energy"] == 3
 
 
 @pytest.mark.parametrize(
