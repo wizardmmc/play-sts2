@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+RunSource = Literal["human", "agent", "human_combat_solver"]
+
 
 @dataclass(frozen=True, slots=True)
 class RunMetadata:
@@ -11,19 +13,22 @@ class RunMetadata:
 
     Args:
         run_id (str): 当前轨迹在数据目录中的唯一名称。
-        source (Literal["human", "agent"]): 轨迹来自人类还是 Agent。
+        source (RunSource): 整局轨迹的执行者组合。
         started_at (str): 录制开始时的 UTC 时间。
         character_id (str | None): 当前角色 ID，尚未开局时为 ``None``。
         seed (str | None): 游戏种子，尚不可用时为 ``None``。
         ascension (int | None): 当前局进阶难度，尚不可用时为 ``None``。
+        recording_context (dict[str, Any] | None): 游戏、Mod 与教师设置等
+            可审计环境信息。
     """
 
     run_id: str
-    source: Literal["human", "agent"]
+    source: RunSource
     started_at: str
     character_id: str | None = None
     seed: str | None = None
     ascension: int | None = None
+    recording_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换成可直接写入 JSON 的对象。

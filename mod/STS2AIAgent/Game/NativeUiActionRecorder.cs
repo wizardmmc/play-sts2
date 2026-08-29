@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
@@ -34,6 +36,9 @@ namespace STS2AIAgent.Game;
 /// <summary>只观察原生 UI 决策，不主动驱动游戏。</summary>
 internal static class NativeUiActionRecorder
 {
+    private const string HumanUiSource = "human_ui";
+    private const string CombatSolverSource = "combat_solver";
+    private const string CombatSolverAssemblyName = "CombatSolver";
     private static Harmony? _harmony;
     private static int _suppressionDepth;
     private static Capture? _pendingCardCapture;
@@ -48,10 +53,14 @@ internal static class NativeUiActionRecorder
     [ThreadStatic] private static int _buttonPatchDepth;
     [ThreadStatic] private static int _cardUiCommitDepth;
 
+    /// <summary>保存动作提交前的请求、状态、局代次和执行者。</summary>
     internal sealed record Capture(
         ActionRequest Request,
         GameStatePayload Before,
-        long LifecycleGeneration);
+        long LifecycleGeneration,
+        string ActionSource);
+    /// <summary>保存原生提交点预期发布的动作及其执行者。</summary>
+    private sealed record CommitCapture(Capture? Capture, string ActionSource);
     private sealed record NativeAttempt(string Action, Capture? Capture);
     private sealed record GridCommitCapture(
         Capture[] Selections, NativeAttempt? Confirmation);
@@ -91,11 +100,13 @@ internal static class NativeUiActionRecorder
 
     private static Capture? Begin(string action, int? cardIndex = null,
         int? optionIndex = null, int? targetIndex = null,
-        bool trustNativeUiGate = false)
+        bool trustNativeUiGate = false,
+        string? actionSource = null)
     {
         if (Volatile.Read(ref _suppressionDepth) != 0) return null;
         try
         {
+            actionSource ??= ResolveActionSource();
             var generation = GameEventService.Instance.CaptureGeneration();
             var before = GameStateService.BuildStatePayload(
                 trustNativeUiGate ? action : null);
@@ -111,10 +122,29 @@ internal static class NativeUiActionRecorder
                 card_index = cardIndex,
                 option_index = optionIndex,
                 target_index = targetIndex,
-                client_context = new { source = "human_ui", layer }
-            }, before, generation);
+                client_context = new { source = actionSource, layer }
+            }, before, generation, actionSource);
         }
         catch { return null; }
+    }
+
+    /// <summary>判断当前原生游戏调用是否由 CombatSolver 发起。</summary>
+    /// <returns>调用栈中包含 CombatSolver 程序集时返回 <see langword="true"/>。</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool IsCombatSolverCall()
+    {
+        return new StackTrace().GetFrames().Any(frame =>
+            string.Equals(
+                frame.GetMethod()?.DeclaringType?.Assembly.GetName().Name,
+                CombatSolverAssemblyName,
+                StringComparison.Ordinal));
+    }
+
+    /// <summary>从当前同步调用栈解析动作的真实执行者。</summary>
+    /// <returns>CombatSolver 自动执行或人类原生 UI 的来源标记。</returns>
+    private static string ResolveActionSource()
+    {
+        return IsCombatSolverCall() ? CombatSolverSource : HumanUiSource;
     }
 
     private static void Finish(Capture? capture)
@@ -136,7 +166,8 @@ internal static class NativeUiActionRecorder
         {
             CaptureGap(capture.Request.action ?? "unknown",
                 "native action publication failed",
-                capture.LifecycleGeneration);
+                capture.LifecycleGeneration,
+                capture.ActionSource);
         }
     }
 
@@ -200,26 +231,29 @@ internal static class NativeUiActionRecorder
             target_index = targetIndex,
             command = request.command,
             client_context = request.client_context
-        }, capture.Before, capture.LifecycleGeneration);
+        }, capture.Before, capture.LifecycleGeneration, capture.ActionSource);
     }
 
     private static void CaptureGap(
         string action,
         string reason,
-        long? generation = null)
+        long? generation = null,
+        string? actionSource = null)
     {
-        if (Volatile.Read(ref _suppressionDepth) != 0 || generation == null)
-            return;
+        if (Volatile.Read(ref _suppressionDepth) != 0) return;
         try
         {
+            generation ??= GameEventService.Instance.CaptureGeneration();
+            actionSource ??= ResolveActionSource();
             GameEventService.Instance.PublishNativeUiCaptureGap(
-                action, reason, generation.Value);
+                action, reason, actionSource, generation.Value);
         }
         catch { }
     }
 
     private static Capture? BeginCard(CardModel card, Creature? target,
-        bool trustNativeUiGate = false)
+        bool trustNativeUiGate = false,
+        string? actionSource = null)
     {
         var combat = CombatManager.Instance.DebugOnlyGetState();
         var cards = GameStateService.GetLocalPlayer(combat)?
@@ -227,11 +261,13 @@ internal static class NativeUiActionRecorder
         var index = cards == null ? -1 : RefIndex(cards, card);
         return index < 0 ? null : Begin("play_card", cardIndex: index,
             targetIndex: TargetIndex(combat, target),
-            trustNativeUiGate: trustNativeUiGate);
+            trustNativeUiGate: trustNativeUiGate,
+            actionSource: actionSource);
     }
 
     private static Capture? BeginPotion(PotionModel potion, Creature? target,
-        bool trustNativeUiGate = false)
+        bool trustNativeUiGate = false,
+        string? actionSource = null)
     {
         var combat = CombatManager.Instance.DebugOnlyGetState();
         var match = potion.Owner.PotionSlots
@@ -241,7 +277,8 @@ internal static class NativeUiActionRecorder
         return index < 0 ? null : Begin("use_potion", optionIndex: index,
             targetIndex: GameStateService.PotionRequiresTarget(combat, potion)
                 ? TargetIndex(combat, target) : null,
-            trustNativeUiGate: trustNativeUiGate);
+            trustNativeUiGate: trustNativeUiGate,
+            actionSource: actionSource);
     }
 
     private static Capture? BeginSelectedCard(CardModel card)
@@ -473,7 +510,7 @@ internal static class NativeUiActionRecorder
     private static class CardPlayPatch
     {
         static void Prefix(CardModel __instance, Creature? target,
-            out Capture? __state)
+            out CommitCapture? __state)
         {
             __state = null;
             if (Volatile.Read(ref _suppressionDepth) != 0) return;
@@ -481,22 +518,35 @@ internal static class NativeUiActionRecorder
             var matches = ReferenceEquals(_pendingCard, __instance);
             _pendingCardCapture = null;
             _pendingCard = null;
-            if (!matches || capture == null) return;
-            __state = WithTarget(capture, TargetIndex(
-                CombatManager.Instance.DebugOnlyGetState(), target));
+            if (matches)
+            {
+                var source = capture?.ActionSource ?? HumanUiSource;
+                __state = new CommitCapture(capture == null ? null : WithTarget(
+                    capture, TargetIndex(
+                        CombatManager.Instance.DebugOnlyGetState(), target)), source);
+                return;
+            }
+            if (!IsCombatSolverCall()) return;
+            __state = new CommitCapture(BeginCard(
+                __instance,
+                target,
+                trustNativeUiGate: true,
+                actionSource: CombatSolverSource), CombatSolverSource);
         }
-        static void Postfix(CardModel __instance, bool __result, Capture? __state)
+        static void Postfix(CardModel __instance, bool __result,
+            CommitCapture? __state)
         {
             if (!__result) return;
             if (Volatile.Read(ref _suppressionDepth) != 0) return;
             GameActionService.RecordCardPlayed(
                 CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0,
                 __instance.Type.ToString());
-            if (__state != null)
-                Finish(__state);
-            else if (_cardUiCommitDepth > 0)
+            if (__state?.Capture != null)
+                Finish(__state.Capture);
+            else if (__state != null || _cardUiCommitDepth > 0)
                 CaptureGap("play_card",
-                    "native card commit succeeded without start capture");
+                    "native card commit succeeded without start capture",
+                    actionSource: __state?.ActionSource ?? HumanUiSource);
         }
     }
 
@@ -523,7 +573,7 @@ internal static class NativeUiActionRecorder
     private static class PotionUsePatch
     {
         static void Prefix(PotionModel __instance, Creature? target,
-            out Capture? __state)
+            out CommitCapture? __state)
         {
             __state = null;
             if (Volatile.Read(ref _suppressionDepth) != 0) return;
@@ -531,17 +581,35 @@ internal static class NativeUiActionRecorder
             var matches = ReferenceEquals(_pendingPotion, __instance);
             _pendingPotionCapture = null;
             _pendingPotion = null;
-            if (!matches || capture == null)
+            if (matches)
             {
-                CaptureGap("use_potion", "manual use reached commit without start capture");
+                var source = capture?.ActionSource ?? HumanUiSource;
+                var combat = CombatManager.Instance.DebugOnlyGetState();
+                __state = new CommitCapture(capture == null ? null : WithTarget(
+                    capture,
+                    GameStateService.PotionRequiresTarget(combat, __instance)
+                        ? TargetIndex(combat, target) : null), source);
                 return;
             }
-            var combat = CombatManager.Instance.DebugOnlyGetState();
-            __state = WithTarget(capture,
-                GameStateService.PotionRequiresTarget(combat, __instance)
-                    ? TargetIndex(combat, target) : null);
+            if (!IsCombatSolverCall()) return;
+            __state = new CommitCapture(BeginPotion(
+                __instance,
+                target,
+                trustNativeUiGate: true,
+                actionSource: CombatSolverSource), CombatSolverSource);
         }
-        static void Postfix(Capture? __state) => Finish(__state);
+        static void Postfix(CommitCapture? __state)
+        {
+            if (__state?.Capture != null)
+            {
+                Finish(__state.Capture);
+                return;
+            }
+            if (__state != null)
+                CaptureGap("use_potion",
+                    "native potion commit succeeded without start capture",
+                    actionSource: __state.ActionSource);
+        }
     }
 
     [HarmonyPatch(typeof(DiscardPotionGameAction), MethodType.Constructor,
@@ -565,6 +633,47 @@ internal static class NativeUiActionRecorder
     {
         static void Prefix(out Capture? __state) => __state = Begin("end_turn");
         static void Postfix(Capture? __state) => Finish(__state);
+    }
+
+    /// <summary>观察 CombatSolver 实际入队的结束回合动作。</summary>
+    [HarmonyPatch(typeof(EndPlayerTurnAction), MethodType.Constructor,
+        typeof(Player), typeof(int))]
+    private static class CombatSolverEndTurnPatch
+    {
+        /// <summary>在 Solver 构造本地玩家的结束回合动作前保存状态。</summary>
+        /// <param name="player">准备结束回合的玩家。</param>
+        /// <param name="turnNumber">动作绑定的战斗回合编号。</param>
+        /// <param name="__state">返回给后置补丁的动作捕获。</param>
+        static void Prefix(Player player, int turnNumber,
+            out CommitCapture? __state)
+        {
+            _ = turnNumber;
+            var local = GameStateService.GetLocalPlayer(
+                CombatManager.Instance.DebugOnlyGetState());
+            __state = !IsCombatSolverCall() || !ReferenceEquals(player, local)
+                ? null
+                : new CommitCapture(
+                    Begin(
+                        "end_turn",
+                        trustNativeUiGate: true,
+                        actionSource: CombatSolverSource),
+                    CombatSolverSource);
+        }
+
+        /// <summary>在 Solver 结束回合动作构造后发布动作或缺口。</summary>
+        /// <param name="__state">前置补丁保存的动作捕获。</param>
+        static void Postfix(CommitCapture? __state)
+        {
+            if (__state?.Capture != null)
+            {
+                Finish(__state.Capture);
+                return;
+            }
+            if (__state != null)
+                CaptureGap("end_turn",
+                    "solver end-turn commit succeeded without before-state capture",
+                    actionSource: __state.ActionSource);
+        }
     }
 
     [HarmonyPatch]

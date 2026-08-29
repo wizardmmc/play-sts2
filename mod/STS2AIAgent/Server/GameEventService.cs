@@ -1306,16 +1306,23 @@ internal sealed class GameEventService
         });
     }
 
+    /// <summary>发布原生界面或外部自动执行动作的采集缺口。</summary>
+    /// <param name="action">未能完整捕获的动作名称。</param>
+    /// <param name="reason">稳定、可供审计的缺口原因。</param>
+    /// <param name="source">动作的实际执行者来源。</param>
+    /// <param name="generation">动作所属的局生命周期代次。</param>
     public void PublishNativeUiCaptureGap(
         string action,
         string reason,
+        string source,
         long generation)
     {
         RunLifecycleCallback(generation, () =>
             Publish("native_ui_capture_gap", new
             {
                 action,
-                reason
+                reason,
+                source
             }));
     }
 

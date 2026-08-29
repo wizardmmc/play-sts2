@@ -126,3 +126,76 @@ def test_main_records_one_run_to_default_human_directory(
     assert metadata["strategic_sample_count"] == 0
     assert not (run_dir / "events.jsonl").exists()
     assert capsys.readouterr().out == f"录制完成: {run_dir}\n"
+
+
+def test_main_records_mixed_teacher_context_from_runtime_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """人机协作入口必须把固定运行时和 Solver 预算写入元数据。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离项目目录。
+        monkeypatch (pytest.MonkeyPatch): 用于隔离工作目录和本地网络边界。
+
+    Raises:
+        AssertionError: CLI 未接受混合来源或丢失教师环境元数据。
+
+    Returns:
+        None: 此测试只验证命令行参数到 ``meta.json`` 的数据流。
+    """
+    cli = importlib.import_module("play_sts2.recording.cli")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "GameClient", CliGameClient)
+    receipt = tmp_path / "runtime-receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "game": {"version": "v0.111.0", "branch": "public-beta"},
+                "mods": {
+                    "STS2AIAgent": {"version": "0.8.0-rlsts2.46"},
+                    "STS2-RitsuLib": {"version": "0.5.18"},
+                    "CombatSolver": {"version": "0.17.0"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "--source",
+            "human_combat_solver",
+            "--runtime-receipt",
+            str(receipt),
+            "--solver-preset",
+            "medium",
+            "--check-interval",
+            "0",
+        ]
+    )
+
+    run_root = tmp_path / "data/raw/human_combat_solver"
+    run_dir = next(path for path in run_root.iterdir() if path.is_dir())
+    metadata = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert metadata["source"] == "human_combat_solver"
+    assert metadata["recording_context"] == {
+        "game": {"version": "v0.111.0", "branch": "public-beta"},
+        "mods": {
+            "STS2AIAgent": {"version": "0.8.0-rlsts2.46"},
+            "STS2-RitsuLib": {"version": "0.5.18"},
+            "CombatSolver": {"version": "0.17.0"},
+        },
+        "solver": {
+            "preset": "medium",
+            "settings_source": "recorder_argument",
+            "short_time_budget_ms": 5_000,
+            "deep_time_budget_ms": 60_000,
+            "short_node_budget": 1_200,
+            "deep_node_budget": 6_000,
+            "memory_budget_bytes": 6_000_000_000,
+        },
+        "student_observation_policy": "visible_only",
+        "teacher_uses_hidden_rng": True,
+    }

@@ -167,6 +167,162 @@ def test_recorder_saves_changed_states_and_exact_mod_events(
     assert result.event_count == 1
 
 
+def test_recorder_saves_human_strategy_and_solver_combat_in_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """人机协作录制必须保留整局来源和每条动作的真实执行者。
+
+    Args:
+        tmp_path (Path): Pytest 提供的原始数据目录。
+        monkeypatch (pytest.MonkeyPatch): 用于固定录制时间和最终目录名。
+
+    Raises:
+        AssertionError: 两类动作未进入同一局、来源丢失或元数据计数错误。
+
+    Returns:
+        None: 此测试只验证混合整局的可观察落盘契约。
+    """
+    map_state = {
+        "screen": "MAP",
+        "in_combat": False,
+        "available_actions": ["choose_map_node"],
+        "run": {
+            "character_name": "故障机器人",
+            "ascension": 0,
+            "act_id": 0,
+            "floor": 1,
+            "current_hp": 75,
+            "max_hp": 75,
+            "gold": 99,
+            "relics": [],
+            "potions": [],
+            "deck": [],
+        },
+        "map": {
+            "available_nodes": [
+                {"index": 0, "row": 1, "col": 1, "node_type": "Monster"}
+            ]
+        },
+    }
+    combat_state = {
+        **map_state,
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
+        "combat": {
+            "player": {
+                "current_hp": 75,
+                "max_hp": 75,
+                "block": 0,
+                "energy": 0,
+                "stars": 0,
+                "focus": 0,
+                "powers": [],
+                "orbs": [],
+            },
+            "enemies": [],
+            "hand": [],
+            "draw_count": 0,
+            "discard_count": 0,
+        },
+    }
+    client = RecordingClient(
+        events=[
+            {
+                "event_id": 1,
+                "type": "run_started",
+                "data": {
+                    "run_id": "MIXED-SEED",
+                    "character_id": "DEFECT",
+                    "ascension": 0,
+                },
+            },
+            {
+                "event_id": 2,
+                "type": "action_executed",
+                "data": {
+                    "request": {
+                        "action": "choose_map_node",
+                        "option_index": 0,
+                        "client_context": {
+                            "source": "human_ui",
+                            "layer": "strategic",
+                        },
+                    },
+                    "before_state": map_state,
+                    "status": "accepted",
+                },
+            },
+            {
+                "event_id": 3,
+                "type": "action_executed",
+                "data": {
+                    "request": {
+                        "action": "end_turn",
+                        "client_context": {
+                            "source": "combat_solver",
+                            "layer": "battle",
+                        },
+                    },
+                    "before_state": combat_state,
+                    "status": "accepted",
+                },
+            },
+            {
+                "event_id": 4,
+                "type": "run_ended",
+                "data": {"run_id": "MIXED-SEED", "reason": "game_over"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "play_sts2.recording.recorder._utc_now",
+        lambda: "2026-08-29T08:00:00.000Z",
+    )
+    recording_context = {
+        "game_version": "v0.111.0",
+        "mods": {
+            "STS2AIAgent": "0.8.0-rlsts2.46",
+            "STS2-RitsuLib": "0.5.18",
+            "CombatSolver": "0.17.0",
+        },
+        "solver_preset": "medium",
+    }
+
+    result = HumanRunRecorder(
+        client,
+        tmp_path,
+        source="human_combat_solver",
+        recording_context=recording_context,
+        check_interval=0,
+    ).record()
+
+    assert result is not None
+    assert result.run_dir == (
+        tmp_path / "human_combat_solver/20260829-a0-f1-MIXED-SEED"
+    )
+    metadata = json.loads((result.run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert metadata["source"] == "human_combat_solver"
+    assert metadata["action_source_counts"] == {
+        "combat_solver": 1,
+        "human_ui": 1,
+    }
+    assert metadata["recording_context"] == {
+        **recording_context,
+        "student_observation_policy": "visible_only",
+        "teacher_uses_hidden_rng": True,
+    }
+    strategy_row = json.loads(
+        (result.run_dir / "strategy/decisions.jsonl").read_text(encoding="utf-8")
+    )
+    battle_path = next((result.run_dir / "combat").glob("*.jsonl"))
+    battle_row = json.loads(battle_path.read_text(encoding="utf-8"))
+    assert strategy_row["action_source"] == "human_ui"
+    assert battle_row["action_source"] == "combat_solver"
+    assert result.event_count == 2
+
+
 def test_recorder_stops_when_player_returns_to_menu(tmp_path: Path) -> None:
     """中途连接仍保留录制，但明确关闭半局数据的训练准入。
 
@@ -215,10 +371,10 @@ def test_recorder_stops_when_player_returns_to_menu(tmp_path: Path) -> None:
     ]
 
 
-def test_recorder_marks_native_capture_gaps_as_training_ineligible(
+def test_recorder_marks_solver_capture_gaps_as_training_ineligible(
     tmp_path: Path,
 ) -> None:
-    """原生 UI 动作缺口保留整局，但关闭其训练准入。
+    """Solver 动作缺口保留来源并关闭整局训练准入。
 
     Args:
         tmp_path (Path): Pytest 提供的原始数据目录。
@@ -246,6 +402,7 @@ def test_recorder_marks_native_capture_gaps_as_training_ineligible(
                 "data": {
                     "action": "play_card",
                     "reason": "no matching state transition",
+                    "source": "combat_solver",
                 },
             },
             {
@@ -256,7 +413,12 @@ def test_recorder_marks_native_capture_gaps_as_training_ineligible(
         ],
     )
 
-    result = HumanRunRecorder(client, tmp_path, check_interval=0).record()
+    result = HumanRunRecorder(
+        client,
+        tmp_path,
+        source="human_combat_solver",
+        check_interval=0,
+    ).record()
 
     assert result is not None
     metadata = json.loads((result.run_dir / "meta.json").read_text(encoding="utf-8"))
@@ -264,7 +426,7 @@ def test_recorder_marks_native_capture_gaps_as_training_ineligible(
     assert metadata["recording_complete"] is False
     assert metadata["integrity"]["samples_verified"] is False
     assert metadata["integrity"]["ineligibility_reasons"] == [
-        "native_ui_capture_gap: play_card: no matching state transition"
+        "action_capture_gap: combat_solver: play_card: no matching state transition"
     ]
 
 

@@ -53,6 +53,7 @@ class HumanRunWriter:
         self._battle_sample_count = 0
         self._strategic_sample_count = 0
         self._battle_count = 0
+        self._action_source_counts: dict[str, int] = {}
         self._current_battle_key: str | None = None
         self._event_ids: set[int | str] = set()
         self._integrity_failures: list[str] = []
@@ -100,12 +101,16 @@ class HumanRunWriter:
         Returns:
             Path: 本条决策所属的战斗或战略 JSONL。
         """
-        row, layer, floor = self._normalize_decision(decision)
+        row, layer, floor, action_source = self._normalize_decision(decision)
         event_id = row["event_id"]
         if event_id in self._event_ids:
             raise ValueError(f"重复的人类动作事件: {event_id}")
         self._event_ids.add(event_id)
         self._max_floor_reached = max(self._max_floor_reached, floor)
+        if action_source is not None:
+            self._action_source_counts[action_source] = (
+                self._action_source_counts.get(action_source, 0) + 1
+            )
 
         if layer == "battle":
             destination = self._battle_path(floor)
@@ -170,7 +175,7 @@ class HumanRunWriter:
     def _normalize_decision(
         self,
         decision: Mapping[str, Any],
-    ) -> tuple[dict[str, Any], str, int]:
+    ) -> tuple[dict[str, Any], str, int, str | None]:
         """验证动作并剥离能由路径、meta 或 Harness 重建的字段。
 
         Args:
@@ -189,6 +194,7 @@ class HumanRunWriter:
         action = decision.get("action")
         parameters = decision.get("parameters")
         provenance = decision.get("provenance")
+        action_source = decision.get("action_source")
         if (
             run_id != self._metadata.run_id
             or not _is_event_id(event_id)
@@ -197,8 +203,17 @@ class HumanRunWriter:
             or not isinstance(action, str)
             or not isinstance(parameters, Mapping)
             or (provenance is not None and not isinstance(provenance, Mapping))
+            or (
+                action_source is not None
+                and action_source not in {"human_ui", "combat_solver"}
+            )
         ):
             raise ValueError("精确人类决策字段无效")
+        if self._metadata.source == "human_combat_solver" and action_source not in {
+            "human_ui",
+            "combat_solver",
+        }:
+            raise ValueError("人机协作决策缺少明确的 action_source")
 
         observation = build_observation(state)
         recorded_layer = decision.get("recorded_layer")
@@ -234,7 +249,14 @@ class HumanRunWriter:
         }
         if provenance is not None:
             row["provenance"] = dict(provenance)
-        return row, observation.layer.value, floor
+        if isinstance(action_source, str):
+            row["action_source"] = action_source
+        return (
+            row,
+            observation.layer.value,
+            floor,
+            (action_source if isinstance(action_source, str) else None),
+        )
 
     def _battle_path(self, floor: int) -> Path:
         """返回当前战斗稳定的 JSONL 路径。
@@ -284,8 +306,11 @@ class HumanRunWriter:
         """
         samples_verified = not self._integrity_failures
         recording_complete = termination_reason == "game_over" and samples_verified
+        metadata = self._metadata.to_dict()
+        if metadata.get("recording_context") is None:
+            metadata.pop("recording_context", None)
         payload = {
-            **self._metadata.to_dict(),
+            **metadata,
             "schema_version": _RAW_SCHEMA_VERSION,
             "played_on": self._local_start.date().isoformat(),
             "ascension": self._ascension,
@@ -293,6 +318,7 @@ class HumanRunWriter:
             "battle_count": self._battle_count,
             "battle_sample_count": self._battle_sample_count,
             "strategic_sample_count": self._strategic_sample_count,
+            "action_source_counts": dict(sorted(self._action_source_counts.items())),
             "termination_reason": termination_reason,
             "completed_at": completed_at,
             "training_eligible": samples_verified,

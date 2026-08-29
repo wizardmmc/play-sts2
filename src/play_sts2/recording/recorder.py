@@ -8,12 +8,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import RecordedRun, RunMetadata
+from .models import RecordedRun, RunMetadata, RunSource
 from .writer import HumanRunWriter
 
 _STREAM_START_TIMEOUT_SECONDS = 5.0
 _SUCCESS_STATUSES = {"accepted", "completed", "pending"}
 _PARTIAL_RUN_REASON = "partial_run: recording_started_after_run_start"
+_ACTION_SOURCES_BY_RUN_SOURCE: dict[RunSource, frozenset[str]] = {
+    "human": frozenset({"human_ui"}),
+    "agent": frozenset(),
+    "human_combat_solver": frozenset({"human_ui", "combat_solver"}),
+}
 
 
 class RecordingError(RuntimeError):
@@ -45,6 +50,10 @@ class HumanRunRecorder:
     Args:
         client (_RecordingClient): 只提供事件流的 Mod 客户端。
         output_root (Path): 原始轨迹根目录，通常为 ``data/raw``。
+        source (RunSource): 整局数据来源；人机协作录制使用
+            ``human_combat_solver``。
+        recording_context (Mapping[str, Any] | None): 游戏、Mod 与教师设置等
+            可审计环境信息。
         stop_event (threading.Event | None): 外部中止录制的线程事件。
         check_interval (float): 检查停止信号与事件线程异常的间隔秒数。
     """
@@ -54,6 +63,8 @@ class HumanRunRecorder:
         client: _RecordingClient,
         output_root: Path,
         *,
+        source: RunSource = "human",
+        recording_context: Mapping[str, Any] | None = None,
         stop_event: threading.Event | None = None,
         check_interval: float = 0.1,
     ) -> None:
@@ -62,11 +73,24 @@ class HumanRunRecorder:
         Args:
             client (_RecordingClient): 只读 Mod 客户端。
             output_root (Path): 原始轨迹根目录。
+            source (RunSource): 整局数据来源。
+            recording_context (Mapping[str, Any] | None): 可审计环境信息。
             stop_event (threading.Event | None): 可选的外部停止信号。
             check_interval (float): 停止信号与线程异常检查间隔秒数。
         """
         self._client = client
         self._output_root = Path(output_root)
+        if source not in _ACTION_SOURCES_BY_RUN_SOURCE:
+            raise ValueError(f"不支持的录制来源: {source}")
+        self._source = source
+        self._recording_context = dict(recording_context or {})
+        if source == "human_combat_solver":
+            self._recording_context.update(
+                {
+                    "student_observation_policy": "visible_only",
+                    "teacher_uses_hidden_rng": True,
+                }
+            )
         self._stop_event = stop_event or threading.Event()
         self._check_interval = check_interval
 
@@ -251,8 +275,10 @@ class HumanRunRecorder:
             return
         raise error
 
-    @staticmethod
-    def _metadata_from_event(envelope: Mapping[str, Any]) -> RunMetadata | None:
+    def _metadata_from_event(
+        self,
+        envelope: Mapping[str, Any],
+    ) -> RunMetadata | None:
         """从 ``run_started`` 或运行态 ``stream_ready`` 构造局身份。
 
         Args:
@@ -281,7 +307,7 @@ class HumanRunRecorder:
         ascension = data.get("ascension")
         return RunMetadata(
             run_id=str(run_id),
-            source="human",
+            source=self._source,
             started_at=_utc_now(),
             character_id=character_id if isinstance(character_id, str) else None,
             seed=str(run_id),
@@ -289,6 +315,9 @@ class HumanRunRecorder:
                 ascension
                 if isinstance(ascension, int) and not isinstance(ascension, bool)
                 else None
+            ),
+            recording_context=(
+                dict(self._recording_context) if self._recording_context else None
             ),
         )
 
@@ -337,10 +366,13 @@ class HumanRunRecorder:
         reason_text = (
             reason.strip() if isinstance(reason, str) and reason.strip() else "?"
         )
+        source = data.get("source")
+        if source in {"human_ui", "combat_solver"}:
+            return f"action_capture_gap: {source}: {action_text}: {reason_text}"
         return f"native_ui_capture_gap: {action_text}: {reason_text}"
 
-    @staticmethod
     def _decision_from_event(
+        self,
         run_id: str,
         observed_at: str,
         envelope: Mapping[str, Any],
@@ -365,7 +397,10 @@ class HumanRunRecorder:
         if not isinstance(request, Mapping):
             return None
         context = request.get("client_context")
-        if not isinstance(context, Mapping) or context.get("source") != "human_ui":
+        if not isinstance(context, Mapping):
+            return None
+        action_source = context.get("source")
+        if action_source not in _ACTION_SOURCES_BY_RUN_SOURCE[self._source]:
             return None
         event_id = envelope.get("event_id")
         state = data.get("before_state")
@@ -385,6 +420,7 @@ class HumanRunRecorder:
             "event_id": event_id,
             "observed_at": observed_at,
             "recorded_layer": layer if isinstance(layer, str) else None,
+            "action_source": action_source,
             "before_state": dict(state),
             "action": action,
             "parameters": {

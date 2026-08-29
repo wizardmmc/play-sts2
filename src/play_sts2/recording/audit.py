@@ -60,6 +60,15 @@ def audit_human_run(run_dir: Path) -> HumanRunAudit:
             raise RawRunIntegrityError(
                 f"{root} 的 {field} 不一致: meta={declared}, actual={actual}"
             )
+    if metadata.get("source") == "human_combat_solver":
+        sample_paths = (*battle_paths, *((strategy_path,) if strategy_path else ()))
+        actual_sources = _count_action_sources(sample_paths)
+        declared_sources = metadata.get("action_source_counts")
+        if declared_sources != actual_sources:
+            raise RawRunIntegrityError(
+                f"{root} 的 action_source_counts 不一致: "
+                f"meta={declared_sources}, actual={actual_sources}"
+            )
     return HumanRunAudit(metadata, battle_paths, strategy_path)
 
 
@@ -143,3 +152,37 @@ def _count_rows(path: Path) -> int:
     return sum(
         bool(line.strip()) for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def _count_action_sources(paths: tuple[Path, ...]) -> dict[str, int]:
+    """统计人机协作分片中每种动作执行者的物理行数。
+
+    Args:
+        paths (tuple[Path, ...]): 当前局全部战斗和战略 JSONL。
+
+    Raises:
+        RawRunIntegrityError: JSONL 行无效或缺少明确的动作来源。
+        OSError: 分片无法读取。
+
+    Returns:
+        dict[str, int]: 按来源名称排序的动作数量。
+    """
+    counts: dict[str, int] = {}
+    for path in paths:
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RawRunIntegrityError(f"无效 JSONL: {path}:{line_number}") from exc
+            source = row.get("action_source") if isinstance(row, Mapping) else None
+            if source not in {"human_ui", "combat_solver"}:
+                raise RawRunIntegrityError(
+                    f"人机协作动作缺少来源: {path}:{line_number}"
+                )
+            counts[source] = counts.get(source, 0) + 1
+    return dict(sorted(counts.items()))
