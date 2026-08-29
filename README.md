@@ -73,7 +73,10 @@ uv run play-sts2-record \
 uv run play-sts2-transcribe data/raw/human/<规范局目录名>
 ```
 
-输出位于 `data/transcripts/<同名局目录>/`，不含内部 sample/event ID。
+输出根据 `meta.json.source` 自动归入
+`data/transcripts/{agent,human,human_combat_solver}/<同名局目录>/`，不含内部
+sample/event ID。`--output-root` 指定的是三类来源目录共同的根，而不是某一类来源
+的精确目录。
 旧数据迁移已完成并删除一次性代码；raw 不再保存 `events.jsonl`。
 
 ## 游戏知识与 SFT 数据集

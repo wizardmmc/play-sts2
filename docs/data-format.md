@@ -70,16 +70,20 @@ SFT，但 `recording_complete=false`；Mod 若报告 `native_ui_capture_gap`，�
 非隐藏、已有非空 `termination_reason` 的正式局，并跳过
 `training_eligible=false` 的整局；当前 `A7L5LAXFYJ` 保留用于审计但不训练。
 
-## 人类可读 transcript
+## 可读 transcript
 
-Transcript 位于与 raw 同名的独立目录：
+Transcript 镜像 raw 的来源层级，再使用与 raw 局同名的独立目录：
 
 ```text
-data/transcripts/20260827-a0-f17-VX7C7FLRRS/
-├── combat/
-│   └── battle-f002-01.txt
-└── strategy/
-    └── decisions.txt
+data/transcripts/
+├── agent/
+├── human/
+│   └── 20260827-a0-f17-VX7C7FLRRS/
+│       ├── combat/
+│       │   └── battle-f002-01.txt
+│       └── strategy/
+│           └── decisions.txt
+└── human_combat_solver/
 ```
 
 每个 TXT 只在开头展示一次 system 规则，再按“决策 N / 状态 / 动作”展开。它不
@@ -90,7 +94,9 @@ data/transcripts/20260827-a0-f17-VX7C7FLRRS/
 uv run play-sts2-transcribe data/raw/human/<规范局目录名>
 ```
 
-输出目录不得与 raw 源目录重叠；渲染器会在写文件前拒绝危险路径。
+渲染器只接受 `agent`、`human` 和 `human_combat_solver` 三种
+`meta.json.source`，并自动选择对应来源目录。输出根不得与 raw 源目录重叠；
+渲染器会在写文件前拒绝危险路径。
 
 ## 历史人类数据
 

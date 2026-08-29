@@ -1,4 +1,4 @@
-"""提供从命令行重新生成一局人类 transcript 的入口。"""
+"""提供从命令行重新生成一局 transcript 的入口。"""
 
 import argparse
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ _DEFAULT_OUTPUT_ROOT = Path("data/transcripts")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """把命令行指定的一局 raw 转换为人类可读 transcript。
+    """把命令行指定的一局 raw 转换为可读 transcript。
 
     Args:
         argv (Sequence[str] | None): 不含程序名的命令行参数；为 ``None`` 时
@@ -34,17 +34,17 @@ def _parser() -> argparse.ArgumentParser:
         argparse.ArgumentParser: 包含输入局目录和输出目录的解析器。
     """
     parser = argparse.ArgumentParser(
-        description="从当前人类 raw 重新生成可读 transcript。",
+        description="从当前 raw 重新生成按录制来源分组的可读 transcript。",
     )
     parser.add_argument(
         "run_dir",
         type=Path,
-        help="包含 meta.json、combat 和 strategy 的人类 raw 局目录",
+        help="包含 meta.json、combat 和 strategy 的 raw 局目录",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
         default=_DEFAULT_OUTPUT_ROOT,
-        help=f"精确决策输出目录，默认为 {_DEFAULT_OUTPUT_ROOT}",
+        help=f"Transcript 输出根目录，默认为 {_DEFAULT_OUTPUT_ROOT}",
     )
     return parser

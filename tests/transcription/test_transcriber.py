@@ -43,7 +43,9 @@ def test_render_run_writes_readable_files_without_internal_ids(tmp_path: Path) -
     transcription = importlib.import_module("play_sts2.transcription")
     result = transcription.render_run(run_dir, tmp_path / "transcripts")
 
-    assert result.output_dir == (tmp_path / "transcripts/20260827-a1-f2-TEST-SEED")
+    assert result.output_dir == (
+        tmp_path / "transcripts/human/20260827-a1-f2-TEST-SEED"
+    )
     assert result.battle_decision_count == 2
     assert result.strategic_decision_count == 1
     battle_text = (result.output_dir / "combat/battle-f002-01.txt").read_text(
@@ -148,12 +150,77 @@ def test_render_run_replaces_stale_transcript_tree(tmp_path: Path) -> None:
     output_root = tmp_path / "transcripts"
     transcription = importlib.import_module("play_sts2.transcription")
     transcription.render_run(run_dir, output_root)
-    stale = output_root / run_dir.name / "combat/stale.txt"
+    stale = output_root / "human" / run_dir.name / "combat/stale.txt"
     stale.write_text("旧文件", encoding="utf-8")
 
     transcription.render_run(run_dir, output_root)
 
     assert not stale.exists()
+
+
+@pytest.mark.parametrize("source", ["agent", "human", "human_combat_solver"])
+def test_render_run_groups_output_by_recording_source(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """同名局按元数据来源隔离，避免不同策略的 transcript 相互覆盖。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+        source (str): 当前参数对应的录制来源。
+
+    Raises:
+        AssertionError: 输出没有落入来源目录或覆盖了其他来源。
+
+    Returns:
+        None: 此测试只检查 transcript 的来源分层。
+    """
+    run_dir = tmp_path / f"raw/{source}/20260829-a0-f48-SAME-SEED"
+    (run_dir / "combat").mkdir(parents=True)
+    _write_meta(
+        run_dir,
+        battle_count=0,
+        battle_samples=0,
+        strategic_samples=0,
+        source=source,
+    )
+
+    transcription = importlib.import_module("play_sts2.transcription")
+    result = transcription.render_run(run_dir, tmp_path / "transcripts")
+
+    assert result.output_dir == (
+        tmp_path / "transcripts" / source / "20260829-a0-f48-SAME-SEED"
+    )
+    assert result.output_dir.is_dir()
+
+
+def test_render_run_rejects_unknown_recording_source(tmp_path: Path) -> None:
+    """未知来源不能静默创建新的 transcript 顶层分类。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 未知来源没有被显式拒绝。
+
+    Returns:
+        None: 此测试只检查来源目录白名单。
+    """
+    run_dir = tmp_path / "raw/unknown/20260829-a0-f48-UNKNOWN"
+    (run_dir / "combat").mkdir(parents=True)
+    _write_meta(
+        run_dir,
+        battle_count=0,
+        battle_samples=0,
+        strategic_samples=0,
+        source="unknown",
+    )
+
+    transcription = importlib.import_module("play_sts2.transcription")
+    with pytest.raises(transcription.TranscriptError, match="Raw 录制来源无效"):
+        transcription.render_run(run_dir, tmp_path / "transcripts")
+
+    assert not (tmp_path / "transcripts/unknown").exists()
 
 
 def test_render_run_restores_previous_tree_when_publish_fails(
@@ -183,7 +250,8 @@ def test_render_run_restores_previous_tree_when_publish_fails(
     output_root = tmp_path / "transcripts"
     transcription = importlib.import_module("play_sts2.transcription")
     result = transcription.render_run(run_dir, output_root)
-    previous = output_root / f".{run_dir.name}-previous"
+    source_root = output_root / "human"
+    previous = source_root / f".{run_dir.name}-previous"
     result.output_dir.rename(previous)
     original_rename = Path.rename
 
@@ -201,7 +269,7 @@ def test_render_run_restores_previous_tree_when_publish_fails(
             Path: 其他重命名委托给 pathlib。
         """
         if (
-            path.parent == output_root
+            path.parent == source_root
             and path.name.startswith(f".{run_dir.name}-")
             and path != previous
             and Path(target) == result.output_dir
@@ -385,6 +453,7 @@ def _write_meta(
     battle_count: int,
     battle_samples: int,
     strategic_samples: int,
+    source: str = "human",
 ) -> None:
     """写入与测试分片严格对账的当前 raw 元数据。
 
@@ -393,6 +462,7 @@ def _write_meta(
         battle_count (int): 战斗文件数。
         battle_samples (int): 战斗动作行数。
         strategic_samples (int): 战略动作行数。
+        source (str): 录制来源目录名。
 
     Returns:
         None: 元数据写入完成后返回。
@@ -403,6 +473,7 @@ def _write_meta(
                 "schema_version": 2,
                 "run_id": "TEST-SEED",
                 "seed": "TEST-SEED",
+                "source": source,
                 "termination_reason": "game_over",
                 "training_eligible": True,
                 "recording_complete": True,
@@ -413,6 +484,7 @@ def _write_meta(
                 "battle_count": battle_count,
                 "battle_sample_count": battle_samples,
                 "strategic_sample_count": strategic_samples,
+                "action_source_counts": {} if source == "human_combat_solver" else None,
             }
         ),
         encoding="utf-8",

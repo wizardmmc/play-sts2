@@ -33,6 +33,7 @@ _SCREEN_NAMES = {
     "TIMELINE": "时间线",
     "UNKNOWN": "房间结算",
 }
+_TRANSCRIPT_SOURCES = frozenset({"agent", "human", "human_combat_solver"})
 
 
 class TranscriptError(RuntimeError):
@@ -55,7 +56,21 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
     """
     source = Path(run_dir).resolve()
     destination_root = Path(output_root).resolve()
-    destination = destination_root / source.name
+    if (
+        source == destination_root
+        or source in destination_root.parents
+        or destination_root == source.parent
+    ):
+        raise TranscriptError(
+            f"Transcript 输出不能与 raw 重叠: {source} -> {destination_root}"
+        )
+    try:
+        audit = audit_human_run(source)
+    except RawRunIntegrityError as exc:
+        raise TranscriptError(str(exc)) from exc
+    recording_source = _transcript_source(audit.metadata)
+    source_output_root = destination_root / recording_source
+    destination = source_output_root / source.name
     if (
         source == destination
         or source in destination.parents
@@ -64,15 +79,11 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
         raise TranscriptError(
             f"Transcript 输出不能与 raw 重叠: {source} -> {destination}"
         )
-    try:
-        audit = audit_human_run(source)
-    except RawRunIntegrityError as exc:
-        raise TranscriptError(str(exc)) from exc
-    destination_root.mkdir(parents=True, exist_ok=True)
-    previous = destination_root / f".{source.name}-previous"
+    source_output_root.mkdir(parents=True, exist_ok=True)
+    previous = source_output_root / f".{source.name}-previous"
     if previous.exists() and not destination.exists():
         previous.rename(destination)
-    staging = Path(tempfile.mkdtemp(prefix=f".{source.name}-", dir=destination_root))
+    staging = Path(tempfile.mkdtemp(prefix=f".{source.name}-", dir=source_output_root))
     battle_count = 0
     strategic_count = 0
     try:
@@ -113,6 +124,25 @@ def render_run(run_dir: Path, output_root: Path) -> TranscriptResult:
             previous.rename(destination)
         raise
     return TranscriptResult(destination, battle_count, strategic_count)
+
+
+def _transcript_source(metadata: Mapping[str, Any]) -> str:
+    """读取并校验 transcript 的录制来源目录。
+
+    Args:
+        metadata (Mapping[str, Any]): 已通过 raw 完整性审计的元数据。
+
+    Raises:
+        TranscriptError: 来源缺失或不属于当前支持的三类录制方式。
+
+    Returns:
+        str: ``agent``、``human`` 或 ``human_combat_solver``。
+    """
+    source = metadata.get("source")
+    if not isinstance(source, str) or source not in _TRANSCRIPT_SOURCES:
+        supported = ", ".join(sorted(_TRANSCRIPT_SOURCES))
+        raise TranscriptError(f"Raw 录制来源无效: {source!r}；支持 {supported}")
+    return source
 
 
 def _render_file(rows: list[dict[str, Any]], *, title: str) -> str:

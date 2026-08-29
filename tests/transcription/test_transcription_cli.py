@@ -34,6 +34,7 @@ def test_main_renders_run_to_default_transcript_directory(
             {
                 "schema_version": 2,
                 "run_id": "CLI-SEED",
+                "source": "human",
                 "termination_reason": "game_over",
                 "training_eligible": True,
                 "recording_complete": True,
@@ -83,7 +84,7 @@ def test_main_renders_run_to_default_transcript_directory(
 
     exit_code = cli.main([str(run_dir)])
 
-    output_dir = tmp_path / "data/transcripts/20260827-a0-f1-CLI-SEED"
+    output_dir = tmp_path / "data/transcripts/human/20260827-a0-f1-CLI-SEED"
     output_path = output_dir / "strategy/decisions.txt"
     assert exit_code == 0
     assert "ACTION: choose_map_node 2" in output_path.read_text(encoding="utf-8")

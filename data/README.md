@@ -3,9 +3,11 @@
 这里把“事实源”和“可重建产物”分开，避免在多个目录手工维护同一份信息。
 
 ```text
-game_knowledge/ ───────────────┐
-                               ├─→ datasets/sft/
-raw/human/ ──→ transcripts/ ──┘
+game_knowledge/ ──────────────────────────────┐
+                                             ├─→ datasets/sft/
+raw/{agent,human,human_combat_solver}/ ──────┘
+                  │
+                  └─→ transcripts/{agent,human,human_combat_solver}/
 ```
 
 ## 受控来源与重建入口
@@ -37,7 +39,8 @@ raw/human/ ──→ transcripts/ ──┘
   运算语义与操作数跨分卷复用。四张地图的普通、精英和 Boss 怪池写在
   `encounters/`；进场时已知的具体敌人组合不生成问答。这里不是 E3 正式分卷，
   禁止直接手改。
-- `transcripts/`：raw 的人类可读投影，不参与训练事实判定。
+- `transcripts/`：raw 的可读投影，按 `agent`、`human` 和
+  `human_combat_solver` 来源分组，不参与训练事实判定。
 - `datasets/sft/`：知识与人类动作经当前 Harness 渲染后的训练、验证和最终评测
   目录树。三棵树都按知识类别与实体拆分，并包含 `arithmetic/`、`combat/` 和
   `strategy/`。
@@ -93,7 +96,10 @@ uv run play-sts2-transcribe \
   data/raw/human/20260827-a0-f17-VX7C7FLRRS
 ```
 
-输出根必须与 raw 分离；渲染器会拒绝可能覆盖 raw 的重叠路径。
+输出为
+`data/transcripts/human/20260827-a0-f17-VX7C7FLRRS/`。来源目录由 raw
+`meta.json.source` 自动选择；输出根必须与 raw 分离，渲染器会拒绝可能覆盖 raw
+的重叠路径。
 
 重建完整 SFT 数据集：
 

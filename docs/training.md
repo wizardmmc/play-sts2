@@ -4,7 +4,8 @@
 
 - `data/game_knowledge/`：Web Wiki、Mod 实测导出与已核验问法。
 - `data/raw/human/`：按局、战斗和战略分片的精确人类动作事实。
-- `data/transcripts/`：raw 的可覆盖人类可读投影。
+- `data/transcripts/{agent,human,human_combat_solver}/`：按录制来源隔离的可覆盖
+  可读投影。
 - `data/datasets/sft/`：同构的 `train/`、`validation/`、`eval/` 目录树与
   `manifest.json`；知识按实体、行为按战斗或整局战略拆分。
 - `runs/sft/`：配置副本、逐步指标和固定名称的 `checkpoint-last`。

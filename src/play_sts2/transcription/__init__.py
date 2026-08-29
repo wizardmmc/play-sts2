@@ -1,4 +1,4 @@
-"""提供当前人类 raw 到可读 transcript 的派生接口。"""
+"""提供当前 raw 到按录制来源分组的可读 transcript 派生接口。"""
 
 from .models import TranscriptResult
 from .transcriber import TranscriptError, render_run
