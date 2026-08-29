@@ -103,7 +103,7 @@ def test_arithmetic_samples_are_unique_and_require_the_answer_style() -> None:
 
 
 def test_orb_focus_has_room_for_training_validation_and_final_probes() -> None:
-    """充能球题面空间应同时容纳训练、验证和最终考试配额。
+    """充能球数值空间应同时容纳训练、验证和最终评测配额。
 
     Raises:
         AssertionError: 三套题面发生重复或默认配额无法生成。
@@ -122,6 +122,7 @@ def test_orb_focus_has_room_for_training_validation_and_final_probes() -> None:
         direct_count=0,
         seed=20260924,
         exclude_prompts={str(row["prompt"]) for row in training},
+        exclude_case_ids={str(row["case_id"]) for row in training},
     )
     validation, _ = build_arithmetic_samples(
         attack_values=[],
@@ -129,23 +130,26 @@ def test_orb_focus_has_room_for_training_validation_and_final_probes() -> None:
         direct_count=0,
         seed=20261024,
         exclude_prompts={str(row["prompt"]) for row in training + probes},
+        exclude_case_ids={str(row["case_id"]) for row in training + probes},
     )
 
     prompts = [str(row["prompt"]) for row in training + probes + validation]
+    case_ids = [str(row["case_id"]) for row in training + probes + validation]
     assert len(prompts) == 122
     assert len(prompts) == len(set(prompts))
+    assert len(case_ids) == len(set(case_ids))
 
 
-def test_generate_arithmetic_candidates_separates_validation_and_probes(
+def test_generate_arithmetic_candidates_builds_three_independent_splits(
     tmp_path: Path,
 ) -> None:
-    """训练、验证和最终 probe 应使用互不重复的算术问题。
+    """训练、验证和最终 eval 应使用互不重复的算术问题。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离目录。
 
     Raises:
-        AssertionError: 战斗帧未被读取、分卷提示错误或 probe 题面泄漏。
+        AssertionError: 战斗帧未被读取、三套数字或分卷用途发生重复。
 
     Returns:
         None: 此测试只验证算术候选的发布边界。
@@ -154,19 +158,6 @@ def test_generate_arithmetic_candidates_separates_validation_and_probes(
     battle_path = _write_human_run(human_root, "RUN", 11)
     (human_root / "splits.json").write_text(
         json.dumps({"train": ["RUN"], "dev": [], "test": []}),
-        encoding="utf-8",
-    )
-    probes = tmp_path / "eval/knowledge"
-    probes.mkdir(parents=True)
-    baseline, _ = build_arithmetic_samples(
-        attack_values=[11],
-        quotas={"block_math": 8, "orb_focus": 4},
-        direct_count=4,
-    )
-    forbidden = str(baseline[0]["prompt"]).removeprefix("Q: ").removesuffix("\nA:")
-    (probes / "probes_compositional.jsonl").write_text(
-        json.dumps({"kind": "block_math", "prompt": forbidden}, ensure_ascii=False)
-        + "\n",
         encoding="utf-8",
     )
     output = tmp_path / "generated-v0.107.1"
@@ -178,7 +169,8 @@ def test_generate_arithmetic_candidates_separates_validation_and_probes(
         training_direct_count=4,
         validation_quotas={"block_math": 3, "orb_focus": 2},
         validation_direct_count=2,
-        probe_root=probes,
+        evaluation_quotas={"block_math": 2, "orb_focus": 1},
+        evaluation_direct_count=1,
     )
 
     training = [
@@ -191,14 +183,32 @@ def test_generate_arithmetic_candidates_separates_validation_and_probes(
         for path in sorted((output / "arithmetic/validation").glob("*.jsonl"))
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
+    evaluation = [
+        json.loads(line)
+        for path in sorted((output / "arithmetic/eval").glob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
     train_prompts = {row["prompt"] for row in training}
     validation_prompts = {row["prompt"] for row in validation}
+    evaluation_prompts = {row["prompt"] for row in evaluation}
+    train_case_ids = {row["case_id"] for row in training}
+    validation_case_ids = {row["case_id"] for row in validation}
+    evaluation_case_ids = {row["case_id"] for row in evaluation}
     assert result.train_count == len(training) == 16
     assert result.validation_count == len(validation) == 7
-    assert all(row["split"] == "train" for row in training)
-    assert all(row["split"] == "dev" for row in validation)
+    assert result.evaluation_count == len(evaluation) == 4
+    assert all(row["question_role"] == "train" for row in training)
+    assert all(row["question_role"] == "validation" for row in validation)
+    assert all(row["question_role"] == "eval" for row in evaluation)
+    assert all(isinstance(row["answer_numbers"], list) for row in training)
+    assert all(isinstance(row["answer_numbers"], list) for row in validation)
+    assert all(isinstance(row["answer_numbers"], list) for row in evaluation)
     assert train_prompts.isdisjoint(validation_prompts)
-    assert all(forbidden not in prompt for prompt in train_prompts | validation_prompts)
+    assert train_prompts.isdisjoint(evaluation_prompts)
+    assert validation_prompts.isdisjoint(evaluation_prompts)
+    assert train_case_ids.isdisjoint(validation_case_ids)
+    assert train_case_ids.isdisjoint(evaluation_case_ids)
+    assert validation_case_ids.isdisjoint(evaluation_case_ids)
     manifest = json.loads(
         (output / "arithmetic/_manifest.json").read_text(encoding="utf-8")
     )
@@ -208,6 +218,8 @@ def test_generate_arithmetic_candidates_separates_validation_and_probes(
         "RUN/combat/battle.jsonl": hashlib.sha256(battle_path.read_bytes()).hexdigest()
     }
     assert manifest["attack_values"] == [11]
+    assert manifest["evaluation"]["worked"] == 3
+    assert manifest["evaluation"]["direct"] == 1
 
 
 def test_attack_values_only_use_audited_training_roster(tmp_path: Path) -> None:

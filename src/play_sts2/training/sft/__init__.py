@@ -4,6 +4,7 @@ from .dataset import (
     DatasetBuildError,
     SftDatasetResult,
     build_sft_dataset,
+    dataset_split_files,
     dataset_split_path,
     validate_sft_dataset,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "attach_lora",
     "build_sft_dataset",
     "chunked_masked_stats",
+    "dataset_split_files",
     "dataset_split_path",
     "decode_generation",
     "encode_messages",

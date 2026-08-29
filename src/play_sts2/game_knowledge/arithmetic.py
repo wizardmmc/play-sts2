@@ -31,7 +31,16 @@ VALIDATION_QUOTAS = {
     "energy_math": 20,
     "orb_focus": 10,
 }
+EVALUATION_QUOTAS = {
+    "block_math": 55,
+    "lethal": 40,
+    "status_math": 50,
+    "multihit": 25,
+    "energy_math": 20,
+    "orb_focus": 10,
+}
 _VALIDATION_SEED_OFFSET = 200
+_EVALUATION_SEED_OFFSET = 400
 
 ArithmeticRow = dict[str, Any]
 ArithmeticCase = tuple[str, str]
@@ -49,12 +58,14 @@ class ArithmeticBuildResult:
         output_root (Path): 包含 ``arithmetic`` 子目录的知识候选根目录。
         train_count (int): 训练用途候选数量。
         validation_count (int): 验证用途候选数量。
+        evaluation_count (int): 最终评测用途候选数量。
         buckets (dict[str, int]): 各算术类别的总候选数量。
     """
 
     output_root: Path
     train_count: int
     validation_count: int
+    evaluation_count: int
     buckets: dict[str, int]
 
 
@@ -223,8 +234,9 @@ def build_arithmetic_samples(
     direct_count: int = 800,
     seed: int = ARITHMETIC_SEED,
     exclude_prompts: Collection[str] = (),
+    exclude_case_ids: Collection[str] = (),
 ) -> tuple[list[ArithmeticRow], list[ArithmeticRow]]:
-    """生成互不重复的计算过程与直答算术候选。
+    """生成题面和数值案例都互不重复的计算过程与直答候选。
 
     Args:
         attack_values (Sequence[int]): 从真实战斗意图取得的单段攻击值。
@@ -232,6 +244,7 @@ def build_arithmetic_samples(
         direct_count (int): 另行生成的直答样本总数。
         seed (int): 确定性随机种子。
         exclude_prompts (Collection[str]): 不得复用的训练、验证或考试题面。
+        exclude_case_ids (Collection[str]): 不得复用的题型与运算案例标识。
 
     Raises:
         ValueError: 配额、攻击值或类别无效。
@@ -270,6 +283,7 @@ def build_arithmetic_samples(
         raise ValueError("格挡、致死和多段算术需要至少一个真实攻击值")
 
     seen_prompts = {_prompt_key(prompt) for prompt in exclude_prompts}
+    seen_case_ids = {str(case_id) for case_id in exclude_case_ids}
     worked_rng = random.Random(seed)
     worked: list[ArithmeticRow] = []
     for bucket, quota in resolved_quotas.items():
@@ -282,6 +296,7 @@ def build_arithmetic_samples(
                 normalized_values,
                 suffix="请写出计算过程。",
                 seen_prompts=seen_prompts,
+                seen_case_ids=seen_case_ids,
             )
         )
 
@@ -297,6 +312,7 @@ def build_arithmetic_samples(
             normalized_values,
             suffix="只给出结论。",
             seen_prompts=seen_prompts,
+            seen_case_ids=seen_case_ids,
         )
         direct.extend(
             {**row, "completion": " " + _last_sentence(str(row["completion"]))}
@@ -309,78 +325,107 @@ def generate_arithmetic_candidates(
     *,
     human_root: Path,
     output_root: Path,
-    probe_root: Path,
     training_quotas: Mapping[str, int] | None = None,
     training_direct_count: int = 800,
     validation_quotas: Mapping[str, int] | None = None,
     validation_direct_count: int = 80,
+    evaluation_quotas: Mapping[str, int] | None = None,
+    evaluation_direct_count: int = 80,
     seed: int = ARITHMETIC_SEED,
 ) -> ArithmeticBuildResult:
-    """发布训练与验证算术候选，并排除现有最终考试题面。
+    """发布题面和运算案例都互斥的训练、验证与最终评测候选。
 
-    训练和验证使用不同随机种子。最终 probe 只作为排除名单读取，不会被复制为
-    监督数据。默认数量沿用 2,000/800 训练配方，并额外生成
-    200/80 条独立验证候选。
+    三种用途使用不同随机种子。默认数量沿用 2,000/800 训练配方，并额外各生成
+    200/80 条独立验证与最终评测候选。
 
     Args:
         human_root (Path): 当前项目的人类精确战斗目录。
         output_root (Path): ``generated-v0.107.1`` 风格的候选根目录。
-        probe_root (Path): 含最终知识考试 JSONL 的目录。
         training_quotas (Mapping[str, int] | None): 训练计算过程配额。
         training_direct_count (int): 训练直答候选数量。
         validation_quotas (Mapping[str, int] | None): 验证计算过程配额。
         validation_direct_count (int): 验证直答候选数量。
+        evaluation_quotas (Mapping[str, int] | None): 最终评测计算过程配额。
+        evaluation_direct_count (int): 最终评测直答候选数量。
         seed (int): 训练候选随机种子。
 
     Raises:
-        ValueError: 战斗帧、probe 或配额无效。
+        ValueError: 战斗帧或配额无效。
         OSError: 输入无法读取或输出无法写入。
 
     Returns:
-        ArithmeticBuildResult: 输出目录、训练/验证数量和类别计数。
+        ArithmeticBuildResult: 输出目录、三种用途数量和类别计数。
     """
     attack_inputs = _load_observed_attack_inputs(human_root)
     attack_values = list(attack_inputs.values)
-    probe_prompts = _load_probe_prompts(probe_root)
     resolved_training_quotas = dict(training_quotas or TRAINING_QUOTAS)
     resolved_validation_quotas = dict(validation_quotas or VALIDATION_QUOTAS)
+    resolved_evaluation_quotas = dict(evaluation_quotas or EVALUATION_QUOTAS)
     train_worked, train_direct = build_arithmetic_samples(
         attack_values=attack_values,
         quotas=resolved_training_quotas,
         direct_count=training_direct_count,
         seed=seed,
-        exclude_prompts=probe_prompts,
     )
     training = train_worked + train_direct
-    validation_exclusions = probe_prompts | {str(row["prompt"]) for row in training}
+    validation_exclusions = {str(row["prompt"]) for row in training}
+    validation_case_exclusions = {str(row["case_id"]) for row in training}
     validation_worked, validation_direct = build_arithmetic_samples(
         attack_values=attack_values,
         quotas=resolved_validation_quotas,
         direct_count=validation_direct_count,
         seed=seed + _VALIDATION_SEED_OFFSET,
         exclude_prompts=validation_exclusions,
+        exclude_case_ids=validation_case_exclusions,
     )
     validation = validation_worked + validation_direct
+    evaluation_exclusions = validation_exclusions | {
+        str(row["prompt"]) for row in validation
+    }
+    evaluation_case_exclusions = validation_case_exclusions | {
+        str(row["case_id"]) for row in validation
+    }
+    evaluation_worked, evaluation_direct = build_arithmetic_samples(
+        attack_values=attack_values,
+        quotas=resolved_evaluation_quotas,
+        direct_count=evaluation_direct_count,
+        seed=seed + _EVALUATION_SEED_OFFSET,
+        exclude_prompts=evaluation_exclusions,
+        exclude_case_ids=evaluation_case_exclusions,
+    )
+    evaluation = evaluation_worked + evaluation_direct
 
     destination = Path(output_root)
     arithmetic_root = destination / "arithmetic"
-    _write_rows(arithmetic_root / "train/cot.jsonl", train_worked, split="train")
+    _write_rows(arithmetic_root / "train/cot.jsonl", train_worked, role="train")
     _write_rows(
         arithmetic_root / "train/direct.jsonl",
         train_direct,
-        split="train",
+        role="train",
     )
     _write_rows(
         arithmetic_root / "validation/cot.jsonl",
         validation_worked,
-        split="dev",
+        role="validation",
     )
     _write_rows(
         arithmetic_root / "validation/direct.jsonl",
         validation_direct,
-        split="dev",
+        role="validation",
     )
-    buckets = Counter(str(row["object_id"]) for row in training + validation)
+    _write_rows(
+        arithmetic_root / "eval/cot.jsonl",
+        evaluation_worked,
+        role="eval",
+    )
+    _write_rows(
+        arithmetic_root / "eval/direct.jsonl",
+        evaluation_direct,
+        role="eval",
+    )
+    buckets = Counter(
+        str(row["object_id"]) for row in training + validation + evaluation
+    )
     manifest = {
         "format": "prompt_completion_candidates",
         "source": "data/raw/human/*/combat/*.jsonl",
@@ -390,9 +435,9 @@ def generate_arithmetic_candidates(
             name: _sha256(path)
             for name, path in sorted(attack_inputs.combat_files.items())
         },
-        "probe_root": str(probe_root),
         "seed": seed,
         "validation_seed": seed + _VALIDATION_SEED_OFFSET,
+        "evaluation_seed": seed + _EVALUATION_SEED_OFFSET,
         "attack_values": attack_values,
         "training": {
             "worked": len(train_worked),
@@ -403,6 +448,11 @@ def generate_arithmetic_candidates(
             "worked": len(validation_worked),
             "direct": len(validation_direct),
             "quotas": resolved_validation_quotas,
+        },
+        "evaluation": {
+            "worked": len(evaluation_worked),
+            "direct": len(evaluation_direct),
+            "quotas": resolved_evaluation_quotas,
         },
         "buckets": dict(sorted(buckets.items())),
     }
@@ -415,6 +465,7 @@ def generate_arithmetic_candidates(
         output_root=destination,
         train_count=len(training),
         validation_count=len(validation),
+        evaluation_count=len(evaluation),
         buckets=dict(sorted(buckets.items())),
     )
 
@@ -444,8 +495,9 @@ def _fill_samples(
     *,
     suffix: str,
     seen_prompts: set[str],
+    seen_case_ids: set[str],
 ) -> list[ArithmeticRow]:
-    """持续生成某类别，直到达到唯一问题配额。
+    """持续生成某类别，直到达到唯一题面和运算案例配额。
 
     Args:
         bucket (str): 算术类别。
@@ -455,6 +507,7 @@ def _fill_samples(
         attack_values (Sequence[int]): 真实单段攻击值。
         suffix (str): 回答风格要求。
         seen_prompts (set[str]): 全局已占用或禁止的问题键。
+        seen_case_ids (set[str]): 全局已占用或禁止的运算案例标识。
 
     Raises:
         RuntimeError: 在尝试上限内无法产生足够唯一问题。
@@ -474,31 +527,62 @@ def _fill_samples(
         prompt, completion = generated
         prompt = prompt.rstrip("。？") + f"。{suffix}"
         full_prompt = _prompt_key(prompt)
-        if full_prompt in seen_prompts:
+        case_id = _case_id(bucket, completion)
+        if full_prompt in seen_prompts or case_id in seen_case_ids:
             continue
         seen_prompts.add(full_prompt)
-        output.append(_make_row(bucket, prompt, completion))
+        seen_case_ids.add(case_id)
+        output.append(_make_row(bucket, prompt, completion, case_id=case_id))
     return output
 
 
-def _make_row(bucket: str, prompt: str, completion: str) -> ArithmeticRow:
+def _make_row(
+    bucket: str,
+    prompt: str,
+    completion: str,
+    *,
+    case_id: str,
+) -> ArithmeticRow:
     """把一道算术题包装成知识候选行。
 
     Args:
         bucket (str): 算术类别。
         prompt (str): 不含问答包装的问题。
         completion (str): 标准答案。
+        case_id (str): 与自然语言问法无关的运算案例标识。
 
     Returns:
         ArithmeticRow: 与其他知识 JSONL 相同的字段结构。
     """
-    return {
+    conclusion = _last_sentence(completion)
+    row: ArithmeticRow = {
         "category": "arithmetic",
         "object_id": bucket,
         "source": "synthetic_arithmetic",
+        "case_id": case_id,
         "prompt": f"Q: {prompt}\nA:",
         "completion": " " + completion.strip(),
+        "answer_numbers": [int(value) for value in re.findall(r"\d+", conclusion)],
     }
+    if "不会死" in conclusion:
+        row["answer_choice"] = "不会死"
+    elif "会死" in conclusion:
+        row["answer_choice"] = "会死"
+    return row
+
+
+def _case_id(bucket: str, completion: str) -> str:
+    """由题型和完整计算语义构造与问法无关的案例标识。
+
+    Args:
+        bucket (str): 算术类别。
+        completion (str): 尚未裁成直答的完整计算过程。
+
+    Returns:
+        str: 可读、稳定且保留全部操作数和运算顺序的案例标识。
+    """
+    normalized = re.sub(r"\s+", "", completion).strip("。")
+    return f"{bucket}/{normalized}"
 
 
 def _scale_quotas(quotas: Mapping[str, int], total: int) -> dict[str, int]:
@@ -525,7 +609,7 @@ def _scale_quotas(quotas: Mapping[str, int], total: int) -> dict[str, int]:
 
 
 def _prompt_key(prompt: str) -> str:
-    """把训练或 probe 问题统一成带问答包装的精确比较键。
+    """把三种用途的问题统一成带问答包装的精确比较键。
 
     Args:
         prompt (str): 可带 ``Q:``/``A:`` 包装的问题。
@@ -539,46 +623,13 @@ def _prompt_key(prompt: str) -> str:
     return f"Q: {value}\nA:"
 
 
-def _load_probe_prompts(probe_root: Path) -> set[str]:
-    """读取所有最终知识考试题面作为生成排除项。
-
-    Args:
-        probe_root (Path): 含一个或多个 JSONL 的最终考试目录。
-
-    Raises:
-        ValueError: 目录缺失、JSONL 无效或 probe 缺少问题。
-        OSError: probe 文件无法读取。
-
-    Returns:
-        set[str]: 原始问题文本集合。
-    """
-    root = Path(probe_root)
-    if not root.is_dir():
-        raise ValueError(f"知识 probe 目录不存在: {root}")
-    prompts: set[str] = set()
-    for path in sorted(root.rglob("*.jsonl")):
-        with path.open(encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"无效 probe JSONL: {path}:{line_number}") from exc
-                prompt = row.get("prompt") if isinstance(row, Mapping) else None
-                if not isinstance(prompt, str) or not prompt.strip():
-                    raise ValueError(f"知识 probe 缺少问题: {path}:{line_number}")
-                prompts.add(prompt)
-    return prompts
-
-
-def _write_rows(path: Path, rows: Sequence[ArithmeticRow], *, split: str) -> None:
-    """写入带明确训练或验证用途的算术候选。
+def _write_rows(path: Path, rows: Sequence[ArithmeticRow], *, role: str) -> None:
+    """写入带明确训练、验证或评测用途的算术候选。
 
     Args:
         path (Path): JSONL 输出路径。
         rows (Sequence[ArithmeticRow]): 尚未附加分卷用途的候选。
-        split (str): ``train`` 或 ``dev``。
+        role (str): ``train``、``validation`` 或 ``eval``。
 
     Returns:
         None: 文件完整写入后返回。
@@ -586,8 +637,18 @@ def _write_rows(path: Path, rows: Sequence[ArithmeticRow], *, split: str) -> Non
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(
-            json.dumps({**row, "split": split}, ensure_ascii=False) + "\n"
-            for row in rows
+            json.dumps(
+                {
+                    **row,
+                    "fact_id": (
+                        f"arithmetic/{row['object_id']}/{role}-{path.stem}-{index:04d}"
+                    ),
+                    "question_role": role,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            for index, row in enumerate(rows, start=1)
         ),
         encoding="utf-8",
     )
@@ -711,21 +772,21 @@ def _status_math(
         ]
     )
     if mode == "weak":
-        base = 4 * rng.randint(1, 9)
+        base = 4 * rng.randint(1, 15)
         actual = base * 3 // 4
         return (
             f"你带着虚弱(造成的攻击伤害-25%)，打出一张造成{base}点伤害的攻击牌。实际造成多少伤害？",
             f"虚弱结算：{base}×(1−25%)={base}×3÷4={actual}。实际造成{actual}点。",
         )
     if mode == "vulnerable_attack":
-        base = 2 * rng.randint(2, 15)
+        base = 2 * rng.randint(2, 25)
         actual = base * 3 // 2
         return (
             f"敌人处于易伤(受到的攻击伤害+50%)，你的攻击牌造成{base}点伤害。它会受到多少伤害？",
             f"易伤结算：{base}×(1+50%)={base}×3÷2={actual}。敌人受到{actual}点。",
         )
     if mode == "vulnerable_defend":
-        base = 2 * rng.randint(2, 15)
+        base = 2 * rng.randint(2, 30)
         vulnerable = base * 3 // 2
         block = rng.randint(0, vulnerable - 1)
         loss = vulnerable - block
@@ -734,30 +795,30 @@ def _status_math(
             f"易伤先算：{base}×3÷2={vulnerable}。再过格挡：max(0, {vulnerable}−{block})={loss}。掉{loss}点HP。",
         )
     if mode == "frail":
-        base = 4 * rng.randint(1, 7)
+        base = 4 * rng.randint(1, 15)
         actual = base * 3 // 4
         return (
             f"你带着脆弱(从卡牌获得的格挡-25%)，打出一张获得{base}点格挡的牌。实际获得多少格挡？",
             f"脆弱结算：{base}×(1−25%)={base}×3÷4={actual}。实际获得{actual}点格挡。",
         )
     if mode == "strength":
-        strength = rng.randint(1, 6)
-        base = rng.randint(3, 20)
+        strength = rng.randint(1, 10)
+        base = rng.randint(3, 30)
         return (
             f"你有{strength}层力量(攻击牌伤害每次+{strength})，打出造成{base}点伤害的攻击牌。这一下打多少？",
             f"力量加成：{base}+{strength}={base + strength}。这一下造成{base + strength}点。",
         )
     if mode == "weak_vulnerable":
-        base = 8 * rng.randint(1, 4)
+        base = 8 * rng.randint(1, 10)
         weakened = base * 3 // 4
         actual = weakened * 3 // 2
         return (
             f"你虚弱(攻击伤害-25%)且敌人易伤(受到攻击伤害+50%)。你打出造成{base}点伤害的攻击牌，敌人最终受多少伤害？",
             f"先虚己：{base}×3÷4={weakened}；再易敌：{weakened}×3÷2={actual}。敌人最终受{actual}点。",
         )
-    strength = rng.randint(1, 5)
-    base = rng.randint(2, 12)
-    hits = rng.randint(2, 4)
+    strength = rng.randint(1, 8)
+    base = rng.randint(2, 20)
+    hits = rng.randint(2, 5)
     per_hit = base + strength
     return (
         f"你有{strength}层力量，打出'{base}点伤害{hits}次'的攻击牌。总共造成多少伤害？",
@@ -868,24 +929,24 @@ def _orb_focus(
         verb = "激发"
         timing = "激发时"
     focus = rng.randint(1, 5)
+    orb_count = rng.randint(1, 6)
     gain = focus * coefficient
-    actual = base + gain
-    ask = rng.choice(
-        [
-            f"{name}充能球{verb}基值{base}，你集中{focus}(提升充能球效力)。{timing}造成/获得多少？",
-            f"当前集中为{focus}，{name}球的{verb}基础数值是{base}。它在{timing}的实际数值是多少？",
-            f"一个{name}充能球的{verb}基值为{base}，受到{focus}点集中加成后，{timing}是多少？",
-            f"计算充能球数值：{name}球，{verb}基础{base}，集中{focus}。{timing}最终造成或获得多少？",
-            f"集中为{focus}时，{name}球的{verb}基础值{base}会提高到多少？",
-            f"{name}球{verb}按基础{base}加集中修正；当前集中{focus}，最终数值是多少？",
-        ]
+    per_orb = base + gain
+    total = per_orb * orb_count
+    ask = (
+        f"你有{orb_count}个{name}充能球，{verb}基值都是{base}，集中为{focus}。"
+        f"它们在{timing}总共造成或获得多少？"
     )
     equation = (
-        f"{base}+({focus}×{coefficient})={base}+{gain}={actual}"
+        f"{base}+({focus}×{coefficient})={base}+{gain}={per_orb}"
         if coefficient != 1
-        else f"{base}+{focus}={actual}"
+        else f"{base}+{focus}={per_orb}"
     )
-    return ask, f"集中{focus}加成：{equation}。{verb}为{actual}{unit}。"
+    steps = (
+        f"集中{focus}加成后每球为{equation}；{orb_count}个球合计"
+        f"{per_orb}×{orb_count}={total}。{verb}总计为{total}{unit}。"
+    )
+    return ask, steps
 
 
 _GENERATORS: dict[str, ArithmeticGenerator] = {

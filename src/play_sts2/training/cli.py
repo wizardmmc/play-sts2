@@ -63,17 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/datasets/sft"),
     )
     build.add_argument("--train-run", action="append", default=[])
-    build.add_argument("--dev-run", action="append", default=[])
-    build.add_argument("--test-run", action="append", default=[])
-    build.add_argument(
-        "--knowledge-probes-root",
-        type=Path,
-        default=Path("data/datasets/sft/eval/knowledge"),
-    )
+    build.add_argument("--validation-run", dest="dev_run", action="append", default=[])
+    build.add_argument("--eval-run", dest="test_run", action="append", default=[])
     build.add_argument(
         "--mix",
         type=Path,
-        help="可选的 E3 知识类别与高频行为上限 TOML",
+        help="可选的 E3 训练高频人类动作上限 TOML",
     )
 
     train = subparsers.add_parser("sft", help="训练 Qwen LoRA adapter")
@@ -108,7 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = subparsers.add_parser("eval-sft", help="生成式验证 LoRA adapter")
     evaluate.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
     evaluate.add_argument("--adapter", type=Path, required=True)
-    evaluate.add_argument("--split", choices=("dev", "test"), default="dev")
+    evaluate.add_argument(
+        "--split",
+        choices=("validation", "eval"),
+        default="validation",
+    )
     evaluate.add_argument("--max-samples", type=int)
     evaluate.add_argument("--output", type=Path)
 
@@ -122,7 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("configs/sft.toml"),
     )
     evaluate_loss.add_argument("--adapter", type=Path, required=True)
-    evaluate_loss.add_argument("--split", choices=("dev", "test"), default="dev")
+    evaluate_loss.add_argument(
+        "--split",
+        choices=("validation", "eval"),
+        default="validation",
+    )
     evaluate_loss.add_argument("--max-samples", type=int)
     evaluate_loss.add_argument("--output", type=Path)
 
@@ -136,9 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("models/merged/sft-clean-20260827-native-r16-e2-merged"),
     )
     knowledge.add_argument(
-        "--probes-root",
+        "--eval-root",
         type=Path,
-        default=Path("data/datasets/sft/eval/knowledge"),
+        default=Path("data/datasets/sft/eval"),
     )
     knowledge.add_argument("--output", type=Path)
     knowledge.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
@@ -179,14 +182,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             train_run_ids=args.train_run,
             dev_run_ids=args.dev_run,
             test_run_ids=args.test_run,
-            knowledge_probe_root=args.knowledge_probes_root,
             mix_config_path=args.mix,
         )
         output = {
             "output_root": str(result.output_root),
             "train": result.train_count,
-            "dev": result.dev_count,
-            "test": result.test_count,
+            "validation": result.dev_count,
+            "eval": result.test_count,
         }
     elif args.command == "sft":
         config = load_sft_config(args.config)
@@ -231,7 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         output = run_knowledge_evaluation(
             args.model,
-            args.probes_root,
+            args.eval_root,
             report_path,
             device=args.device,
             limit=args.limit,

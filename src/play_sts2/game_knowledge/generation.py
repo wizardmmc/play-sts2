@@ -2,7 +2,9 @@
 
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +79,25 @@ _POTION_USAGE_NAMES = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _QuestionFact:
+    """保存一个事实及其三种明确用途的问法。
+
+    Args:
+        key (str): 实体内可读且稳定的事实名称。
+        answer (str): 三套问法共享的规范答案。
+        train_questions (tuple[str, ...]): 一条或多条训练问法。
+        validation_question (str): 唯一验证问法。
+        evaluation_question (str): 唯一最终评测问法。
+    """
+
+    key: str
+    answer: str
+    train_questions: tuple[str, ...]
+    validation_question: str
+    evaluation_question: str
+
+
 def generate_question_variants(
     snapshot_root: Path,
     output_root: Path,
@@ -106,6 +127,8 @@ def generate_question_variants(
     expected: dict[str, set[str]] = {}
     seen_prompts: dict[str, str] = {}
     skipped: list[str] = []
+    fact_ids: set[str] = set()
+    question_roles: Counter[str] = Counter()
 
     for category_dir in sorted(
         path for path in snapshot_root.iterdir() if path.is_dir()
@@ -147,6 +170,11 @@ def generate_question_variants(
             if output_category != category:
                 for row in rows:
                     row["category"] = output_category
+                    row["fact_id"] = str(row["fact_id"]).replace(
+                        f"{category}/",
+                        f"{output_category}/",
+                        1,
+                    )
             for row in rows:
                 prompt = str(row["prompt"])
                 completion = str(row["completion"])
@@ -154,6 +182,8 @@ def generate_question_variants(
                 if previous is not None and previous != completion:
                     raise ValueError(f"相同问题存在不同答案: {prompt}")
                 seen_prompts[prompt] = completion
+                fact_ids.add(str(row["fact_id"]))
+                question_roles[str(row["question_role"])] += 1
             target = output_root / output_category / f"{entry.object_id}.jsonl"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
@@ -169,6 +199,8 @@ def generate_question_variants(
         "game_version": _FIXED_VERSION,
         "source": "mod_export + curated_override",
         "samples": entry_count,
+        "facts": len(fact_ids),
+        "question_roles": dict(sorted(question_roles.items())),
         "categories": categories,
         "skipped": skipped,
     }
@@ -218,8 +250,9 @@ def _validate_map_catalog(snapshot_root: Path) -> None:
         ]
         if missing:
             raise ValueError(f"地图 {entry.object_id} 缺少怪池: {missing}")
-        if len(_map_encounter_questions(entry)) != 8:
-            raise ValueError(f"地图 {entry.object_id} 必须生成 8 条怪池问答")
+        facts = _map_encounter_questions(entry)
+        if len(facts) != 4 or any(len(fact.train_questions) != 2 for fact in facts):
+            raise ValueError(f"地图 {entry.object_id} 必须生成 4 个怪池事实")
 
 
 def generate_review_report(snapshot_root: Path, output_path: Path) -> Path:
@@ -416,32 +449,59 @@ def _rows_for_entry(category: str, entry: KnowledgeEntry) -> list[dict[str, str]
     builder = builders.get(category)
     if builder is None:
         return []
-    pairs = builder(entry)
+    facts = builder(entry)
     rows: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for question, answer in pairs:
-        question = question.strip()
-        answer = _normalize_generated_answer(answer)
+    seen_questions: set[str] = set()
+    seen_keys: set[str] = set()
+    for fact in facts:
+        answer = _normalize_generated_answer(fact.answer)
+        questions = (
+            ("train", fact.train_questions),
+            ("validation", (fact.validation_question,)),
+            ("eval", (fact.evaluation_question,)),
+        )
+        if not fact.key or fact.key in seen_keys:
+            raise ValueError(
+                f"知识事实身份重复或为空: {category}/{entry.object_id}/{fact.key}"
+            )
+        seen_keys.add(fact.key)
         if (
-            not question
-            or not answer
+            not answer
             or _BAD_TEXT.search(answer)
             or any(marker in answer for marker in _INCOMPLETE_MARKERS)
-            or (question, answer) in seen
         ):
             continue
-        seen.add((question, answer))
-        row = {
-            "category": category,
-            "object_id": entry.object_id,
-            "source": "mod_export+curated_override",
-            "prompt": f"Q: {question}\nA:",
-            "completion": f" {answer}",
-        }
-        supplement_source = _question_supplement_source(category, entry, question)
-        if supplement_source:
-            row["supplement_source"] = supplement_source
-        rows.append(row)
+        for question_role, role_questions in questions:
+            if not role_questions:
+                raise ValueError(
+                    f"知识事实缺少 {question_role} 问法: "
+                    f"{category}/{entry.object_id}/{fact.key}"
+                )
+            for question in role_questions:
+                question = question.strip()
+                if not question or question in seen_questions:
+                    raise ValueError(
+                        f"知识问法重复或为空: {category}/{entry.object_id}: {question}"
+                    )
+                seen_questions.add(question)
+                row = {
+                    "category": category,
+                    "object_id": entry.object_id,
+                    "fact_id": f"{category}/{entry.object_id}/{fact.key}",
+                    "question_role": question_role,
+                    "source": "mod_export+curated_override",
+                    "game_version": entry.metadata.get("game_version", _FIXED_VERSION),
+                    "prompt": f"Q: {question}\nA:",
+                    "completion": f" {answer}",
+                }
+                supplement_source = _question_supplement_source(
+                    category,
+                    entry,
+                    fact.key,
+                )
+                if supplement_source:
+                    row["supplement_source"] = supplement_source
+                rows.append(row)
     return rows
 
 
@@ -461,24 +521,24 @@ def _normalize_generated_answer(value: str) -> str:
 def _question_supplement_source(
     category: str,
     entry: KnowledgeEntry,
-    question: str,
+    fact_key: str,
 ) -> str:
     """只给实际消费补充事实的问答附行级来源。
 
     Args:
         category (str): 当前问答的实体类别。
         entry (KnowledgeEntry): 带补充来源元数据的规范事实条目。
-        question (str): 已生成的问题文本。
+        fact_key (str): 实体内可读且稳定的事实名称。
 
     Returns:
         str: 当前问题实际使用的补充来源；未使用时返回空串。
     """
     raw = entry.metadata.get("supplement_source", "").strip()
     if category == "characters":
-        return raw if "充能球" in question else ""
+        return raw if fact_key.startswith("orb-") else ""
     if category != "monsters":
         return raw
-    if "有哪些招式" not in question and "行动循环" not in question:
+    if fact_key not in {"moves", "cycle"}:
         return ""
     sources = [source for source in raw.split(";") if source]
     return ";".join(
@@ -486,14 +546,14 @@ def _question_supplement_source(
     )
 
 
-def _card_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _card_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成卡牌身份、费用、效果与升级问法。
 
     Args:
         entry (KnowledgeEntry): 已应用 curated 修正的卡牌条目。
 
     Returns:
-        list[tuple[str, str]]: 保持事实等价的问答对。
+        list[_QuestionFact]: 带明确训练、验证和评测问法的卡牌事实。
     """
     effect = _section(entry.body, "效果")
     if not effect:
@@ -522,48 +582,94 @@ def _card_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
             if character
             else f"请给出'{entry.name}'的类别和完整效果。"
         )
-        rows = [
-            (f"'{entry.name}'是什么牌？", full),
-            (f"'{entry.name}'能否直接打出？", "不能直接打出。"),
-            (detail_prompt, full),
+        facts = [
+            _QuestionFact(
+                key="description",
+                answer=full,
+                train_questions=(f"'{entry.name}'是什么牌？", detail_prompt),
+                validation_question=f"请完整说明卡牌'{entry.name}'的类别、归属与效果。",
+                evaluation_question=f"卡牌'{entry.name}'的完整卡面信息应如何描述？",
+            ),
+            _QuestionFact(
+                key="playability",
+                answer="不能直接打出。",
+                train_questions=(f"'{entry.name}'能否直接打出？",),
+                validation_question=f"玩家可以从手牌中主动使用'{entry.name}'吗？",
+                evaluation_question=f"未受其他规则影响时，'{entry.name}'是不是可打出的牌？",
+            ),
         ]
     else:
-        rows = [
-            (f"'{entry.name}'是什么牌？", full),
-            (
-                f"'{entry.name}'在没有外界影响时的费用和效果是什么？",
-                f"{cost_text}。{effect}",
+        facts = [
+            _QuestionFact(
+                key="description",
+                answer=full,
+                train_questions=(
+                    f"'{entry.name}'是什么牌？",
+                    f"请给出'{entry.name}'的类别、归属、稀有度、费用和完整效果。",
+                ),
+                validation_question=f"请完整介绍卡牌'{entry.name}'的身份、费用与效果。",
+                evaluation_question=f"如果要核对'{entry.name}'的完整卡面，应得到什么信息？",
             ),
-            (f"请给出'{entry.name}'的类别、归属、稀有度、费用和完整效果。", full),
-            (
-                f"'{entry.name}'这张牌的费用是多少？",
-                f"{cost_text}，{card_type}({character}·{rarity})。",
+            _QuestionFact(
+                key="cost-and-effect",
+                answer=f"{cost_text}。{effect}",
+                train_questions=(
+                    f"'{entry.name}'在没有外界影响时的费用和效果是什么？",
+                ),
+                validation_question=(
+                    f"不受减费或加费影响时，'{entry.name}'消耗什么资源并产生什么效果？"
+                ),
+                evaluation_question=f"原始卡面下，使用'{entry.name}'的费用和作用分别是什么？",
             ),
-            (f"打出'{entry.name}'需要几点费用？", f"{cost_text}。"),
+            _QuestionFact(
+                key="cost-and-identity",
+                answer=f"{cost_text}，{card_type}({character}·{rarity})。",
+                train_questions=(f"'{entry.name}'这张牌的费用是多少？",),
+                validation_question=f"'{entry.name}'的基础费用、类型、归属和稀有度是什么？",
+                evaluation_question=f"查阅'{entry.name}'时，它的消耗与卡牌分类应如何记录？",
+            ),
+            _QuestionFact(
+                key="cost",
+                answer=f"{cost_text}。",
+                train_questions=(f"打出'{entry.name}'需要几点费用？",),
+                validation_question=f"'{entry.name}'的基础能量或星能消耗是多少？",
+                evaluation_question=f"没有费用修正时，使用'{entry.name}'要支付多少资源？",
+            ),
         ]
     upgrade = _section(entry.body, "升级")
     if upgrade:
         compact_upgrade = _compact_upgrade(upgrade)
-        rows.extend(
+        facts.extend(
             (
-                (f"'{entry.name}'升级后有什么变化？", compact_upgrade),
-                (
-                    f"升级后的'{entry.name}'怎么描述？",
-                    f"基础效果:{effect}升级变化:{compact_upgrade}",
+                _QuestionFact(
+                    key="upgrade",
+                    answer=compact_upgrade,
+                    train_questions=(f"'{entry.name}'升级后有什么变化？",),
+                    validation_question=f"'{entry.name}+'相较基础版本改动了什么？",
+                    evaluation_question=(
+                        f"将'{entry.name}'升级后，卡面数值或效果会如何变化？"
+                    ),
+                ),
+                _QuestionFact(
+                    key="upgraded-description",
+                    answer=f"基础效果:{effect}升级变化:{compact_upgrade}",
+                    train_questions=(f"升级后的'{entry.name}'怎么描述？",),
+                    validation_question=f"请同时说明'{entry.name}'的基础效果与升级改动。",
+                    evaluation_question=f"完整比较'{entry.name}'升级前后的效果。",
                 ),
             )
         )
-    return rows
+    return facts
 
 
-def _relic_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _relic_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成遗物效果和可用稀有度问法。
 
     Args:
         entry (KnowledgeEntry): 已应用 curated 修正的遗物条目。
 
     Returns:
-        list[tuple[str, str]]: 遗物知识问答对。
+        list[_QuestionFact]: 遗物知识事实及三套问法。
     """
     effect = _section(entry.body, "效果")
     if not effect:
@@ -574,28 +680,53 @@ def _relic_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     if rarity == "None":
         rarity = ""
     full = f"{rarity}。{effect}" if rarity else effect
-    rows = [
-        (f"遗物'{entry.name}'的效果是什么？", full),
-        (f"'{entry.name}'有什么作用？", effect),
+    facts = [
+        _QuestionFact(
+            key="effect" if not rarity else "description",
+            answer=full,
+            train_questions=(
+                f"遗物'{entry.name}'的效果是什么？",
+                *(
+                    ()
+                    if not rarity
+                    else (f"请给出遗物'{entry.name}'的稀有度和完整效果。",)
+                ),
+            ),
+            validation_question=f"取得遗物'{entry.name}'后会获得什么效果？",
+            evaluation_question=f"遗物'{entry.name}'的完整规则说明是什么？",
+        )
     ]
     if rarity:
-        rows.extend(
-            (
-                (f"遗物'{entry.name}'是什么稀有度？", f"{rarity}。"),
-                (f"请给出遗物'{entry.name}'的稀有度和完整效果。", full),
+        facts.append(
+            _QuestionFact(
+                key="effect",
+                answer=effect,
+                train_questions=(f"'{entry.name}'有什么作用？",),
+                validation_question=f"'{entry.name}'会怎样影响玩家？",
+                evaluation_question=f"只看功能，遗物'{entry.name}'具体做什么？",
             )
         )
-    return rows
+    if rarity:
+        facts.append(
+            _QuestionFact(
+                key="rarity",
+                answer=f"{rarity}。",
+                train_questions=(f"遗物'{entry.name}'是什么稀有度？",),
+                validation_question=f"'{entry.name}'属于哪个遗物稀有度？",
+                evaluation_question=f"游戏将遗物'{entry.name}'归入什么稀有度？",
+            )
+        )
+    return facts
 
 
-def _potion_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _potion_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成药水效果、稀有度、使用时机和目标问法。
 
     Args:
         entry (KnowledgeEntry): 已应用 curated 修正的药水条目。
 
     Returns:
-        list[tuple[str, str]]: 药水知识问答对。
+        list[_QuestionFact]: 药水知识事实及三套问法。
     """
     effect = _section(entry.body, "效果")
     if not effect:
@@ -609,22 +740,48 @@ def _potion_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
         entry.metadata.get("target", ""), entry.metadata.get("target", "")
     )
     return [
-        (f"药水'{entry.name}'的效果是什么？", effect),
-        (f"使用'{entry.name}'会发生什么？", effect),
-        (f"药水'{entry.name}'是什么稀有度？", f"{rarity}。"),
-        (f"'{entry.name}'什么时候可以使用？", f"使用方式:{usage}。目标:{target}。"),
-        (f"请给出药水'{entry.name}'的使用方式和完整效果。", f"{usage}。{effect}"),
+        _QuestionFact(
+            key="effect",
+            answer=effect,
+            train_questions=(
+                f"药水'{entry.name}'的效果是什么？",
+                f"使用'{entry.name}'会发生什么？",
+            ),
+            validation_question=f"喝下或使用药水'{entry.name}'会产生什么作用？",
+            evaluation_question=f"药水'{entry.name}'结算时具体执行什么效果？",
+        ),
+        _QuestionFact(
+            key="rarity",
+            answer=f"{rarity}。",
+            train_questions=(f"药水'{entry.name}'是什么稀有度？",),
+            validation_question=f"'{entry.name}'属于哪一级药水稀有度？",
+            evaluation_question=f"游戏把药水'{entry.name}'归类为什么稀有度？",
+        ),
+        _QuestionFact(
+            key="usage-and-target",
+            answer=f"使用方式:{usage}。目标:{target}。",
+            train_questions=(f"'{entry.name}'什么时候可以使用？",),
+            validation_question=f"药水'{entry.name}'的可用时机和目标限制是什么？",
+            evaluation_question=f"在什么阶段能使用'{entry.name}'，又能指定谁为目标？",
+        ),
+        _QuestionFact(
+            key="usage-and-effect",
+            answer=f"{usage}。{effect}",
+            train_questions=(f"请给出药水'{entry.name}'的使用方式和完整效果。",),
+            validation_question=f"请连同使用时机说明'{entry.name}'的作用。",
+            evaluation_question=f"完整介绍药水'{entry.name}'何时可用以及会发生什么。",
+        ),
     ]
 
 
-def _power_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _power_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成能力类别、叠加语义与样例强度问法。
 
     Args:
         entry (KnowledgeEntry): 已应用 curated 修正的能力条目。
 
     Returns:
-        list[tuple[str, str]]: 能力知识问答对。
+        list[_QuestionFact]: 能力知识事实及三套问法。
     """
     effect = _section(entry.body, "效果")
     if not effect:
@@ -637,28 +794,57 @@ def _power_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     if entry.metadata.get("uses_amount") == "true":
         amount = entry.metadata.get("sample_amount", "1")
         subject = f"'{entry.name}'强度为{amount}时"
-        return [
-            (f"{subject}是什么效果？", f"{classification}。{effect}"),
-            (f"{subject}会产生什么作用？", effect),
-            (f"{subject}的类别和具体效果是什么？", f"{classification}。{effect}"),
-            (f"{subject}是增益还是减益？", f"{kind}。"),
-        ]
+        description_train = (
+            f"{subject}是什么效果？",
+            f"{subject}的类别和具体效果是什么？",
+        )
+        effect_train = (f"{subject}会产生什么作用？",)
+        kind_train = (f"{subject}是增益还是减益？",)
+        validation_subject = f"当'{entry.name}'层数或强度为{amount}时"
+        evaluation_subject = f"以强度{amount}结算'{entry.name}'时"
+    else:
+        subject = f"'{entry.name}'"
+        description_train = (
+            f"{subject}是什么效果？",
+            f"{subject}的类别和具体效果是什么？",
+        )
+        effect_train = (f"{subject}会产生什么作用？",)
+        kind_train = (f"{subject}是增益还是减益？",)
+        validation_subject = f"能力'{entry.name}'"
+        evaluation_subject = f"游戏状态中的'{entry.name}'"
     return [
-        (f"'{entry.name}'是什么效果？", f"{classification}。{effect}"),
-        (f"'{entry.name}'会产生什么作用？", effect),
-        (f"'{entry.name}'的类别和具体效果是什么？", f"{classification}。{effect}"),
-        (f"'{entry.name}'是增益还是减益？", f"{kind}。"),
+        _QuestionFact(
+            key="description",
+            answer=f"{classification}。{effect}",
+            train_questions=description_train,
+            validation_question=f"请说明{validation_subject}的类别与完整效果。",
+            evaluation_question=f"{evaluation_subject}应如何分类并解释？",
+        ),
+        _QuestionFact(
+            key="effect",
+            answer=effect,
+            train_questions=effect_train,
+            validation_question=f"{validation_subject}具体会怎样影响目标？",
+            evaluation_question=f"{evaluation_subject}实际产生什么作用？",
+        ),
+        _QuestionFact(
+            key="kind",
+            answer=f"{kind}。",
+            train_questions=kind_train,
+            validation_question=f"{validation_subject}属于增益还是减益？",
+            evaluation_question=f"应把{evaluation_subject}归到哪类状态？",
+        ),
     ]
 
 
-def _enchantment_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _enchantment_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成附魔效果、卡面附加文本和叠加问法。
 
     Args:
         entry (KnowledgeEntry): 已应用 curated 修正的附魔条目。
 
     Returns:
-        list[tuple[str, str]]: 附魔知识问答对。
+        list[_QuestionFact]: 附魔知识事实及三套问法。
     """
     effect = _section(entry.body, "效果")
     if not effect:
@@ -669,20 +855,38 @@ def _enchantment_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     if extra:
         detail += f"卡面附加:{extra}"
     return [
-        (f"附魔'{entry.name}'的效果是什么？", detail),
-        (f"卡牌获得'{entry.name}'后会怎样？", effect),
-        (f"附魔'{entry.name}'能否叠加？", f"可叠加:{stackable}。"),
+        _QuestionFact(
+            key="description",
+            answer=detail,
+            train_questions=(f"附魔'{entry.name}'的效果是什么？",),
+            validation_question=f"请说明附魔'{entry.name}'的完整规则与卡面附加。",
+            evaluation_question=f"检查附魔'{entry.name}'时，应记录哪些完整效果？",
+        ),
+        _QuestionFact(
+            key="effect",
+            answer=effect,
+            train_questions=(f"卡牌获得'{entry.name}'后会怎样？",),
+            validation_question=f"一张牌被赋予'{entry.name}'后会获得什么作用？",
+            evaluation_question=f"'{entry.name}'会怎样改变承载它的卡牌？",
+        ),
+        _QuestionFact(
+            key="stackable",
+            answer=f"可叠加:{stackable}。",
+            train_questions=(f"附魔'{entry.name}'能否叠加？",),
+            validation_question=f"同一张牌可以重复获得'{entry.name}'吗？",
+            evaluation_question=f"'{entry.name}'的叠加规则是什么？",
+        ),
     ]
 
 
-def _character_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _character_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成角色初始配置、简介和故障机器人充能球问法。
 
     Args:
         entry (KnowledgeEntry): 角色规范事实知识条目。
 
     Returns:
-        list[tuple[str, str]]: 角色知识问答对。
+        list[_QuestionFact]: 角色知识事实及三套问法。
     """
     deck = _compact_reference_counts(_section_items(entry.body, "起始牌组"))
     relics = _compact_reference_counts(_section_items(entry.body, "起始遗物"))
@@ -695,16 +899,40 @@ def _character_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
         f"初始牌组（{sum(_reference_count(item) for item in deck)}张）："
         f"{'、'.join(deck)}。"
     )
-    rows = [(f"'{entry.name}'的初始配置是什么？", base)]
+    facts = [
+        _QuestionFact(
+            key="starting-loadout",
+            answer=base,
+            train_questions=(f"'{entry.name}'的初始配置是什么？",),
+            validation_question=f"新开一局时，'{entry.name}'拥有怎样的初始资源和牌组？",
+            evaluation_question=f"请列出'{entry.name}'开局的生命、金币、能量、遗物与卡组。",
+        )
+    ]
     description = _section(entry.body, "简介")
     if description:
-        rows.append((f"'{entry.name}'是什么角色？", description))
+        facts.append(
+            _QuestionFact(
+                key="description",
+                answer=description,
+                train_questions=(f"'{entry.name}'是什么角色？",),
+                validation_question=f"游戏如何介绍角色'{entry.name}'？",
+                evaluation_question=f"'{entry.name}'的角色定位和简介是什么？",
+            )
+        )
     orbs = _section_items(entry.body, "充能球")
     if orbs:
         names = [_reference_name(orb) for orb in orbs]
-        rows.append((f"'{entry.name}'的充能球有哪几种？", "、".join(names) + "。"))
-        rows.extend(_character_orb_questions(entry.body))
-    return rows
+        facts.append(
+            _QuestionFact(
+                key="orb-types",
+                answer="、".join(names) + "。",
+                train_questions=(f"'{entry.name}'的充能球有哪几种？",),
+                validation_question=f"'{entry.name}'能够生成哪些类型的充能球？",
+                evaluation_question=f"请列出'{entry.name}'可使用的全部充能球种类。",
+            )
+        )
+        facts.extend(_character_orb_questions(entry.body))
+    return facts
 
 
 def _compact_reference_counts(items: Sequence[str]) -> list[str]:
@@ -753,16 +981,16 @@ def _reference_count(value: str) -> int:
     return int(matched.group(1)) if matched is not None else 1
 
 
-def _character_orb_questions(body: str) -> list[tuple[str, str]]:
+def _character_orb_questions(body: str) -> list[_QuestionFact]:
     """从故障机器人充能球章节生成描述与机制问答。
 
     Args:
         body (str): 角色规范事实 Markdown 正文。
 
     Returns:
-        list[tuple[str, str]]: 每种充能球各三条描述问法和三条数值问法。
+        list[_QuestionFact]: 每种充能球的描述与数值机制事实。
     """
-    rows: list[tuple[str, str]] = []
+    facts: list[_QuestionFact] = []
     for matched in re.finditer(r"(?ms)^## 充能球：([^\n]+)\s*\n(.*?)(?=^## |\Z)", body):
         name = matched.group(1).strip()
         section = matched.group(2)
@@ -770,36 +998,47 @@ def _character_orb_questions(body: str) -> list[tuple[str, str]]:
         mechanics = re.search(r"(?m)^- 基础数值与集中：(.+)$", section)
         if description is not None:
             answer = description.group(1)
-            rows.extend(
-                (
-                    (f"游戏如何描述'{name}'充能球？", answer),
-                    (f"'{name}'充能球的效果是什么？", answer),
-                    (f"生成'{name}'充能球后，它会提供什么效果？", answer),
+            facts.append(
+                _QuestionFact(
+                    key=f"orb-{name}-description",
+                    answer=answer,
+                    train_questions=(
+                        f"游戏如何描述'{name}'充能球？",
+                        f"'{name}'充能球的效果是什么？",
+                        f"生成'{name}'充能球后，它会提供什么效果？",
+                    ),
+                    validation_question=f"请用游戏规则说明'{name}'充能球的作用。",
+                    evaluation_question=f"'{name}'充能球生成后会按什么规则生效？",
                 )
             )
         if mechanics is not None:
             answer = mechanics.group(1)
-            rows.extend(
-                (
-                    (
+            facts.append(
+                _QuestionFact(
+                    key=f"orb-{name}-mechanics",
+                    answer=answer,
+                    train_questions=(
                         f"实机测得'{name}'充能球的基础数值和集中关系是什么？",
-                        answer,
+                        f"'{name}'充能球的被动、激发和集中加成分别怎样？",
+                        f"集中会如何影响'{name}'充能球的基础数值？",
                     ),
-                    (f"'{name}'充能球的被动、激发和集中加成分别怎样？", answer),
-                    (f"集中会如何影响'{name}'充能球的基础数值？", answer),
+                    validation_question=(
+                        f"请给出'{name}'充能球的被动值、激发值以及集中修正。"
+                    ),
+                    evaluation_question=f"'{name}'充能球的基础数值会怎样随集中变化？",
                 )
             )
-    return rows
+    return facts
 
 
-def _monster_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _monster_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成怪物生命、类型、招式和循环问法。
 
     Args:
         entry (KnowledgeEntry): 已合并受控补充的怪物条目。
 
     Returns:
-        list[tuple[str, str]]: 怪物知识问答对。
+        list[_QuestionFact]: 怪物知识事实及三套问法。
     """
     metadata = entry.metadata
     minimum = metadata.get("min_hp", metadata.get("hp", ""))
@@ -809,26 +1048,56 @@ def _monster_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
     moves = _section(entry.body, "招式")
     cycle = _section(entry.body, "循环")
     hp = _hp_range(minimum, maximum)
-    rows = [
-        (
-            f"怪物'{entry.name}'在A0下的初始生命值范围是什么？",
-            hp,
+    facts = [
+        _QuestionFact(
+            key="a0-hp",
+            answer=hp,
+            train_questions=(
+                f"怪物'{entry.name}'在A0下的初始生命值范围是什么？",
+                f"'{entry.name}'在0进阶时开场可能有多少生命？",
+            ),
+            validation_question=f"A0战斗开始时，'{entry.name}'可能拥有多少HP？",
+            evaluation_question=f"不加进阶生命修正时，怪物'{entry.name}'的生命范围是多少？",
         ),
-        (f"'{entry.name}'在0进阶时开场可能有多少生命？", hp),
-        (f"'{entry.name}'属于普通、精英还是Boss？", f"{room}。"),
-        (
-            f"不考虑进阶难度，'{entry.name}'的基础信息是什么？",
-            f"怪物类型:{room}。基础HP:{hp}",
+        _QuestionFact(
+            key="room",
+            answer=f"{room}。",
+            train_questions=(f"'{entry.name}'属于普通、精英还是Boss？",),
+            validation_question=f"怪物'{entry.name}'会被归为普通、精英还是首领？",
+            evaluation_question=f"'{entry.name}'对应哪一种战斗房间等级？",
+        ),
+        _QuestionFact(
+            key="summary",
+            answer=f"怪物类型:{room}。基础HP:{hp}",
+            train_questions=(f"不考虑进阶难度，'{entry.name}'的基础信息是什么？",),
+            validation_question=f"请同时说明'{entry.name}'的怪物类型与A0生命值。",
+            evaluation_question=f"'{entry.name}'的基础战斗分类和HP信息是什么？",
         ),
     ]
     if moves:
-        rows.append((f"怪物'{entry.name}'有哪些招式？", moves))
+        facts.append(
+            _QuestionFact(
+                key="moves",
+                answer=moves,
+                train_questions=(f"怪物'{entry.name}'有哪些招式？",),
+                validation_question=f"战斗中，'{entry.name}'可能使用哪些行动？",
+                evaluation_question=f"请列出怪物'{entry.name}'的全部已知招式。",
+            )
+        )
     if cycle:
-        rows.append((f"怪物'{entry.name}'的行动循环是什么？", cycle))
-    return rows
+        facts.append(
+            _QuestionFact(
+                key="cycle",
+                answer=cycle,
+                train_questions=(f"怪物'{entry.name}'的行动循环是什么？",),
+                validation_question=f"'{entry.name}'会按照怎样的顺序重复行动？",
+                evaluation_question=f"怪物'{entry.name}'的出招循环如何运转？",
+            )
+        )
+    return facts
 
 
-def _map_encounter_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _map_encounter_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成地图级全部、普通、精英和 Boss 怪池问法。
 
     普通房间会先从弱遭遇池取若干场，再使用常规遭遇池，因此普通怪池答案
@@ -838,52 +1107,70 @@ def _map_encounter_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
         entry (KnowledgeEntry): 地图规范事实知识条目。
 
     Returns:
-        list[tuple[str, str]]: 四类地图怪池各两种等价问法。
+        list[_QuestionFact]: 四类地图怪池事实及三套问法。
     """
     weak = _reference_section_answer(entry.body, "弱遭遇池")
     regular = _reference_section_answer(entry.body, "常规遭遇池")
     elite = _reference_section_answer(entry.body, "精英遭遇池")
     boss = _reference_section_answer(entry.body, "Boss 遭遇池")
-    rows: list[tuple[str, str]] = []
+    facts: list[_QuestionFact] = []
     ordinary = f"前期弱遭遇池：{weak or '空'}；常规遭遇池：{regular or '空'}。"
     if weak or regular or elite or boss:
         complete = (
             f"普通怪池：{ordinary}精英怪池：{elite or '空'}。Boss池：{boss or '空'}。"
         )
-        rows.extend(
-            (
-                (f"请汇总地图'{entry.name}'的全部怪池。", complete),
-                (
+        facts.append(
+            _QuestionFact(
+                key="all-pools",
+                answer=complete,
+                train_questions=(
+                    f"请汇总地图'{entry.name}'的全部怪池。",
                     f"地图'{entry.name}'的普通、精英和Boss怪池分别有哪些遭遇？",
-                    complete,
                 ),
+                validation_question=f"请按普通、精英和首领分类列出'{entry.name}'的怪池。",
+                evaluation_question=f"'{entry.name}'整张地图可能从哪些遭遇池抽取战斗？",
             )
         )
     if weak or regular:
-        rows.extend(
-            (
-                (f"地图'{entry.name}'的普通怪池有哪些遭遇？", ordinary),
-                (
+        facts.append(
+            _QuestionFact(
+                key="ordinary-pools",
+                answer=ordinary,
+                train_questions=(
+                    f"地图'{entry.name}'的普通怪池有哪些遭遇？",
                     f"地图'{entry.name}'普通战斗的前期弱池和常规池分别是什么？",
-                    ordinary,
                 ),
+                validation_question=f"'{entry.name}'的前期弱遭遇池和常规遭遇池各包含什么？",
+                evaluation_question=f"普通房间在'{entry.name}'前期与后续分别从哪些怪池取样？",
             )
         )
     if elite:
-        rows.extend(
-            (
-                (f"地图'{entry.name}'的精英怪池有哪些遭遇？", elite),
-                (f"在地图'{entry.name}'进入精英房可能遇到哪些遭遇？", elite),
+        facts.append(
+            _QuestionFact(
+                key="elite-pool",
+                answer=elite,
+                train_questions=(
+                    f"地图'{entry.name}'的精英怪池有哪些遭遇？",
+                    f"在地图'{entry.name}'进入精英房可能遇到哪些遭遇？",
+                ),
+                validation_question=f"'{entry.name}'的精英节点会从哪些战斗中抽取？",
+                evaluation_question=f"请列出地图'{entry.name}'所有可能的精英遭遇。",
             )
         )
     if boss:
-        rows.extend(
-            (
-                (f"地图'{entry.name}'的Boss池有哪些遭遇？", boss),
-                (f"地图'{entry.name}'末尾可能是哪几场Boss战？", boss),
+        facts.append(
+            _QuestionFact(
+                key="boss-pool",
+                answer=boss,
+                train_questions=(
+                    f"地图'{entry.name}'的Boss池有哪些遭遇？",
+                    f"地图'{entry.name}'末尾可能是哪几场Boss战？",
+                ),
+                validation_question=f"'{entry.name}'最终首领会从哪些Boss遭遇中选出？",
+                evaluation_question=f"请列出地图'{entry.name}'可能出现的全部Boss战。",
             )
         )
-    return rows
+    return facts
 
 
 def _reference_section_answer(body: str, heading: str) -> str:
@@ -899,44 +1186,63 @@ def _reference_section_answer(body: str, heading: str) -> str:
     return "、".join(_reference_name(item) for item in _section_items(body, heading))
 
 
-def _event_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _event_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成仅基于已验证静态选项的事件问法。
 
     Args:
         entry (KnowledgeEntry): 已解析且通过状态范围检查的事件条目。
 
     Returns:
-        list[tuple[str, str]]: 事件知识问答对。
+        list[_QuestionFact]: 事件知识事实及三套问法。
     """
     options = _section(entry.body, "选项")
     if not options:
         return []
     description = _section(entry.body, "文本")
     return [
-        (f"事件'{entry.name}'有哪些已解析选项？", options),
-        (f"在'{entry.name}'事件中可以选择什么？", options),
-        (
-            f"请说明事件'{entry.name}'当前已验证的文本和选项。",
-            f"{description}{options}",
+        _QuestionFact(
+            key="options",
+            answer=options,
+            train_questions=(
+                f"事件'{entry.name}'有哪些已解析选项？",
+                f"在'{entry.name}'事件中可以选择什么？",
+            ),
+            validation_question=f"进入事件'{entry.name}'后，玩家会看到哪些已验证选择？",
+            evaluation_question=f"请列出'{entry.name}'事件当前确认过的全部选项。",
+        ),
+        _QuestionFact(
+            key="description-and-options",
+            answer=f"{description}{options}",
+            train_questions=(f"请说明事件'{entry.name}'当前已验证的文本和选项。",),
+            validation_question=f"请完整复述'{entry.name}'已确认的事件文本和可选项。",
+            evaluation_question=f"'{entry.name}'事件的已验证说明与选择分支是什么？",
         ),
     ]
 
 
-def _keyword_questions(entry: KnowledgeEntry) -> list[tuple[str, str]]:
+def _keyword_questions(entry: KnowledgeEntry) -> list[_QuestionFact]:
     """生成游戏关键词释义问法。
 
     Args:
         entry (KnowledgeEntry): 关键词规范事实知识条目。
 
     Returns:
-        list[tuple[str, str]]: 关键词知识问答对。
+        list[_QuestionFact]: 关键词定义及三套问法。
     """
     definition = _section(entry.body, "释义")
     if not definition:
         return []
     return [
-        (f"游戏关键词'{entry.name}'是什么意思？", definition),
-        (f"解释一下'{entry.name}'。", definition),
+        _QuestionFact(
+            key="definition",
+            answer=definition,
+            train_questions=(
+                f"游戏关键词'{entry.name}'是什么意思？",
+                f"解释一下'{entry.name}'。",
+            ),
+            validation_question=f"在游戏规则中，'{entry.name}'应如何理解？",
+            evaluation_question=f"请给出《杀戮尖塔 2》关键词'{entry.name}'的准确定义。",
+        )
     ]
 
 

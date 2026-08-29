@@ -113,9 +113,8 @@ uv run play-sts2-knowledge review \
 
 多问法产物位于 `data/game_knowledge/generated-v0.107.1/`，仍是知识候选，不会
 自动改写正式 SFT 分卷。算术命令只从人类整局训练名册中通过 raw 审计的战斗帧
-读取真实攻击意图，确定性生成训练候选和独立验证候选；验证、测试、不合格和
-未分配局不会影响算术输入，
-并在生成时排除 `data/datasets/sft/eval/knowledge` 的最终算术考试题。Wiki 只作为
+读取真实攻击意图，用三个独立随机种子确定性生成 train、validation 与 eval
+算术候选；验证、测试、不合格和未分配局不会影响算术输入。Wiki 只作为
 怪物招式和循环的明确补充来源，事件变量优先使用同版本实机界面快照。
 
 `mod_export` 是“规范事实层”：同一张卡牌、怪物或地图只保留一份确定身份和字段
@@ -143,7 +142,8 @@ uv run play-sts2-knowledge review \
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 
 当前 E3 数据使用 `configs/sft-e3-mix.toml` 定向混合：远古者不进入训练或验证，
-角色机制与地图怪池重点保留，高频常规动作按上限抽样，低频特殊动作全部保留。
+其余正式知识实体和事实全部保留；高频常规动作按上限抽样，未列出的低频动作全部
+保留。
 重新构建命令为：
 
 ```bash
@@ -182,23 +182,23 @@ uv run --group training play-sts2-train sft \
   --resume
 ```
 
-数据目录固定为 `train.jsonl`、`validation/dev.jsonl` 和 `eval/test.jsonl`。
-同一知识事实有多种问法时，一种未见问法进入验证集，其余进入训练集，用于选择
-学习率等训练参数；只有一种问法的事实不会被全部拿走。算术验证题使用独立随机
-种子生成，考查同类规则在新数字上的迁移。整局人类游戏必须先在
-`data/raw/human/splits.json` 明确归属，否则构建失败。训练/验证问题与
-`eval/knowledge` 考试卷完全重合时也会在写文件前失败。
+数据目录固定为同构的 `train/`、`validation/` 和 `eval/` 三棵树；知识按类别和
+实体拆成 JSONL，人类行为按 `combat/<run-id>/<battle-key>.jsonl` 与
+`strategy/<run-id>.jsonl` 保存。同一知识事实显式提供 train、validation、eval
+三种自然问法，后两种分别用于调参与冻结后的最终验收。三种问题原文必须互不
+重复；算术使用三个独立随机种子，并以 `case_id` 隔离相同运算语义和操作数。整局人类游戏必须先在
+`data/raw/human/splits.json` 明确归属，否则构建失败。
 
-当前 E3 分卷共有 1,974 条训练样本、528 条验证样本和 600 条测试样本。验证集
-包括 373 条人类行为、123 条知识问答和 32 条独立数字的算术题；测试集只用于
-最终行为评测，不参与学习率选择。
+当前分卷共有 11,485 条训练样本、6,509 条验证样本和 6,736 条最终评测样本；
+train 覆盖 1,347 个知识实体和全部 5,856 个显式事实。validation/eval 都覆盖相同
+事实、全部知识类别、六类算术题以及按整局留出的战斗与战略行为。
 
-为完整人类局分配 dev/test 后，可以独立加载 adapter 做确定性生成验证：
+为完整人类局分配 validation/eval 后，可以独立加载 adapter 做确定性生成验证：
 
 ```bash
 uv run --group training play-sts2-train eval-sft \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split dev
+  --split validation
 ```
 
 评测会保存目标与实际生成全文，并报告精确匹配率；人类行为还会单独报告单行
@@ -222,7 +222,7 @@ SHA-256。需要非默认位置时增加 `--output <目录>`。
 ```bash
 uv run --group training play-sts2-train eval-sft-loss \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split test
+  --split eval
 uv run --group training play-sts2-train eval-sft-knowledge \
   --model models/merged/20260828-sft-clean-native-r16-e3-merged
 ```

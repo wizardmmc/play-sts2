@@ -31,20 +31,24 @@ raw/human/ ──→ transcripts/ ──┘
 ## 可覆盖重建的派生产物
 
 - `game_knowledge/generated-v0.107.1/`：从规范事实可重复生成的按实体 JSONL
-  候选；`arithmetic/train` 与 `arithmetic/validation` 只从训练名册内、通过 raw
-  审计的实战意图和不同随机种子生成。四张地图的普通、精英和 Boss 怪池写在
+  候选；每个知识事实带可读 `fact_id` 以及显式 train/validation/eval 问法。
+  `arithmetic/train`、`arithmetic/validation` 与 `arithmetic/eval` 只从训练名册
+  内、通过 raw 审计的实战意图和三个不同随机种子生成，并用 `case_id` 阻止同一
+  运算语义与操作数跨分卷复用。四张地图的普通、精英和 Boss 怪池写在
   `encounters/`；进场时已知的具体敌人组合不生成问答。这里不是 E3 正式分卷，
   禁止直接手改。
 - `transcripts/`：raw 的人类可读投影，不参与训练事实判定。
-- `datasets/sft/`：知识与人类动作经当前 Harness 渲染后的训练、验证和测试集；
-  路径分别为 `train.jsonl`、`validation/dev.jsonl`、`eval/test.jsonl`。
+- `datasets/sft/`：知识与人类动作经当前 Harness 渲染后的训练、验证和最终评测
+  目录树。三棵树都按知识类别与实体拆分，并包含 `arithmetic/`、`combat/` 和
+  `strategy/`。
 
-当前 `datasets/sft/` 已按 `configs/sft-e3-mix.toml` 构建为 E3 定向混合，共
-1,974 条训练样本、528 条验证样本和 600 条测试样本。修改知识候选、算术候选或
+当前 `datasets/sft/` 已按 `configs/sft-e3-mix.toml` 构建，共 11,485 条训练样本、
+6,509 条验证样本和 6,736 条最终评测样本。修改知识候选、算术候选或
 人类行为后，使用 `play-sts2-train build-sft --mix configs/sft-e3-mix.toml`
 整体重建。
-构建器会为每个具有多种问法的同一知识事实留出一种问法到验证集，并拒绝训练/
-验证问题与 `eval/knowledge` 考试卷完全重合。
+构建器按显式 `question_role` 路由问法，要求每个正式知识事实至少一条 train 问法、
+恰好一条 validation 问法和一条 eval 问法，并拒绝三棵树之间的问题原文重合。
+混合配置只允许限制训练集中的高频人类动作，不能截断知识类别。
 
 不要直接修补派生产物。状态渲染错误应修 Harness；知识事实错误应修 Mod 导出器
 或 `src/play_sts2/game_knowledge/curated/v0.107.1.json`；人类行为准入由对应局

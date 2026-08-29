@@ -145,7 +145,7 @@ def test_generate_arithmetic_command_passes_independent_sources(
     monkeypatch,
     capsys,
 ) -> None:
-    """算术命令应显式传入人类战斗帧、候选目录和最终 probe。
+    """算术命令应显式传入人类战斗帧并报告三种用途数量。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离临时目录。
@@ -153,37 +153,32 @@ def test_generate_arithmetic_command_passes_independent_sources(
         capsys (pytest.CaptureFixture[str]): 用于读取命令标准输出。
 
     Raises:
-        AssertionError: CLI 未保持训练候选和最终考试题的来源边界。
+        AssertionError: CLI 未保持三套算术候选的来源边界。
 
     Returns:
         None: 此测试只验证命令行契约。
     """
-    calls: list[tuple[Path, Path, Path]] = []
+    calls: list[tuple[Path, Path]] = []
 
     def fake_generate(
         *,
         human_root: Path,
         output_root: Path,
-        probe_root: Path,
     ) -> ArithmeticBuildResult:
         """记录算术生成参数并返回测试结果。
 
         Args:
             human_root (Path): 当前项目的人类精确战斗目录。
             output_root (Path): 算术候选输出目录。
-            probe_root (Path): 不得泄漏的最终知识考试目录。
-
         Returns:
             ArithmeticBuildResult: 不执行真实生成的测试结果。
         """
-        calls.append((human_root, output_root, probe_root))
-        return ArithmeticBuildResult(output_root, 12, 3, {"block_math": 15})
+        calls.append((human_root, output_root))
+        return ArithmeticBuildResult(output_root, 12, 3, 2, {"block_math": 17})
 
     monkeypatch.setattr(cli, "generate_arithmetic_candidates", fake_generate)
     human = tmp_path / "raw/human"
     output = tmp_path / "generated-v0.107.1"
-    probes = tmp_path / "eval/knowledge"
-
     assert (
         cli.main(
             [
@@ -192,15 +187,15 @@ def test_generate_arithmetic_command_passes_independent_sources(
                 str(human),
                 "--output-root",
                 str(output),
-                "--probes-root",
-                str(probes),
             ]
         )
         == 0
     )
 
-    assert calls == [(human, output, probes)]
-    assert '"train": 12' in capsys.readouterr().out
+    assert calls == [(human, output)]
+    output_text = capsys.readouterr().out
+    assert '"train": 12' in output_text
+    assert '"evaluation": 2' in output_text
 
 
 def test_review_command_writes_human_readable_report(

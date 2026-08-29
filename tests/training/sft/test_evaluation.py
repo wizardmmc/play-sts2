@@ -82,7 +82,7 @@ def test_evaluate_rows_writes_per_sample_generations(tmp_path: Path) -> None:
     Returns:
         None: 此测试使用确定性生成函数，不加载真实模型。
     """
-    dataset = tmp_path / "dev.jsonl"
+    dataset = tmp_path / "validation"
     rows = [
         {
             "sample_id": "knowledge/ZAP",
@@ -101,10 +101,13 @@ def test_evaluate_rows_writes_per_sample_generations(tmp_path: Path) -> None:
             ],
         },
     ]
-    dataset.write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
-        encoding="utf-8",
-    )
+    for relative, row in zip(("cards/ZAP.jsonl", "strategy/RUN.jsonl"), rows):
+        path = dataset / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(row, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
     summary = evaluate_rows(
         dataset,

@@ -12,13 +12,13 @@ e2 adapter 初始化新的 E3 运行，使用
 `--resume` 可以精确恢复。验证/测试由 `data/raw/human/splits.json` 按完整局
 隔离；改动配置后先运行 token 化与单步冒烟，禁止静默截断或高频 checkpoint。
 
-`sft-e3-mix.toml` 保存 E3 的数据配比：远古者不进入训练或验证，角色机制与地图
-怪池重点保留，高频常规动作按上限抽样，未列出的低频动作全部保留。运行
+`sft-e3-mix.toml` 只保存 train 中高频人类动作的上限：知识实体与事实必须全部
+保留，远古者由上游知识生成范围排除；未列出的低频动作全部保留。运行
 `uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml` 重建正式分卷。
 
 `sft-cuda.toml` 使用同一数据和 LoRA 配方，但只允许 `cuda` 或 `cuda:N`，基座以
 BF16 加载，LoRA 可训练参数仍强制为 FP32。通过独立的 `sft-cuda` 子命令运行，
-不改变 Mac 默认配置和 `sft` 命令。当前 E3 一轮共有 1,974 个优化步，因此 CUDA
+不改变 Mac 默认配置和 `sft` 命令。当前新版数据一轮共有 11,485 个优化步，因此 CUDA
 配置每 500 步覆盖一次 `checkpoint-last`，保证整轮训练期间可以精确续训。
 
 `inference.toml` 是本地模型转换、服务、冒烟和游戏 Runner 共用的唯一模型选择。

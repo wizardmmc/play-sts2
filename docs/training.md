@@ -5,8 +5,8 @@
 - `data/game_knowledge/`：Web Wiki、Mod 实测导出与已核验问法。
 - `data/raw/human/`：按局、战斗和战略分片的精确人类动作事实。
 - `data/transcripts/`：raw 的可覆盖人类可读投影。
-- `data/datasets/sft/`：`train.jsonl`、`validation/dev.jsonl`、
-  `eval/test.jsonl`、manifest 与知识考试卷。
+- `data/datasets/sft/`：同构的 `train/`、`validation/`、`eval/` 目录树与
+  `manifest.json`；知识按实体、行为按战斗或整局战略拆分。
 - `runs/sft/`：配置副本、逐步指标和固定名称的 `checkpoint-last`。
 - `models/base/`、`models/adapters/`、`models/merged/`、`models/serving/`：
   分别保存基座、LoRA、合并 HF 权重和 MLX 服务件。
@@ -15,7 +15,7 @@
 
 ```text
 Web Wiki / Mod 导出 / 核验问法 ──────────────┐
-                                              ├─→ data/datasets/sft/*.jsonl
+                                              ├─→ data/datasets/sft/{train,validation,eval}/
 SSE 精确人类动作 ─→ combat/strategy ─→ Harness ┘
 ```
 
@@ -33,15 +33,14 @@ uv run play-sts2-train build-sft --mix configs/sft-e3-mix.toml
 可训练局如果没有明确归属，构建会失败。审计失败的
 `A7L5LAXFYJ` 在 raw meta 中标记 `training_eligible=false`，保留追溯但不训练。
 
-当前 E3 数据共有 1,974 条训练样本、528 条验证样本和 600 条测试样本。验证集由
-373 条人类行为、123 条知识问答和 32 条独立数字的算术题组成；远古者不进入
-训练或验证。角色机制和地图怪池重点保留，高频常规动作按配置上限抽样，未列出的
-低频动作全部保留。
+当前数据共有 11,485 条训练样本、6,509 条验证样本和 6,736 条最终评测样本。
+远古者不进入正式数据；全部 1,347 个知识实体和 5,856 个显式事实进入 train，
+validation/eval 使用同一事实的独立自然改写。六类算术题分别使用三个随机种子，
+高频常规动作只在 train 按配置上限抽样，未列出的低频动作全部保留。
 
-知识验证集按“同一事实留出一种未见问法”构建，可用于学习率和训练轮数选择，
-不声称实体从未出现。算术验证题改用独立随机种子和新数字生成，不从训练题中
-抽取；两者都会主动排除最终算术考试题。独立知识考试卷
-位于 `eval/knowledge`；任何考试问题与训练或验证问题完全相同都会令构建失败。
+知识、算术和人类行为都直接位于三棵目录中，不再维护独立 probe 文件。任何知识
+问题跨 train/validation/eval 精确重合、事实缺少一种用途、类别或算术桶为空，
+都会令构建失败。
 当前训练继承 e2，且真实
 战斗、商店和奖励状态本来就会出现实体名称与效果，无法在不删除有价值行为数据
 的前提下证明实体从未进入模型。组合算术仍作为独立、可精确评分的泛化指标。
@@ -55,8 +54,8 @@ SFT 实现集中在 `src/play_sts2/training/sft/`：
 - `trainer.py`：LoRA、分块 loss、优化、checkpoint 与 adapter 发布。
 - `merge.py`：安全合并 LoRA、记录来源哈希并原子发布 HF 模型。
 - `evaluation.py`：teacher-forced 与生成式行为评测。
-- `knowledge_evaluation.py`：知识召回和组合算术探针。
-- `game_knowledge/arithmetic.py`：从真实攻击意图生成互斥的算术训练/验证候选。
+- `knowledge_evaluation.py`：从 eval 树读取知识召回和组合算术题。
+- `game_knowledge/arithmetic.py`：从真实攻击意图生成互斥的三用途算术候选。
 
 顶层 `play_sts2.training` 只保留稳定公共入口；CLI 直接依赖 SFT 包。
 
@@ -114,7 +113,8 @@ SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 a
 ## 训练
 
 当前落盘数据已按 `configs/sft-e3-mix.toml` 构建为 E3 定向混合。修改候选数据或
-配比后，应重新生成召回考试卷并运行同一混合命令，确认无考试题精确泄漏后再训练。
+配比后，应重新生成知识与算术候选并运行同一混合命令。构建器会逐事实检查三种
+用途，并拒绝知识题面或算术案例跨分卷泄漏。
 
 ```bash
 uv sync --group training
@@ -164,10 +164,10 @@ accuracy。当前目标是为 GRPO 打好基础，不必为了防御性横向比
 ```bash
 uv run --group training play-sts2-train eval-sft-loss \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split dev
+  --split validation
 uv run --group training play-sts2-train eval-sft-loss \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split test
+  --split eval
 ```
 
 生成式验证用于检查完整输出、截断与 `ACTION:` 外形，但不能把动作外形合法等同
@@ -176,7 +176,7 @@ uv run --group training play-sts2-train eval-sft-loss \
 ```bash
 uv run --group training play-sts2-train eval-sft \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3 \
-  --split dev
+  --split validation
 ```
 
 ## 合并模型
@@ -195,19 +195,19 @@ CPU bfloat16 上执行，调用 `merge_and_unload(safe_merge=True)`，保存失�
 `merge_manifest.json` 保存全部基座权重、adapter、实际 tokenizer 来源的
 SHA-256、血缘校验方式以及依赖版本。
 
-## 知识探针
+## 知识与算术评测
 
-当前旧考试卷含 1,352 道召回题和 100 道组合算术。以新的知识候选构建 E3 时，
-泄漏断言已经识别出其中 98 道召回题与训练/验证候选题面完全相同，因此这 1,352
-道题不能继续被称为 E3 的“未见问法”；确定最终知识配比后必须重新生成召回
-考试卷。100 道组合算术已作为算术生成排除项保留。知识题的自动通过口径是忽略空白后的
-完整参考答案匹配，宁可产生假阴性也不把“只命中几个数字”误报为正确；组合题
-严格检查结论和末尾最终数字。报告保存全部逐题 prompt/reference/answer/pass，
+最终评测直接递归读取 `data/datasets/sft/eval/`。其中每个显式知识事实有一条未在
+train/validation 出现的 `eval` 问法；六类算术题除了题面互斥，还通过 `case_id`
+保证完整计算语义和操作数不跨分卷复用。`combat/` 与 `strategy/` 由行为评测入口
+处理，因此知识评测器会跳过这两个目录。知识题按忽略空白后的完整参考答案评分，
+算术题使用结构化结论与数字字段评分。报告保存逐题 prompt/reference/answer/pass，
 便于人工复核。完整评测使用合并 HF 模型：
 
 ```bash
 uv run --group training play-sts2-train eval-sft-knowledge \
-  --model models/merged/20260828-sft-clean-native-r16-e3-merged
+  --model models/merged/20260828-sft-clean-native-r16-e3-merged \
+  --eval-root data/datasets/sft/eval
 ```
 
 ## MLX 服务件

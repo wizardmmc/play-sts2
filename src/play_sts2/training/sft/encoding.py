@@ -316,10 +316,10 @@ def load_tokenized_samples(
     *,
     max_length: int,
 ) -> list[TokenizedSample]:
-    """读取可读 SFT JSONL 并编码全部训练样本。
+    """递归读取可读 SFT 目录或单个 JSONL 并编码全部样本。
 
     Args:
-        path (Path): 数据集分卷 JSONL。
+        path (Path): 数据集分卷目录或兼容的单个 JSONL。
         tokenizer (Any): 目标模型 tokenizer。
         max_length (int): 允许的最大完整序列长度。
 
@@ -331,38 +331,65 @@ def load_tokenized_samples(
         list[TokenizedSample]: 保持原始行顺序的 token 化样本。
     """
     samples: list[TokenizedSample] = []
-    with Path(path).open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SftTrainingError(f"无效 SFT JSONL: {path}:{line_number}") from exc
-            if not isinstance(row, Mapping):
-                raise SftTrainingError(f"SFT 行不是对象: {path}:{line_number}")
-            sample_id = row.get("sample_id")
-            source = row.get("source")
-            messages = row.get("messages")
-            if (
-                not isinstance(sample_id, str)
-                or not isinstance(source, str)
-                or not isinstance(messages, Sequence)
-                or isinstance(messages, (str, bytes))
-            ):
-                raise SftTrainingError(f"SFT 行缺少样本字段: {path}:{line_number}")
-            samples.append(
-                encode_messages(
-                    tokenizer,
-                    messages,
-                    sample_id=sample_id,
-                    source=source,
-                    max_length=max_length,
+    for jsonl_path in _sft_jsonl_paths(path):
+        with jsonl_path.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise SftTrainingError(
+                        f"无效 SFT JSONL: {jsonl_path}:{line_number}"
+                    ) from exc
+                if not isinstance(row, Mapping):
+                    raise SftTrainingError(
+                        f"SFT 行不是对象: {jsonl_path}:{line_number}"
+                    )
+                sample_id = row.get("sample_id")
+                source = row.get("source")
+                messages = row.get("messages")
+                if (
+                    not isinstance(sample_id, str)
+                    or not isinstance(source, str)
+                    or not isinstance(messages, Sequence)
+                    or isinstance(messages, (str, bytes))
+                ):
+                    raise SftTrainingError(
+                        f"SFT 行缺少样本字段: {jsonl_path}:{line_number}"
+                    )
+                samples.append(
+                    encode_messages(
+                        tokenizer,
+                        messages,
+                        sample_id=sample_id,
+                        source=source,
+                        max_length=max_length,
+                    )
                 )
-            )
     if not samples:
         raise SftTrainingError(f"SFT 分卷为空: {path}")
     return samples
+
+
+def _sft_jsonl_paths(path: Path) -> list[Path]:
+    """解析单文件或目录形式的 SFT 输入。
+
+    Args:
+        path (Path): JSONL 文件或包含 JSONL 的目录。
+
+    Raises:
+        SftTrainingError: 路径既不是 JSONL 文件也不是目录。
+
+    Returns:
+        list[Path]: 按相对路径稳定排序的 JSONL 文件。
+    """
+    path = Path(path)
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(path.rglob("*.jsonl"))
+    raise SftTrainingError(f"SFT 分卷不存在: {path}")
 
 
 def normalize_messages(

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
@@ -60,9 +61,29 @@ _FIELD_NAMES = {
 _PROVENANCE_FIELDS = {"id", "name", "type", "source", "source_detail", "game_version"}
 _MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 SFT_SPLIT_PATHS = {
-    "train": Path("train.jsonl"),
-    "dev": Path("validation/dev.jsonl"),
-    "test": Path("eval/test.jsonl"),
+    "train": Path("train"),
+    "dev": Path("validation"),
+    "test": Path("eval"),
+}
+_PUBLIC_SPLIT_NAMES = {"train": "train", "dev": "validation", "test": "eval"}
+_SPLIT_ALIASES = {
+    "train": "train",
+    "validation": "dev",
+    "dev": "dev",
+    "eval": "test",
+    "test": "test",
+}
+_REQUIRED_KNOWLEDGE_CATEGORIES = {
+    "cards",
+    "characters",
+    "enchantments",
+    "encounters",
+    "events",
+    "keywords",
+    "monsters",
+    "potions",
+    "powers",
+    "relics",
 }
 
 
@@ -76,9 +97,9 @@ class SftDatasetResult:
 
     Args:
         output_root (Path): 本次数据集目录。
-        train_path (Path): 训练集 JSONL 路径。
-        dev_path (Path): 开发集 JSONL 路径。
-        test_path (Path): 测试集 JSONL 路径。
+        train_path (Path): 训练集目录。
+        dev_path (Path): 验证集目录。
+        test_path (Path): 最终评测集目录。
         manifest_path (Path): 数据来源与计数清单路径。
         train_count (int): 训练样本数。
         dev_count (int): 开发样本数。
@@ -103,26 +124,22 @@ def build_sft_dataset(
     train_run_ids: Collection[str] = (),
     dev_run_ids: Collection[str] = (),
     test_run_ids: Collection[str] = (),
-    knowledge_probe_root: Path | None = None,
-    knowledge_validation_variants: int = 1,
     mix_config_path: Path | None = None,
 ) -> SftDatasetResult:
-    """构建知识与人类行为混合的可读 SFT 数据集。
+    """构建三棵同构且可逐实体审查的 SFT 数据目录。
 
-    同一知识事实有多种问法时，默认把一种问法留作开发集，其余进入训练集；
-    行为样本只按整局 ID 分卷，且未在名册声明的可训练局会直接报错。
-    环境初始化动作不会成为策略监督标签。
+    生成知识必须通过 ``question_role`` 明确声明 train、validation 或 eval 用途；
+    行为样本只按整局 ID 分卷。带正式知识 manifest 的输入还会强制检查完整事实、
+    类别、六类算术、战斗和战略覆盖。
 
     Args:
         knowledge_root (Path): 含规范事实或生成问答候选的知识根目录。
         human_root (Path): 含按局、战斗和战略分片的人类精确决策目录。
         output_root (Path): 数据集输出目录。
         train_run_ids (Collection[str]): 整局进入训练集的 run ID。
-        dev_run_ids (Collection[str]): 整局进入开发集的 run ID。
-        test_run_ids (Collection[str]): 整局进入测试集的 run ID。
-        knowledge_probe_root (Path | None): 可选的独立知识考试卷目录。
-        knowledge_validation_variants (int): 每个同答案知识事实留出的问法数量。
-        mix_config_path (Path | None): 可选的知识类别和高频行为上限配方。
+        dev_run_ids (Collection[str]): 整局进入 validation 的 run ID。
+        test_run_ids (Collection[str]): 整局进入 eval 的 run ID。
+        mix_config_path (Path | None): 可选的训练高频行为上限配方。
 
     Raises:
         DatasetBuildError: 分卷重叠、输入 JSON 无效或 Harness 契约不匹配。
@@ -130,10 +147,8 @@ def build_sft_dataset(
         OSError: 无法读取输入或写入数据集。
 
     Returns:
-        SftDatasetResult: 三个分卷路径、清单路径与样本计数。
+        SftDatasetResult: 三个分卷目录、清单路径与样本计数。
     """
-    if knowledge_validation_variants < 0:
-        raise DatasetBuildError("knowledge_validation_variants 不能为负数")
     declared_splits = _read_run_splits(Path(human_root) / "splits.json")
     explicit = any((train_run_ids, dev_run_ids, test_run_ids))
     run_splits = {
@@ -146,23 +161,10 @@ def build_sft_dataset(
     knowledge_rows = _deduplicate_knowledge_rows(
         list(_knowledge_rows(Path(knowledge_root)))
     )
-    automatic_knowledge = [
-        row for row in knowledge_rows if row.get("dataset_split") is None
-    ]
-    automatic_train, automatic_dev = _split_knowledge_validation(
-        automatic_knowledge,
-        variants_per_fact=knowledge_validation_variants,
-    )
-    knowledge_train = [
-        row for row in knowledge_rows if row.get("dataset_split") == "train"
-    ] + automatic_train
-    knowledge_dev = [
-        row for row in knowledge_rows if row.get("dataset_split") == "dev"
-    ] + automatic_dev
     splits: dict[str, list[dict[str, Any]]] = {
-        "train": knowledge_train,
-        "dev": knowledge_dev,
-        "test": [],
+        "train": [row for row in knowledge_rows if row.get("dataset_split") == "train"],
+        "dev": [row for row in knowledge_rows if row.get("dataset_split") == "dev"],
+        "test": [row for row in knowledge_rows if row.get("dataset_split") == "test"],
     }
     human_rows = list(_human_rows(Path(human_root)))
     observed_runs = {str(row["run_id"]) for row in human_rows}
@@ -182,32 +184,27 @@ def build_sft_dataset(
         splits = apply_sft_mix(
             splits,
             seed=mix_config.seed,
-            knowledge_limits=mix_config.knowledge_limits,
             human_train_action_limits=mix_config.human_train_action_limits,
         )
         mix_manifest = {
             "seed": mix_config.seed,
-            "knowledge_limits": mix_config.knowledge_limits,
             "human_train_action_limits": mix_config.human_train_action_limits,
         }
     _validate_dataset_identity(splits)
-    if knowledge_probe_root is not None:
-        _reject_probe_leakage(splits, Path(knowledge_probe_root))
-
-    destination = Path(output_root)
-    destination.mkdir(parents=True, exist_ok=True)
-    split_paths: dict[str, Path] = {}
-    for name, rows in splits.items():
-        split_paths[name] = destination / SFT_SPLIT_PATHS[name]
-        _write_jsonl(split_paths[name], rows)
+    formal_manifest = Path(knowledge_root) / "_knowledge_manifest.json"
+    is_formal = formal_manifest.is_file()
+    if is_formal:
+        _validate_formal_coverage(knowledge_rows, splits)
 
     sources = Counter(str(row["source"]) for rows in splits.values() for row in rows)
     sources_by_split = {
-        name: dict(sorted(Counter(str(row["source"]) for row in rows).items()))
+        _PUBLIC_SPLIT_NAMES[name]: dict(
+            sorted(Counter(str(row["source"]) for row in rows).items())
+        )
         for name, rows in splits.items()
     }
     categories_by_split = {
-        name: dict(
+        _PUBLIC_SPLIT_NAMES[name]: dict(
             sorted(
                 Counter(
                     str(row["category"])
@@ -218,19 +215,19 @@ def build_sft_dataset(
         )
         for name, rows in splits.items()
     }
+    destination = Path(output_root)
+    split_paths = {
+        name: destination / relative for name, relative in SFT_SPLIT_PATHS.items()
+    }
     manifest = {
-        "format": "chat_messages",
-        "splits": {name: len(rows) for name, rows in splits.items()},
-        "files": {
-            path.relative_to(destination).as_posix(): {
-                "rows": len(splits[name]),
-                "sha256": _sha256(path),
-            }
-            for name, path in split_paths.items()
+        "format": "chat_messages_directory_tree",
+        "splits": {
+            _PUBLIC_SPLIT_NAMES[name]: len(rows) for name, rows in splits.items()
         },
         "sources": dict(sorted(sources.items())),
         "sources_by_split": sources_by_split,
         "knowledge_categories_by_split": categories_by_split,
+        "coverage": _coverage_manifest(knowledge_rows, splits),
         "knowledge": {
             "root": str(knowledge_root),
             "game_versions": sorted(
@@ -244,17 +241,13 @@ def build_sft_dataset(
         "human": {
             "root": str(human_root),
             "train_runs": sorted(run_splits["train"]),
-            "dev_runs": sorted(run_splits["dev"]),
-            "test_runs": sorted(run_splits["test"]),
+            "validation_runs": sorted(run_splits["dev"]),
+            "eval_runs": sorted(run_splits["test"]),
         },
     }
     if mix_manifest is not None:
         manifest["mix"] = mix_manifest
-    manifest_path = destination / "manifest.json"
-    _atomic_write_text(
-        manifest_path,
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-    )
+    manifest_path = _write_dataset_tree(destination, splits, manifest)
     return SftDatasetResult(
         output_root=destination,
         train_path=split_paths["train"],
@@ -268,10 +261,10 @@ def build_sft_dataset(
 
 
 def validate_sft_dataset(root: Path) -> dict[str, Any]:
-    """用已发布 manifest 的 SHA-256 校验三个固定分卷。
+    """用已发布 manifest 校验递归 JSONL 文件集合、行数与摘要。
 
     Args:
-        root (Path): 含 ``manifest.json`` 与三个 JSONL 分卷的数据集目录。
+        root (Path): 含 ``manifest.json`` 与三棵分卷目录的数据集根目录。
 
     Raises:
         DatasetBuildError: manifest 结构或任一分卷内容不一致。
@@ -285,17 +278,52 @@ def validate_sft_dataset(root: Path) -> dict[str, Any]:
     files = manifest.get("files")
     if not isinstance(files, Mapping):
         raise DatasetBuildError(f"SFT manifest 缺少 files: {root}")
-    for relative_path in SFT_SPLIT_PATHS.values():
-        name = relative_path.as_posix()
-        record = files.get(name)
+    missing_directories = [
+        relative.as_posix()
+        for relative in SFT_SPLIT_PATHS.values()
+        if not (root / relative).is_dir()
+    ]
+    if missing_directories:
+        raise DatasetBuildError(f"SFT 分卷目录缺失: {missing_directories}")
+    legacy_paths = (
+        root / "train.jsonl",
+        root / "validation/dev.jsonl",
+        root / "eval/test.jsonl",
+        root / "eval/knowledge",
+    )
+    existing_legacy = [
+        path.relative_to(root).as_posix() for path in legacy_paths if path.exists()
+    ]
+    if existing_legacy:
+        raise DatasetBuildError(f"SFT 仍含旧聚合或 probe 产物: {existing_legacy}")
+    declared_names = {str(name) for name in files}
+    actual_names = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*.jsonl")
+        if path.is_file()
+    }
+    if declared_names != actual_names:
+        raise DatasetBuildError(
+            "SFT manifest 文件集合不一致: "
+            f"缺失={sorted(declared_names - actual_names)}, "
+            f"未声明={sorted(actual_names - declared_names)}"
+        )
+    for name in sorted(declared_names):
+        record = files[name]
         expected = record.get("sha256") if isinstance(record, Mapping) else None
-        path = root / relative_path
-        if not isinstance(expected, str) or not path.is_file():
-            raise DatasetBuildError(f"SFT manifest 缺少分卷记录: {path}")
+        expected_rows = record.get("rows") if isinstance(record, Mapping) else None
+        path = root / name
+        if not isinstance(expected, str) or not isinstance(expected_rows, int):
+            raise DatasetBuildError(f"SFT manifest 文件记录无效: {name}")
         actual = _sha256(path)
         if actual != expected:
             raise DatasetBuildError(
                 f"{name} 的 SHA-256 与 manifest 不一致: {actual} != {expected}"
+            )
+        actual_rows = sum(1 for _ in _read_jsonl(path))
+        if actual_rows != expected_rows:
+            raise DatasetBuildError(
+                f"{name} 的行数与 manifest 不一致: {actual_rows} != {expected_rows}"
             )
     return manifest
 
@@ -305,19 +333,353 @@ def dataset_split_path(root: Path, split: str) -> Path:
 
     Args:
         root (Path): 含 ``manifest.json`` 的 SFT 数据集根目录。
-        split (str): ``train``、``dev`` 或 ``test``。
+        split (str): ``train``、``validation``/``dev`` 或 ``eval``/``test``。
 
     Raises:
         DatasetBuildError: 分卷名称不受支持。
 
     Returns:
-        Path: 训练、验证或最终测试 JSONL 的完整路径。
+        Path: 训练、验证或最终测试目录的完整路径。
     """
     try:
-        relative = SFT_SPLIT_PATHS[split]
+        relative = SFT_SPLIT_PATHS[_SPLIT_ALIASES[split]]
     except KeyError as exc:
         raise DatasetBuildError(f"未知 SFT 分卷: {split}") from exc
     return Path(root) / relative
+
+
+def dataset_split_files(root: Path, split: str) -> list[Path]:
+    """返回某个 SFT 分卷下按路径稳定排序的全部 JSONL。
+
+    Args:
+        root (Path): SFT 数据集根目录。
+        split (str): 支持的公开或兼容分卷名称。
+
+    Returns:
+        list[Path]: 递归发现的非空或空 JSONL 文件路径。
+    """
+    return sorted(dataset_split_path(root, split).rglob("*.jsonl"))
+
+
+def _validate_formal_coverage(
+    knowledge_rows: list[dict[str, Any]],
+    splits: Mapping[str, list[dict[str, Any]]],
+) -> None:
+    """验证正式候选的事实、题型和三分卷行为覆盖。
+
+    Args:
+        knowledge_rows (list[dict[str, Any]]): 尚未混入人类行为的全部知识行。
+        splits (Mapping[str, list[dict[str, Any]]]): 已分配并应用行为上限的样本。
+
+    Raises:
+        DatasetBuildError: 事实角色、答案、类别、算术或行为覆盖不完整。
+
+    Returns:
+        None: 正式数据满足发布契约时返回。
+    """
+    fact_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in knowledge_rows:
+        category = str(row.get("category", ""))
+        if category == "ancients":
+            raise DatasetBuildError("正式 SFT 不允许包含远古者知识")
+        if category == "arithmetic":
+            continue
+        fact_id = row.get("fact_id")
+        if not isinstance(fact_id, str) or not fact_id.strip():
+            raise DatasetBuildError(f"正式知识缺少 fact_id: {row.get('sample_id')}")
+        fact_rows.setdefault(fact_id, []).append(row)
+    if not fact_rows:
+        raise DatasetBuildError("正式知识候选没有可训练事实")
+    for fact_id, rows in fact_rows.items():
+        roles = Counter(str(row.get("question_role", "")) for row in rows)
+        if roles["train"] < 1 or roles["validation"] != 1 or roles["eval"] != 1:
+            raise DatasetBuildError(
+                f"事实 {fact_id} 必须有 train>=1、validation=1、eval=1: {dict(roles)}"
+            )
+        answers = {_knowledge_answer_text(row) for row in rows}
+        if len(answers) != 1:
+            raise DatasetBuildError(f"事实 {fact_id} 的三套问法答案不一致")
+
+    candidate_categories = {
+        str(row["category"])
+        for row in knowledge_rows
+        if row.get("category") not in {"arithmetic", "ancients"}
+    }
+    if candidate_categories != _REQUIRED_KNOWLEDGE_CATEGORIES:
+        raise DatasetBuildError(
+            "正式知识候选类别不完整: "
+            f"缺失={sorted(_REQUIRED_KNOWLEDGE_CATEGORIES - candidate_categories)}, "
+            f"多余={sorted(candidate_categories - _REQUIRED_KNOWLEDGE_CATEGORIES)}"
+        )
+    candidate_fact_ids = {
+        category: {
+            str(row["fact_id"])
+            for row in knowledge_rows
+            if row.get("category") == category
+        }
+        for category in _REQUIRED_KNOWLEDGE_CATEGORIES
+    }
+    candidate_object_ids = {
+        category: {
+            str(row["object_id"])
+            for row in knowledge_rows
+            if row.get("category") == category
+        }
+        for category in _REQUIRED_KNOWLEDGE_CATEGORIES
+    }
+    arithmetic_buckets = {
+        "block_math",
+        "energy_math",
+        "lethal",
+        "multihit",
+        "orb_focus",
+        "status_math",
+    }
+    arithmetic_case_owners: dict[str, str] = {}
+    for split, rows in splits.items():
+        public_name = _PUBLIC_SPLIT_NAMES[split]
+        categories = {
+            str(row["category"])
+            for row in rows
+            if row.get("source") != "human_play" and row.get("category") != "arithmetic"
+        }
+        if categories != _REQUIRED_KNOWLEDGE_CATEGORIES:
+            raise DatasetBuildError(
+                f"{public_name} 知识类别覆盖不完整: "
+                f"缺失={sorted(_REQUIRED_KNOWLEDGE_CATEGORIES - categories)}"
+            )
+        split_knowledge = [
+            row for row in rows if row.get("category") in _REQUIRED_KNOWLEDGE_CATEGORIES
+        ]
+        invalid_roles = sorted(
+            {
+                str(row.get("question_role", ""))
+                for row in split_knowledge
+                if row.get("question_role") != public_name
+            }
+        )
+        if invalid_roles:
+            raise DatasetBuildError(
+                f"{public_name} 知识问法用途不一致: {invalid_roles}"
+            )
+        for category in sorted(_REQUIRED_KNOWLEDGE_CATEGORIES):
+            observed_fact_ids = {
+                str(row["fact_id"])
+                for row in split_knowledge
+                if row.get("category") == category
+            }
+            missing_facts = candidate_fact_ids[category] - observed_fact_ids
+            extra_facts = observed_fact_ids - candidate_fact_ids[category]
+            if missing_facts or extra_facts:
+                raise DatasetBuildError(
+                    f"{public_name} 知识事实覆盖不完整({category}): "
+                    f"缺失={sorted(missing_facts)}, 多余={sorted(extra_facts)}"
+                )
+            observed_object_ids = {
+                str(row["object_id"])
+                for row in split_knowledge
+                if row.get("category") == category
+            }
+            missing_objects = candidate_object_ids[category] - observed_object_ids
+            extra_objects = observed_object_ids - candidate_object_ids[category]
+            if missing_objects or extra_objects:
+                raise DatasetBuildError(
+                    f"{public_name} 知识实体覆盖不完整({category}): "
+                    f"缺失={sorted(missing_objects)}, 多余={sorted(extra_objects)}"
+                )
+        observed_buckets = {
+            str(row["object_id"]) for row in rows if row.get("category") == "arithmetic"
+        }
+        if observed_buckets != arithmetic_buckets:
+            raise DatasetBuildError(
+                f"{public_name} 算术题型覆盖不完整: "
+                f"缺失={sorted(arithmetic_buckets - observed_buckets)}"
+            )
+        arithmetic_rows = [row for row in rows if row.get("category") == "arithmetic"]
+        for row in arithmetic_rows:
+            if row.get("question_role") != public_name:
+                raise DatasetBuildError(
+                    f"{public_name} 算术问法用途不一致: {row.get('question_role')}"
+                )
+            case_id = row.get("case_id")
+            if not isinstance(case_id, str) or not case_id.strip():
+                raise DatasetBuildError(
+                    f"{public_name} 算术候选缺少 case_id: {row.get('sample_id')}"
+                )
+            previous_owner = arithmetic_case_owners.get(case_id)
+            if previous_owner is not None:
+                raise DatasetBuildError(
+                    f"算术案例跨分卷重复: {case_id} ({previous_owner}/{public_name})"
+                )
+            arithmetic_case_owners[case_id] = public_name
+        layers = {
+            str(row.get("layer", ""))
+            for row in rows
+            if row.get("source") == "human_play"
+        }
+        missing_layers = {"battle", "strategic"} - layers
+        if missing_layers:
+            raise DatasetBuildError(
+                f"{public_name} 人类行为覆盖不完整: {sorted(missing_layers)}"
+            )
+
+
+def _coverage_manifest(
+    knowledge_rows: list[dict[str, Any]],
+    splits: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """汇总每个知识类别的候选及三种用途覆盖。
+
+    Args:
+        knowledge_rows (list[dict[str, Any]]): 全部知识候选。
+        splits (Mapping[str, list[dict[str, Any]]]): 最终三分卷样本。
+
+    Returns:
+        dict[str, dict[str, Any]]: 按类别组织的实体、事实与问法计数。
+    """
+    categories = sorted(
+        {
+            str(row["category"])
+            for row in knowledge_rows
+            if row.get("category") != "ancients"
+        }
+    )
+    output: dict[str, dict[str, Any]] = {}
+    for category in categories:
+        candidates = [row for row in knowledge_rows if row.get("category") == category]
+        record: dict[str, Any] = {
+            "candidate_entities": len({str(row["object_id"]) for row in candidates}),
+            "candidate_facts": len({str(row.get("fact_id", "")) for row in candidates}),
+            "candidate_questions": len(candidates),
+        }
+        for split, rows in splits.items():
+            selected = [row for row in rows if row.get("category") == category]
+            record[_PUBLIC_SPLIT_NAMES[split]] = {
+                "entities": len({str(row["object_id"]) for row in selected}),
+                "facts": len({str(row.get("fact_id", "")) for row in selected}),
+                "questions": len(selected),
+            }
+        output[category] = record
+    return output
+
+
+def _write_dataset_tree(
+    destination: Path,
+    splits: Mapping[str, list[dict[str, Any]]],
+    manifest: dict[str, Any],
+) -> Path:
+    """在同级暂存目录构建完整树后替换旧数据产物。
+
+    Args:
+        destination (Path): 正式 SFT 数据根目录。
+        splits (Mapping[str, list[dict[str, Any]]]): 三个待发布分卷。
+        manifest (dict[str, Any]): 尚未附加文件摘要的构建清单。
+
+    Raises:
+        OSError: 暂存写入或目录替换失败。
+
+    Returns:
+        Path: 最终 ``manifest.json`` 路径。
+    """
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}-build-", dir=destination.parent)
+    )
+    categories = sorted(
+        {
+            str(row["category"])
+            for rows in splits.values()
+            for row in rows
+            if row.get("source") != "human_play"
+        }
+    )
+    try:
+        file_rows: dict[Path, list[dict[str, Any]]] = {}
+        for split, rows in splits.items():
+            split_root = staging / SFT_SPLIT_PATHS[split]
+            for category in (*categories, "combat", "strategy"):
+                (split_root / category).mkdir(parents=True, exist_ok=True)
+            for row in rows:
+                relative = _row_output_path(row)
+                file_rows.setdefault(split_root / relative, []).append(row)
+        for path, rows in sorted(file_rows.items(), key=lambda item: str(item[0])):
+            _write_jsonl(path, [_published_row(row) for row in rows])
+        manifest["files"] = {
+            path.relative_to(staging).as_posix(): {
+                "rows": len(rows),
+                "sha256": _sha256(path),
+            }
+            for path, rows in sorted(file_rows.items(), key=lambda item: str(item[0]))
+        }
+        _atomic_write_text(
+            staging / "manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        )
+        backup = destination.parent / f".{destination.name}-previous-{os.getpid()}"
+        if backup.exists():
+            raise OSError(f"SFT 备份目录已存在: {backup}")
+        if destination.exists():
+            os.replace(destination, backup)
+        try:
+            os.replace(staging, destination)
+        except BaseException:
+            if backup.exists() and not destination.exists():
+                os.replace(backup, destination)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    return destination / "manifest.json"
+
+
+def _published_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """移除仅供构建器路由使用的内部字段。
+
+    Args:
+        row (Mapping[str, Any]): 已完成分卷的内存样本。
+
+    Returns:
+        dict[str, Any]: 只保留可供人工审查和训练消费的公开字段。
+    """
+    return {key: value for key, value in row.items() if key != "dataset_split"}
+
+
+def _row_output_path(row: Mapping[str, Any]) -> Path:
+    """确定一条 SFT 行在分卷目录内的可读文件路径。
+
+    Args:
+        row (Mapping[str, Any]): 知识、算术或人类行为样本。
+
+    Raises:
+        DatasetBuildError: 行缺少构成安全相对路径的身份字段。
+
+    Returns:
+        Path: 不含分卷根目录的 JSONL 相对路径。
+    """
+    if row.get("source") == "human_play":
+        run_id = str(row.get("run_id", ""))
+        if not run_id or "/" in run_id or ".." in run_id:
+            raise DatasetBuildError(f"人类行为 run_id 无效: {run_id}")
+        if row.get("layer") == "battle":
+            battle_key = str(row.get("battle_key", ""))
+            if not battle_key or "/" in battle_key or ".." in battle_key:
+                raise DatasetBuildError(f"战斗分片身份无效: {battle_key}")
+            return Path("combat") / run_id / f"{battle_key}.jsonl"
+        return Path("strategy") / f"{run_id}.jsonl"
+    category = str(row.get("category", ""))
+    object_id = str(row.get("object_id", ""))
+    if (
+        not category
+        or not object_id
+        or any(
+            token in value for value in (category, object_id) for token in ("/", "..")
+        )
+    ):
+        raise DatasetBuildError(f"知识输出身份无效: {category}/{object_id}")
+    return Path(category) / f"{object_id}.jsonl"
 
 
 def _validate_run_split_sets(run_splits: Mapping[str, set[str]]) -> None:
@@ -357,53 +719,21 @@ def _deduplicate_knowledge_rows(
     Returns:
         list[dict[str, Any]]: 保留首次出现顺序的唯一知识行。
     """
-    seen: dict[str, str] = {}
+    seen: dict[str, tuple[str, str]] = {}
     unique: list[dict[str, Any]] = []
     for row in rows:
         prompt = _knowledge_prompt(row)
         answer = _knowledge_answer_text(row)
+        role = str(row.get("question_role", ""))
         previous = seen.get(prompt)
         if previous is None:
-            seen[prompt] = answer
+            seen[prompt] = (answer, role)
             unique.append(row)
-        elif previous != answer:
+        elif previous[0] != answer:
             raise DatasetBuildError(f"相同知识问题存在不同答案: {prompt}")
+        elif previous[1] != role:
+            unique.append(row)
     return unique
-
-
-def _split_knowledge_validation(
-    rows: list[dict[str, Any]],
-    *,
-    variants_per_fact: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """为每个同实体同答案的知识事实留出若干不同问法。
-
-    只有一个问法的事实全部留在训练集；这样验证集测量的是同一事实的未见
-    表述，不会把从未训练过的事实误用于学习率选择。
-
-    Args:
-        rows (list[dict[str, Any]]): 已完成问题去重的知识行。
-        variants_per_fact (int): 每个至少有两种问法的事实留出数量。
-
-    Returns:
-        tuple[list[dict[str, Any]], list[dict[str, Any]]]: 训练与验证知识行。
-    """
-    groups: dict[tuple[str, str, str], list[int]] = {}
-    for index, row in enumerate(rows):
-        key = (
-            str(row.get("category", "")),
-            str(row.get("object_id", "")),
-            _knowledge_answer_text(row),
-        )
-        groups.setdefault(key, []).append(index)
-    validation_indices: set[int] = set()
-    for indices in groups.values():
-        count = min(variants_per_fact, max(0, len(indices) - 1))
-        validation_indices.update(indices[-count:] if count else ())
-    return (
-        [row for index, row in enumerate(rows) if index not in validation_indices],
-        [row for index, row in enumerate(rows) if index in validation_indices],
-    )
 
 
 def _validate_dataset_identity(splits: Mapping[str, list[dict[str, Any]]]) -> None:
@@ -438,49 +768,6 @@ def _validate_dataset_identity(splits: Mapping[str, list[dict[str, Any]]]) -> No
                     f"知识问题跨分卷重复: {prompt} ({previous_prompt}/{split})"
                 )
             prompt_owners[prompt] = split
-
-
-def _reject_probe_leakage(
-    splits: Mapping[str, list[dict[str, Any]]],
-    probe_root: Path,
-) -> None:
-    """拒绝训练或验证问题出现在独立知识考试卷中。
-
-    Args:
-        splits (Mapping[str, list[dict[str, Any]]]): 待发布的训练数据分卷。
-        probe_root (Path): 含知识 probe JSONL 的目录。
-
-    Raises:
-        DatasetBuildError: probe 目录缺失、格式无效或问题已参与开发。
-
-    Returns:
-        None: 所有 probe 都没有进入训练和验证集时返回。
-    """
-    if not probe_root.is_dir():
-        raise DatasetBuildError(f"知识 probe 目录不存在: {probe_root}")
-    developed_prompts = {
-        _knowledge_prompt(row)
-        for split in ("train", "dev")
-        for row in splits[split]
-        if row.get("source") != "human_play"
-    }
-    leaked_prompts: list[str] = []
-    seen_leaks: set[str] = set()
-    for path in sorted(probe_root.rglob("*.jsonl")):
-        for row in _read_jsonl(path):
-            prompt = row.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise DatasetBuildError(f"知识 probe 缺少问题: {path}")
-            normalized = _normalize_question(prompt)
-            if normalized in developed_prompts and normalized not in seen_leaks:
-                seen_leaks.add(normalized)
-                leaked_prompts.append(normalized)
-    if leaked_prompts:
-        examples = "；".join(leaked_prompts[:5])
-        raise DatasetBuildError(
-            f"发现 {len(leaked_prompts)} 个 probe 问题已进入训练集或验证集；"
-            f"示例：{examples}"
-        )
 
 
 def _knowledge_prompt(row: Mapping[str, Any]) -> str:
@@ -537,7 +824,7 @@ def _normalize_question(value: str) -> str:
     """移除问答包装并压缩问题中的空白。
 
     Args:
-        value (str): SFT 或 probe 中的原始问题。
+        value (str): SFT 候选或已发布数据中的原始问题。
 
     Returns:
         str: 可用于精确泄漏检查的稳定问题文本。
@@ -574,6 +861,9 @@ def _knowledge_rows(root: Path) -> Iterator[dict[str, Any]]:
             "source": entry.source,
             "category": category,
             "object_id": entry.object_id,
+            "fact_id": f"{category}/{entry.object_id}/description",
+            "question_role": "train",
+            "dataset_split": "train",
             "messages": [
                 {
                     "role": "user",
@@ -615,23 +905,38 @@ def _curated_knowledge_rows(root: Path) -> Iterator[dict[str, Any]]:
             category = row.get("category", path.parent.name)
             object_id = row.get("object_id", path.stem)
             source = row.get("source", "curated_knowledge")
-            split = row.get("split")
+            role = row.get("question_role")
+            legacy_split = row.get("split")
             if not all(
                 isinstance(value, str) and value.strip()
                 for value in (prompt, completion, category, object_id, source)
             ):
                 raise DatasetBuildError(f"知识问答字段无效: {path}:{line_number}")
-            if split not in (None, "train", "dev"):
+            if role is None and legacy_split is None:
+                role = "train"
+            elif role is None:
+                role = {"train": "train", "dev": "validation"}.get(legacy_split)
+            if role not in {"train", "validation", "eval"}:
                 raise DatasetBuildError(
-                    f"知识问答 split 只能是 train/dev: {path}:{line_number}"
+                    f"知识问答 question_role 无效: {path}:{line_number}"
                 )
+            fact_id = row.get("fact_id")
+            if not isinstance(fact_id, str) or not fact_id.strip():
+                fact_id = f"{category}/{object_id}/legacy-{line_number:04d}"
             question = re.sub(r"\s*A:\s*$", "", prompt).strip()
             output = {
-                "sample_id": f"curated/{relative_stem}/{line_number:04d}",
+                "sample_id": (f"curated/{relative_stem}/{role}/{line_number:04d}"),
                 "source": source,
                 "source_detail": f"{path.relative_to(root).as_posix()}:{line_number}",
                 "category": category,
                 "object_id": object_id,
+                "fact_id": fact_id,
+                "question_role": role,
+                "dataset_split": {
+                    "train": "train",
+                    "validation": "dev",
+                    "eval": "test",
+                }[role],
                 "messages": [
                     {"role": "user", "content": question},
                     {"role": "assistant", "content": completion.strip()},
@@ -643,8 +948,21 @@ def _curated_knowledge_rows(root: Path) -> Iterator[dict[str, Any]]:
             supplement_source = row.get("supplement_source")
             if isinstance(supplement_source, str) and supplement_source.strip():
                 output["supplement_source"] = supplement_source
-            if split is not None:
-                output["dataset_split"] = split
+            game_version = row.get("game_version")
+            if isinstance(game_version, str) and game_version:
+                output["game_version"] = game_version
+            case_id = row.get("case_id")
+            if isinstance(case_id, str) and case_id:
+                output["case_id"] = case_id
+            answer_numbers = row.get("answer_numbers")
+            if isinstance(answer_numbers, list) and all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in answer_numbers
+            ):
+                output["answer_numbers"] = answer_numbers
+            answer_choice = row.get("answer_choice")
+            if isinstance(answer_choice, str) and answer_choice:
+                output["answer_choice"] = answer_choice
             yield output
 
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .dataset import dataset_split_path, validate_sft_dataset
+from .dataset import dataset_split_files, dataset_split_path, validate_sft_dataset
 from .encoding import (
     IGNORE_LABEL,
     SftConfig,
@@ -1162,15 +1162,18 @@ def _dataset_source_files(root: Path) -> dict[str, Path]:
         root (Path): SFT 数据集根目录。
 
     Returns:
-        dict[str, Path]: manifest 和三个固定分卷路径。
+        dict[str, Path]: manifest 和三棵目录下的全部 JSONL 路径。
     """
     root = Path(root)
-    return {
-        "manifest.json": root / "manifest.json",
-        "train.jsonl": dataset_split_path(root, "train"),
-        "validation/dev.jsonl": dataset_split_path(root, "dev"),
-        "eval/test.jsonl": dataset_split_path(root, "test"),
-    }
+    files = {"manifest.json": root / "manifest.json"}
+    for split in ("train", "dev", "test"):
+        files.update(
+            {
+                path.relative_to(root).as_posix(): path
+                for path in dataset_split_files(root, split)
+            }
+        )
+    return files
 
 
 def _validate_execution_runtime(

@@ -1,5 +1,6 @@
-"""验证 SFT 配置、消息编码与 assistant-only loss mask。"""
+"""验证 SFT 配置、目录读取、消息编码与 assistant-only loss mask。"""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from play_sts2.training.sft import (
     SftTrainingError,
     encode_messages,
     load_sft_config,
+    load_tokenized_samples,
 )
 
 
@@ -81,6 +83,51 @@ class DriftedTokenizer(FakeTokenizer):
             return_dict=return_dict,
         )
         return result if add_generation_prompt else [10, 99, *result[2:]]
+
+
+def test_load_tokenized_samples_recurses_directory_tree(tmp_path: Path) -> None:
+    """训练编码器应按路径稳定递归读取分卷目录。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 子目录样本被漏读或顺序不稳定。
+
+    Returns:
+        None: 此测试只使用固定 tokenizer。
+    """
+    root = tmp_path / "train"
+    for relative, sample_id in (
+        ("cards/ZAP.jsonl", "knowledge/ZAP"),
+        ("strategy/RUN.jsonl", "human/RUN/1"),
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "sample_id": sample_id,
+                    "source": (
+                        "human_play" if sample_id.startswith("human") else "knowledge"
+                    ),
+                    "messages": [
+                        {"role": "user", "content": "状态"},
+                        {"role": "assistant", "content": "答案"},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    samples = load_tokenized_samples(root, FakeTokenizer(), max_length=32)
+
+    assert [sample.sample_id for sample in samples] == [
+        "knowledge/ZAP",
+        "human/RUN/1",
+    ]
 
 
 def test_load_sft_config_reads_minimal_toml(tmp_path: Path) -> None:

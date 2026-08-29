@@ -5,11 +5,142 @@ from pathlib import Path
 
 import pytest
 
+import play_sts2.training.sft.dataset as dataset_module
 from play_sts2.training import (
     DatasetBuildError,
     build_sft_dataset,
     validate_sft_dataset,
 )
+
+
+def _directory_rows(root: Path) -> list[dict[str, object]]:
+    """递归读取一个目录分卷中的全部 JSONL 行。
+
+    Args:
+        root (Path): train、validation 或 eval 目录。
+
+    Returns:
+        list[dict[str, object]]: 按文件路径和行顺序排列的样本。
+    """
+    return [
+        json.loads(line)
+        for path in sorted(root.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_formal_coverage_requires_every_arithmetic_and_behavior_bucket() -> None:
+    """正式分卷缺少任一事实、算术题型或行为层都应拒绝发布。
+
+    Raises:
+        AssertionError: 缺失正式桶没有触发构建错误。
+
+    Returns:
+        None: 此测试直接检查发布前覆盖断言。
+    """
+    roles = {"train": "train", "validation": "dev", "eval": "test"}
+    categories = {
+        "cards",
+        "characters",
+        "enchantments",
+        "encounters",
+        "events",
+        "keywords",
+        "monsters",
+        "potions",
+        "powers",
+        "relics",
+    }
+    objects_by_category = {
+        category: ("OBJECT", "SECOND") if category == "cards" else ("OBJECT",)
+        for category in categories
+    }
+    knowledge_rows = [
+        {
+            "sample_id": f"{category}/{object_id}/fact/{role}",
+            "source": "knowledge",
+            "category": category,
+            "object_id": object_id,
+            "fact_id": f"{category}/{object_id}/fact",
+            "question_role": role,
+            "dataset_split": split,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"问题-{category}-{object_id}-{role}",
+                },
+                {
+                    "role": "assistant",
+                    "content": f"答案-{category}-{object_id}",
+                },
+            ],
+        }
+        for category in categories
+        for object_id in objects_by_category[category]
+        for role, split in roles.items()
+    ]
+    buckets = {
+        "block_math",
+        "energy_math",
+        "lethal",
+        "multihit",
+        "orb_focus",
+        "status_math",
+    }
+    splits: dict[str, list[dict[str, object]]] = {}
+    for role, split in roles.items():
+        arithmetic = [
+            {
+                "source": "synthetic_arithmetic",
+                "category": "arithmetic",
+                "object_id": bucket,
+                "case_id": f"{bucket}/{role}",
+                "question_role": role,
+            }
+            for bucket in buckets
+        ]
+        behavior = [
+            {"source": "human_play", "layer": "battle"},
+            {"source": "human_play", "layer": "strategic"},
+        ]
+        splits[split] = (
+            [row for row in knowledge_rows if row["question_role"] == role]
+            + arithmetic
+            + behavior
+        )
+
+    dataset_module._validate_formal_coverage(knowledge_rows, splits)
+    leaking_case_splits = {split: list(rows) for split, rows in splits.items()}
+    leaking_case_splits["dev"] = [dict(row) for row in leaking_case_splits["dev"]]
+    next(
+        row
+        for row in leaking_case_splits["dev"]
+        if row.get("object_id") == "block_math"
+    )["case_id"] = "block_math/train"
+    with pytest.raises(DatasetBuildError, match="算术案例跨分卷重复.*block_math/train"):
+        dataset_module._validate_formal_coverage(knowledge_rows, leaking_case_splits)
+
+    missing_fact_splits = {split: list(rows) for split, rows in splits.items()}
+    missing_fact_splits["dev"] = [
+        row
+        for row in missing_fact_splits["dev"]
+        if row.get("fact_id") != "cards/OBJECT/fact"
+    ]
+    with pytest.raises(
+        DatasetBuildError,
+        match="validation 知识事实覆盖不完整.*cards/OBJECT/fact",
+    ):
+        dataset_module._validate_formal_coverage(knowledge_rows, missing_fact_splits)
+
+    missing_bucket_splits = {split: list(rows) for split, rows in splits.items()}
+    missing_bucket_splits["test"] = [
+        row
+        for row in missing_bucket_splits["test"]
+        if row.get("object_id") != "orb_focus"
+    ]
+    with pytest.raises(DatasetBuildError, match="eval 算术题型覆盖不完整.*orb_focus"):
+        dataset_module._validate_formal_coverage(knowledge_rows, missing_bucket_splits)
 
 
 def test_build_sft_dataset_keeps_sources_and_uses_current_harness(
@@ -111,14 +242,10 @@ cost: 1
         output_root=tmp_path / "dataset",
     )
 
-    assert result.train_path == tmp_path / "dataset/train.jsonl"
-    assert result.dev_path == tmp_path / "dataset/validation/dev.jsonl"
-    assert result.test_path == tmp_path / "dataset/eval/test.jsonl"
-    rows = [
-        json.loads(line)
-        for output_file in (result.train_path, result.dev_path)
-        for line in output_file.read_text(encoding="utf-8").splitlines()
-    ]
+    assert result.train_path == tmp_path / "dataset/train"
+    assert result.dev_path == tmp_path / "dataset/validation"
+    assert result.test_path == tmp_path / "dataset/eval"
+    rows = _directory_rows(result.train_path) + _directory_rows(result.dev_path)
     assert result.train_count == 1
     assert result.dev_count == 1
     assert {row["source"] for row in rows} == {"web_wiki", "human_play"}
@@ -140,18 +267,17 @@ cost: 1
         "content": "ACTION: choose_map_node 0",
     }
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["splits"] == {"train": 1, "dev": 1, "test": 0}
+    assert manifest["splits"] == {"train": 1, "validation": 1, "eval": 0}
     assert manifest["sources"] == {"human_play": 1, "web_wiki": 1}
     assert manifest["sources_by_split"] == {
         "train": {"web_wiki": 1},
-        "dev": {"human_play": 1},
-        "test": {},
+        "validation": {"human_play": 1},
+        "eval": {},
     }
-    assert manifest["human"]["dev_runs"] == ["RUN-001"]
+    assert manifest["human"]["validation_runs"] == ["RUN-001"]
     assert set(manifest["files"]) == {
-        "train.jsonl",
-        "validation/dev.jsonl",
-        "eval/test.jsonl",
+        "train/cards/ZAP.jsonl",
+        "validation/strategy/RUN-001.jsonl",
     }
 
 
@@ -191,7 +317,7 @@ cost: 1
         human_root=human,
         output_root=tmp_path / "dataset",
     )
-    row = json.loads(result.train_path.read_text(encoding="utf-8"))
+    row = _directory_rows(result.train_path)[0]
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
     assert row["sample_id"] == "mod_export/v0.107.1/cards/ZAP"
@@ -214,7 +340,20 @@ def test_validate_sft_dataset_rejects_split_changed_after_manifest(
         None: 此测试只检查发布后的 fail-closed 读取。
     """
     knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
+    (knowledge / "cards").mkdir(parents=True)
+    (knowledge / "cards/ZAP.md").write_text(
+        """---
+id: ZAP
+name: 电击
+type: card
+source: mod_export
+game_version: v0.107.1
+---
+## 效果
+生成1个闪电充能球。
+""",
+        encoding="utf-8",
+    )
     human = tmp_path / "raw/human"
     human.mkdir(parents=True)
     result = build_sft_dataset(
@@ -222,9 +361,19 @@ def test_validate_sft_dataset_rejects_split_changed_after_manifest(
         human_root=human,
         output_root=tmp_path / "dataset",
     )
-    result.train_path.write_text('{"partial":true}\n', encoding="utf-8")
+    changed = result.train_path / "cards/ZAP.jsonl"
+    changed.write_text('{"partial":true}\n', encoding="utf-8")
 
-    with pytest.raises(DatasetBuildError, match="train.jsonl.*SHA-256"):
+    with pytest.raises(DatasetBuildError, match="train/cards/ZAP.jsonl.*SHA-256"):
+        validate_sft_dataset(result.output_root)
+
+    build_sft_dataset(
+        knowledge_root=knowledge,
+        human_root=human,
+        output_root=result.output_root,
+    )
+    (result.output_root / "train.jsonl").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(DatasetBuildError, match="旧聚合.*train.jsonl"):
         validate_sft_dataset(result.output_root)
 
 
@@ -346,10 +495,7 @@ def test_build_sft_dataset_reads_curated_questions_and_keeps_battle_steps_indepe
         output_root=tmp_path / "datasets/sft",
     )
 
-    output = [
-        json.loads(line)
-        for line in result.train_path.read_text(encoding="utf-8").splitlines()
-    ]
+    output = _directory_rows(result.train_path)
     assert output[0]["messages"] == [
         {"role": "user", "content": "Q: 故障机器人的初始配置？"},
         {"role": "assistant", "content": "初始HP75，能量3。"},
@@ -432,13 +578,13 @@ def test_build_sft_dataset_excludes_training_ineligible_runs(tmp_path: Path) -> 
 def test_build_sft_dataset_holds_out_one_question_form_for_validation(
     tmp_path: Path,
 ) -> None:
-    """同一知识对象有多种问法时，固定留出一种进入验证集。
+    """显式三套问法应进入同名实体文件的三个目录。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离数据目录。
 
     Raises:
-        AssertionError: 问法没有按对象留出，或相同问题同时出现在训练和验证集。
+        AssertionError: question_role 没有决定目标分卷或文件身份。
 
     Returns:
         None: 此测试只检查知识问法分卷契约。
@@ -449,6 +595,8 @@ def test_build_sft_dataset_holds_out_one_question_form_for_validation(
         {
             "category": "cards",
             "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "train",
             "source": "mod_export+curated_override",
             "prompt": "Q: 电击的费用是多少？\nA:",
             "completion": " 1点能量。",
@@ -456,8 +604,28 @@ def test_build_sft_dataset_holds_out_one_question_form_for_validation(
         {
             "category": "cards",
             "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "train",
             "source": "mod_export+curated_override",
             "prompt": "Q: 打出电击需要几点能量？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "validation",
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 电击的基础能量消耗是什么？\nA:",
+            "completion": " 1点能量。",
+        },
+        {
+            "category": "cards",
+            "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": "eval",
+            "source": "mod_export+curated_override",
+            "prompt": "Q: 未受修正时，电击要支付多少能量？\nA:",
             "completion": " 1点能量。",
         },
     ]
@@ -474,24 +642,29 @@ def test_build_sft_dataset_holds_out_one_question_form_for_validation(
         output_root=tmp_path / "dataset",
     )
 
-    train = [json.loads(line) for line in result.train_path.read_text().splitlines()]
-    validation = [json.loads(line) for line in result.dev_path.read_text().splitlines()]
-    assert result.train_count == 1
+    train = _directory_rows(result.train_path)
+    validation = _directory_rows(result.dev_path)
+    evaluation = _directory_rows(result.test_path)
+    assert result.train_count == 2
     assert result.dev_count == 1
-    assert train[0]["object_id"] == validation[0]["object_id"] == "ZAP"
+    assert result.test_count == 1
+    assert {row["object_id"] for row in train + validation + evaluation} == {"ZAP"}
     assert train[0]["messages"][0] != validation[0]["messages"][0]
+    assert (result.train_path / "cards/ZAP.jsonl").is_file()
+    assert (result.dev_path / "cards/ZAP.jsonl").is_file()
+    assert (result.test_path / "cards/ZAP.jsonl").is_file()
 
 
-def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
+def test_build_sft_dataset_honors_generated_arithmetic_question_roles(
     tmp_path: Path,
 ) -> None:
-    """独立 seed 生成的算术验证题应进入验证目录而不是训练集。
+    """独立 seed 生成的三套算术题应进入各自目录。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离数据目录。
 
     Raises:
-        AssertionError: 算术行的显式 train/dev 用途被自动问法留出覆盖。
+        AssertionError: 算术行的显式用途没有映射到三个目录。
 
     Returns:
         None: 此测试只检查算术候选的分卷提示。
@@ -499,6 +672,7 @@ def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
     knowledge = tmp_path / "generated-v0.107.1/arithmetic"
     (knowledge / "train").mkdir(parents=True)
     (knowledge / "validation").mkdir()
+    (knowledge / "eval").mkdir()
     common = {
         "category": "arithmetic",
         "object_id": "block_math",
@@ -509,7 +683,8 @@ def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
         json.dumps(
             {
                 **common,
-                "split": "train",
+                "fact_id": "arithmetic/block_math/train-0001",
+                "question_role": "train",
                 "prompt": "Q: 训练算术题。请写出计算过程。\nA:",
             },
             ensure_ascii=False,
@@ -521,8 +696,22 @@ def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
         json.dumps(
             {
                 **common,
-                "split": "dev",
+                "fact_id": "arithmetic/block_math/validation-0001",
+                "question_role": "validation",
                 "prompt": "Q: 验证算术题。请写出计算过程。\nA:",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (knowledge / "eval/cot.jsonl").write_text(
+        json.dumps(
+            {
+                **common,
+                "fact_id": "arithmetic/block_math/eval-0001",
+                "question_role": "eval",
+                "prompt": "Q: 最终算术题。请写出计算过程。\nA:",
             },
             ensure_ascii=False,
         )
@@ -538,27 +727,31 @@ def test_build_sft_dataset_honors_generated_arithmetic_validation_split(
         output_root=tmp_path / "dataset",
     )
 
-    train = json.loads(result.train_path.read_text(encoding="utf-8"))
-    validation = json.loads(result.dev_path.read_text(encoding="utf-8"))
+    train = _directory_rows(result.train_path)[0]
+    validation = _directory_rows(result.dev_path)[0]
+    evaluation = _directory_rows(result.test_path)[0]
     assert train["messages"][0]["content"].startswith("Q: 训练")
     assert validation["messages"][0]["content"].startswith("Q: 验证")
-    assert train["source"] == validation["source"] == "synthetic_arithmetic"
+    assert evaluation["messages"][0]["content"].startswith("Q: 最终")
+    assert {train["source"], validation["source"], evaluation["source"]} == {
+        "synthetic_arithmetic"
+    }
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["sources_by_split"] == {
         "train": {"synthetic_arithmetic": 1},
-        "dev": {"synthetic_arithmetic": 1},
-        "test": {},
+        "validation": {"synthetic_arithmetic": 1},
+        "eval": {"synthetic_arithmetic": 1},
     }
 
 
 def test_build_sft_dataset_applies_explicit_mix_recipe(tmp_path: Path) -> None:
-    """正式构建应在分卷后应用 E3 类别上限并记录实际配方。
+    """正式构建应记录只限制人类动作的混合配方。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离目录。
 
     Raises:
-        AssertionError: 远古者进入数据集、卡牌上限失效或 manifest 未记录配方。
+        AssertionError: 知识被混合器删除或 manifest 未记录配方。
 
     Returns:
         None: 此测试只构建最小知识数据集。
@@ -587,14 +780,6 @@ def test_build_sft_dataset_applies_explicit_mix_recipe(tmp_path: Path) -> None:
     mix.write_text(
         """seed = 3
 
-[knowledge.train]
-cards = 1
-ancients = 0
-
-[knowledge.dev]
-cards = 0
-ancients = 0
-
 [human.train_max_per_action]
 """,
         encoding="utf-8",
@@ -610,16 +795,12 @@ ancients = 0
     except TypeError as exc:
         pytest.fail(f"尚未接入 E3 混合配方: {exc}")
 
-    rows = [json.loads(line) for line in result.train_path.read_text().splitlines()]
+    rows = _directory_rows(result.train_path)
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert len(rows) == 1
-    assert rows[0]["category"] == "cards"
+    assert len(rows) == 3
+    assert {row["category"] for row in rows} == {"cards", "ancients"}
     assert manifest["mix"] == {
         "seed": 3,
-        "knowledge_limits": {
-            "train": {"cards": 1, "ancients": 0},
-            "dev": {"cards": 0, "ancients": 0},
-        },
         "human_train_action_limits": {},
     }
 
@@ -721,74 +902,44 @@ def test_build_sft_dataset_rejects_unassigned_eligible_run(tmp_path: Path) -> No
         )
 
 
-def test_build_sft_dataset_rejects_probe_prompt_in_training(tmp_path: Path) -> None:
-    """训练问题与知识考试卷完全相同时必须拒绝发布数据集。
+def test_build_sft_dataset_rejects_prompt_reused_across_roles(tmp_path: Path) -> None:
+    """相同知识问题不能同时进入训练和最终评测。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离数据目录。
 
     Raises:
-        AssertionError: 被训练集污染的 probe 没有触发失败。
+        AssertionError: 跨用途重复问题没有触发失败。
 
     Returns:
-        None: 此测试只检查跨集合问题泄漏。
+        None: 此测试只检查三棵目录之间的问题泄漏。
     """
     knowledge = tmp_path / "generated-v0.107.1/cards"
     knowledge.mkdir(parents=True)
-    knowledge_rows = [
+    rows = [
         {
             "category": "cards",
             "object_id": "ZAP",
+            "fact_id": "cards/ZAP/cost",
+            "question_role": role,
             "source": "mod_export+curated_override",
             "prompt": "Q: 电击的费用是多少？\nA:",
             "completion": " 1点能量。",
-        },
-        {
-            "category": "cards",
-            "object_id": "DEFEND",
-            "source": "mod_export+curated_override",
-            "prompt": "Q: 防御能提供多少格挡？\nA:",
-            "completion": " 5点格挡。",
-        },
+        }
+        for role in ("train", "eval")
     ]
-    (knowledge / "cards.jsonl").write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in knowledge_rows),
-        encoding="utf-8",
-    )
-    probes = tmp_path / "eval/knowledge"
-    probes.mkdir(parents=True)
-    probe_rows = [
-        {
-            "kind": "form_holdout",
-            "category": "cards",
-            "object_id": "ZAP",
-            "prompt": "电击的费用是多少？",
-            "reference": "1点能量。",
-        },
-        {
-            "kind": "form_holdout",
-            "category": "cards",
-            "object_id": "DEFEND",
-            "prompt": "防御能提供多少格挡？",
-            "reference": "5点格挡。",
-        },
-    ]
-    (probes / "probes_recall.jsonl").write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in probe_rows),
+    (knowledge / "ZAP.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
     human = tmp_path / "raw/human"
     human.mkdir(parents=True)
 
-    with pytest.raises(
-        DatasetBuildError,
-        match="2 个 probe.*电击的费用.*防御能提供多少格挡",
-    ):
+    with pytest.raises(DatasetBuildError, match="知识问题跨分卷重复.*电击的费用"):
         build_sft_dataset(
             knowledge_root=knowledge.parent,
             human_root=human,
             output_root=tmp_path / "dataset",
-            knowledge_probe_root=probes,
         )
 
 

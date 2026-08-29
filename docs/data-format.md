@@ -137,21 +137,26 @@ Mod 原始 `acts` 负责四张地图的分级怪池，生成后统一归入
 
 ```text
 data/datasets/sft/
-├── train.jsonl
-├── validation/
-│   └── dev.jsonl
-├── eval/
-│   ├── test.jsonl
-│   └── knowledge/
 ├── manifest.json
+├── train/
+│   ├── arithmetic/*.jsonl
+│   ├── cards/*.jsonl
+│   ├── ...其余知识类别/*.jsonl
+│   ├── combat/<run-id>/<battle-key>.jsonl
+│   └── strategy/<run-id>.jsonl
+├── validation/
+│   └── 与 train 相同的目录骨架
+└── eval/
+    └── 与 train 相同的目录骨架
 ```
 
 知识问答和每个人类动作各占一行。行为行统一为独立的
 `system/user/assistant`，通过当前 Harness 从 raw 重新生成观测和规范
 `ACTION:`。Dataset 不缓存 token ID，也不把一场战斗拼成增长的多轮历史。
-同一知识事实存在多种问题表述时，一种表述进入验证集，其余进入训练集；独立知识
-考试卷与训练/验证问题发生精确重合时拒绝发布。算术候选已显式标记 train/dev
-用途：验证题使用独立随机种子，不是从训练题中随机抽走。
+知识候选使用可读 `fact_id` 和显式 `question_role`；每个正式事实至少有一条 train
+问法，并恰好有一条 validation 和 eval 问法。三种问题原文发生精确重合时拒绝
+发布。算术同样显式标记三种用途，并使用互不相同的随机种子；`case_id` 由题型和
+完整计算语义/操作数生成，任何运算案例跨分卷重合也会被拒绝。
 
 重建命令为：
 

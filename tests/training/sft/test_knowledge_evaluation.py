@@ -1,10 +1,71 @@
-"""验证 SFT 知识与组合探针的稳定评分口径。"""
+"""验证 SFT eval 树知识与组合题的加载和稳定评分口径。"""
+
+import json
+from pathlib import Path
 
 from play_sts2.training.sft.knowledge_evaluation import (
     _report_payload,
+    load_knowledge_probes,
     score_compositional_answer,
     score_recall_answer,
 )
+
+
+def test_load_knowledge_probes_reads_eval_tree_and_skips_behavior(
+    tmp_path: Path,
+) -> None:
+    """知识评测器应读取类别文件并跳过 combat/strategy。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离 eval 目录。
+
+    Raises:
+        AssertionError: 新目录格式没有转换成知识与算术题。
+
+    Returns:
+        None: 此测试不加载模型。
+    """
+    root = tmp_path / "eval"
+    fixtures = {
+        "cards/ZAP.jsonl": {
+            "category": "cards",
+            "object_id": "ZAP",
+            "messages": [
+                {"role": "user", "content": "Q: 电击是什么？\nA:"},
+                {"role": "assistant", "content": "生成闪电。"},
+            ],
+        },
+        "arithmetic/block_math.jsonl": {
+            "category": "arithmetic",
+            "object_id": "block_math",
+            "messages": [
+                {"role": "user", "content": "Q: 伤害结算？\nA:"},
+                {"role": "assistant", "content": "剩余18点。"},
+            ],
+        },
+        "combat/RUN/battle.jsonl": {
+            "category": "behavior",
+            "object_id": "ignored",
+            "messages": [
+                {"role": "user", "content": "状态"},
+                {"role": "assistant", "content": "ACTION: end_turn"},
+            ],
+        },
+    }
+    for relative, row in fixtures.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(row, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    probes = load_knowledge_probes(root)
+
+    assert [(probe.kind, probe.prompt) for probe in probes] == [
+        ("form_holdout", "电击是什么？"),
+        ("block_math", "伤害结算？"),
+    ]
 
 
 def test_score_recall_answer_requires_complete_reference() -> None:

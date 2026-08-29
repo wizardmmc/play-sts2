@@ -67,6 +67,52 @@ class GeneratedReply:
     truncated: bool
 
 
+def _resolve_evaluation_split(split: str) -> str:
+    """把公开分卷名称转换成内部兼容键。
+
+    Args:
+        split (str): ``validation``/``dev`` 或 ``eval``/``test``。
+
+    Raises:
+        SftTrainingError: 分卷不支持。
+
+    Returns:
+        str: ``dev`` 或 ``test``。
+    """
+    aliases = {"validation": "dev", "dev": "dev", "eval": "test", "test": "test"}
+    try:
+        return aliases[split]
+    except KeyError as exc:
+        raise SftTrainingError(f"评测只允许 validation/eval: {split}") from exc
+
+
+def _manifest_split_files(
+    manifest: Mapping[str, Any],
+    split: str,
+) -> dict[str, Any]:
+    """从数据 manifest 取得某棵分卷目录的全部文件记录。
+
+    Args:
+        manifest (Mapping[str, Any]): 已通过完整性校验的数据清单。
+        split (str): 内部 ``dev`` 或 ``test`` 分卷键。
+
+    Raises:
+        SftTrainingError: manifest 缺少文件映射。
+
+    Returns:
+        dict[str, Any]: 相对路径到行数与摘要记录的映射。
+    """
+    files = manifest.get("files")
+    if not isinstance(files, Mapping):
+        raise SftTrainingError("SFT manifest 缺少 files")
+    prefix = dataset_split_path(Path(), split).as_posix() + "/"
+    return {
+        str(name): record
+        for name, record in files.items()
+        if str(name).startswith(prefix)
+    }
+
+
 def chunked_masked_stats(
     lm_head: Any,
     hidden: Any,
@@ -220,8 +266,7 @@ def evaluate_sft_loss(
     Returns:
         dict[str, object]: 含来源、耗时和 teacher-forced 指标的报告。
     """
-    if split not in {"dev", "test"}:
-        raise SftTrainingError(f"评测只允许 dev/test: {split}")
+    resolved_split = _resolve_evaluation_split(split)
     if max_samples is not None and max_samples <= 0:
         raise SftTrainingError("max_samples 必须为正数")
     dataset_manifest = validate_sft_dataset(config.dataset_root)
@@ -232,7 +277,7 @@ def evaluate_sft_loss(
         )
     tokenizer, model, device = _load_evaluation_model(config, adapter_path)
     samples = load_tokenized_samples(
-        dataset_split_path(config.dataset_root, split),
+        dataset_split_path(config.dataset_root, resolved_split),
         tokenizer,
         max_length=config.max_length,
     )
@@ -255,9 +300,7 @@ def evaluate_sft_loss(
             "output": str(output_path),
             "device": device,
             "elapsed_seconds": time.monotonic() - started,
-            "dataset_file": dataset_manifest["files"][
-                dataset_split_path(Path(), split).as_posix()
-            ],
+            "dataset_files": _manifest_split_files(dataset_manifest, resolved_split),
         }
     )
     _write_json(output_path, summary)
@@ -320,10 +363,10 @@ def evaluate_rows(
     output_path: Path,
     max_samples: int | None = None,
 ) -> dict[str, int | float]:
-    """逐行生成 dev/test 回复并保存可复查的对照结果。
+    """递归读取分卷目录并逐行生成可复查的对照结果。
 
     Args:
-        dataset_path (Path): 待读取的可读 SFT JSONL 分卷。
+        dataset_path (Path): 待读取的 SFT 目录或兼容单个 JSONL。
         generate (Callable[[list[dict[str, str]]], GeneratedReply]): 接收
             prompt 消息并返回模型文本与截断状态的生成函数。
         output_path (Path): 逐样本评测 JSONL 路径。
@@ -339,51 +382,57 @@ def evaluate_rows(
     if max_samples is not None and max_samples <= 0:
         raise SftTrainingError("max_samples 必须为正数")
     records: list[dict[str, object]] = []
-    with Path(dataset_path).open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SftTrainingError(
-                    f"无效评测 JSONL: {dataset_path}:{line_number}"
-                ) from exc
-            if not isinstance(row, Mapping):
-                raise SftTrainingError(f"评测行不是对象: {dataset_path}:{line_number}")
-            sample_id = row.get("sample_id")
-            source = row.get("source")
-            messages = row.get("messages")
-            if (
-                not isinstance(sample_id, str)
-                or not isinstance(source, str)
-                or not isinstance(messages, Sequence)
-                or isinstance(messages, (str, bytes))
-            ):
-                raise SftTrainingError(
-                    f"评测行缺少样本字段: {dataset_path}:{line_number}"
+    paths = (
+        sorted(Path(dataset_path).rglob("*.jsonl"))
+        if Path(dataset_path).is_dir()
+        else [Path(dataset_path)]
+    )
+    for path in paths:
+        with path.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise SftTrainingError(
+                        f"无效评测 JSONL: {path}:{line_number}"
+                    ) from exc
+                if not isinstance(row, Mapping):
+                    raise SftTrainingError(f"评测行不是对象: {path}:{line_number}")
+                sample_id = row.get("sample_id")
+                source = row.get("source")
+                messages = row.get("messages")
+                if (
+                    not isinstance(sample_id, str)
+                    or not isinstance(source, str)
+                    or not isinstance(messages, Sequence)
+                    or isinstance(messages, (str, bytes))
+                ):
+                    raise SftTrainingError(f"评测行缺少样本字段: {path}:{line_number}")
+                normalized = normalize_messages(messages, sample_id)
+                expected = normalized[-1]["content"]
+                reply = generate(normalized[:-1])
+                score = score_generation(
+                    expected=expected,
+                    generated=reply.text,
+                    source=source,
                 )
-            normalized = normalize_messages(messages, sample_id)
-            expected = normalized[-1]["content"]
-            reply = generate(normalized[:-1])
-            score = score_generation(
-                expected=expected,
-                generated=reply.text,
-                source=source,
-            )
-            records.append(
-                {
-                    "sample_id": sample_id,
-                    "source": source,
-                    "expected": expected,
-                    "generated": reply.text,
-                    "truncated": reply.truncated,
-                    "exact_match": score.exact_match,
-                    "action_shape_valid": score.action_shape_valid,
-                }
-            )
-            if max_samples is not None and len(records) >= max_samples:
-                break
+                records.append(
+                    {
+                        "sample_id": sample_id,
+                        "source": source,
+                        "expected": expected,
+                        "generated": reply.text,
+                        "truncated": reply.truncated,
+                        "exact_match": score.exact_match,
+                        "action_shape_valid": score.action_shape_valid,
+                    }
+                )
+                if max_samples is not None and len(records) >= max_samples:
+                    break
+        if max_samples is not None and len(records) >= max_samples:
+            break
     if not records:
         raise SftTrainingError(f"评测分卷为空: {dataset_path}")
     output_path = Path(output_path)
@@ -441,8 +490,7 @@ def evaluate_sft(
     """
     import torch
 
-    if split not in {"dev", "test"}:
-        raise SftTrainingError(f"评测只允许 dev/test: {split}")
+    resolved_split = _resolve_evaluation_split(split)
     dataset_manifest = validate_sft_dataset(config.dataset_root)
     adapter_path = Path(adapter_path)
     if output_path is None:
@@ -486,7 +534,7 @@ def evaluate_sft(
 
     summary: dict[str, object] = dict(
         evaluate_rows(
-            dataset_split_path(config.dataset_root, split),
+            dataset_split_path(config.dataset_root, resolved_split),
             generate,
             output_path=output_path,
             max_samples=max_samples,
@@ -499,9 +547,7 @@ def evaluate_sft(
             "split": split,
             "output": str(output_path),
             "device": device,
-            "dataset_file": dataset_manifest["files"][
-                dataset_split_path(Path(), split).as_posix()
-            ],
+            "dataset_files": _manifest_split_files(dataset_manifest, resolved_split),
         }
     )
     _write_json(output_path.with_suffix(".summary.json"), summary)

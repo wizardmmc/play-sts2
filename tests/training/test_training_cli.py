@@ -306,7 +306,7 @@ def test_eval_sft_command_uses_named_split(
             "--adapter",
             "models/adapters/demo",
             "--split",
-            "test",
+            "eval",
             "--max-samples",
             "2",
             "--output",
@@ -319,7 +319,7 @@ def test_eval_sft_command_uses_named_split(
         (
             config,
             Path("models/adapters/demo"),
-            "test",
+            "eval",
             2,
             Path("runs/eval/demo.jsonl"),
         )
@@ -361,7 +361,7 @@ def test_eval_sft_loss_command_routes_teacher_forced_report(
             "--adapter",
             "models/adapters/e2",
             "--split",
-            "dev",
+            "validation",
             "--max-samples",
             "3",
             "--output",
@@ -374,7 +374,7 @@ def test_eval_sft_loss_command_routes_teacher_forced_report(
         (
             config,
             Path("models/adapters/e2"),
-            "dev",
+            "validation",
             3,
             Path("runs/eval/e2-dev-loss.json"),
         )
@@ -431,7 +431,7 @@ def test_eval_sft_knowledge_command_uses_migrated_probe_set(
     assert calls == [
         (
             Path("models/merged/e2"),
-            Path("data/datasets/sft/eval/knowledge"),
+            Path("data/datasets/sft/eval"),
             Path("runs/eval/e2-knowledge.json"),
             "auto",
             10,

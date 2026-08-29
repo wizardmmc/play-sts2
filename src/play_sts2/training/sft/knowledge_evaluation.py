@@ -90,10 +90,10 @@ def load_knowledge_probes(
     *,
     limit: int | None = None,
 ) -> list[KnowledgeProbe]:
-    """读取 recall/compositional 探针并保持分层截断。
+    """从新版 eval 目录树读取知识与算术 SFT 行并保持分层截断。
 
     Args:
-        root (Path): 含 recall 与 compositional 文件的目录。
+        root (Path): SFT ``eval`` 分卷目录。
         limit (int | None): 可选总题数；按原类别比例保留组合题。
 
     Raises:
@@ -106,8 +106,19 @@ def load_knowledge_probes(
     if limit is not None and limit <= 0:
         raise SftTrainingError("知识探针 limit 必须为正数")
     root = Path(root)
-    recall = _read_probe_file(root / "probes_recall.jsonl", "form_holdout")
-    compositional = _read_probe_file(root / "probes_compositional.jsonl", None)
+    if not root.is_dir():
+        raise SftTrainingError(f"SFT eval 目录不存在: {root}")
+    recall: list[KnowledgeProbe] = []
+    compositional: list[KnowledgeProbe] = []
+    for path in sorted(root.rglob("*.jsonl")):
+        relative = path.relative_to(root)
+        if relative.parts[0] in {"combat", "strategy"}:
+            continue
+        loaded = _read_sft_probe_file(path)
+        if relative.parts[0] == "arithmetic":
+            compositional.extend(loaded)
+        else:
+            recall.extend(loaded)
     probes = recall + compositional
     if not probes:
         raise SftTrainingError(f"知识探针为空: {root}")
@@ -124,7 +135,7 @@ def load_knowledge_probes(
 
 def run_knowledge_evaluation(
     model_path: Path,
-    probes_root: Path,
+    eval_root: Path,
     output_path: Path,
     *,
     device: str = "auto",
@@ -135,7 +146,7 @@ def run_knowledge_evaluation(
 
     Args:
         model_path (Path): 待评测的本地合并模型目录。
-        probes_root (Path): recall/compositional 探针目录。
+        eval_root (Path): 新版 SFT eval 分卷目录。
         output_path (Path): 完整 JSON 报告路径。
         device (str): ``auto``、``mps`` 或 ``cpu``。
         limit (int | None): 可选的分层冒烟题数。
@@ -153,7 +164,7 @@ def run_knowledge_evaluation(
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    probes = load_knowledge_probes(probes_root, limit=limit)
+    probes = load_knowledge_probes(eval_root, limit=limit)
     resolved_device = resolve_device(device)
     dtype = torch.bfloat16 if resolved_device == "mps" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(
@@ -232,12 +243,11 @@ def run_knowledge_evaluation(
     return summary
 
 
-def _read_probe_file(path: Path, forced_kind: str | None) -> list[KnowledgeProbe]:
-    """读取一个 JSONL 探针文件并转换为类型化对象。
+def _read_sft_probe_file(path: Path) -> list[KnowledgeProbe]:
+    """把一个 eval SFT JSONL 转换为知识评测题。
 
     Args:
-        path (Path): recall 或 compositional JSONL。
-        forced_kind (str | None): recall 文件使用的固定类别。
+        path (Path): 新版 eval 树中的知识或算术 JSONL。
 
     Raises:
         SftTrainingError: 某行字段缺失或 JSON 无效。
@@ -257,13 +267,34 @@ def _read_probe_file(path: Path, forced_kind: str | None) -> list[KnowledgeProbe
                 raise SftTrainingError(f"无效知识探针: {path}:{line_number}") from exc
             if not isinstance(value, Mapping):
                 raise SftTrainingError(f"知识探针行不是对象: {path}:{line_number}")
-            kind = forced_kind or value.get("kind")
-            prompt = value.get("prompt")
-            reference = value.get("reference")
-            if not all(
-                isinstance(item, str) and item for item in (kind, prompt, reference)
+            messages = value.get("messages")
+            if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes)):
+                raise SftTrainingError(f"知识评测行缺少 messages: {path}:{line_number}")
+            users = [
+                message.get("content")
+                for message in messages
+                if isinstance(message, Mapping) and message.get("role") == "user"
+            ]
+            answers = [
+                message.get("content")
+                for message in messages
+                if isinstance(message, Mapping) and message.get("role") == "assistant"
+            ]
+            if (
+                len(users) != 1
+                or len(answers) != 1
+                or not isinstance(users[0], str)
+                or not isinstance(answers[0], str)
             ):
-                raise SftTrainingError(f"知识探针字段无效: {path}:{line_number}")
+                raise SftTrainingError(f"知识评测消息无效: {path}:{line_number}")
+            category = _optional_string(value.get("category"))
+            object_id = _optional_string(value.get("object_id"))
+            if category is None or object_id is None:
+                raise SftTrainingError(f"知识评测身份无效: {path}:{line_number}")
+            prompt = re.sub(r"^\s*Q:\s*", "", users[0])
+            prompt = re.sub(r"\s*A:\s*$", "", prompt).strip()
+            reference = answers[0].strip()
+            kind = object_id if category == "arithmetic" else "form_holdout"
             answer_numbers = value.get("answer_numbers", ())
             if not isinstance(answer_numbers, Sequence) or isinstance(
                 answer_numbers, (str, bytes)
@@ -274,8 +305,8 @@ def _read_probe_file(path: Path, forced_kind: str | None) -> list[KnowledgeProbe
                     kind=kind,
                     prompt=prompt,
                     reference=reference,
-                    category=_optional_string(value.get("category")),
-                    object_id=_optional_string(value.get("object_id")),
+                    category=category,
+                    object_id=object_id,
                     answer_choice=_optional_string(value.get("answer_choice")),
                     answer_numbers=tuple(int(item) for item in answer_numbers),
                 )

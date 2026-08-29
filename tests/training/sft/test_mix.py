@@ -1,6 +1,8 @@
-"""验证 E3 数据混合只压缩高频项并保留稀有行为。"""
+"""验证 SFT 混合保留全部知识并只压缩高频人类行为。"""
 
 from pathlib import Path
+
+import pytest
 
 from play_sts2.training import sft
 
@@ -48,11 +50,11 @@ def _human(sample_id: str, action: str) -> dict[str, object]:
     }
 
 
-def test_apply_sft_mix_excludes_unselected_knowledge_and_keeps_rare_actions() -> None:
-    """E3 混合应按类别限量知识，只裁剪训练集中的高频行为。
+def test_apply_sft_mix_keeps_all_knowledge_and_rare_actions() -> None:
+    """混合器应保留全部知识，只裁剪训练集中的高频行为。
 
     Raises:
-        AssertionError: 远古者未排除、稀有动作被裁剪或验证行为被改写。
+        AssertionError: 知识、稀有动作或留出行为被改写。
 
     Returns:
         None: 此测试只检查内存中的确定性混合。
@@ -82,30 +84,28 @@ def test_apply_sft_mix_excludes_unselected_knowledge_and_keeps_rare_actions() ->
     mixed = apply_sft_mix(
         splits,
         seed=7,
-        knowledge_limits={
-            "train": {"cards": 1, "characters": -1, "ancients": 0},
-            "dev": {"cards": 0, "characters": -1, "ancients": 0},
-        },
         human_train_action_limits={"play_card": 1},
     )
 
     train_ids = {row["sample_id"] for row in mixed["train"]}
-    assert len(train_ids & {"card-1", "card-2"}) == 1
-    assert {"character-1", "potion-1", "heal-1"} <= train_ids
-    assert "ancient-1" not in train_ids
+    assert {
+        "card-1",
+        "card-2",
+        "character-1",
+        "ancient-1",
+        "potion-1",
+        "heal-1",
+    } <= train_ids
     assert len(train_ids & {"play-1", "play-2"}) == 1
-    assert [row["sample_id"] for row in mixed["dev"]] == [
-        "dev-character-1",
-        "dev-play-1",
-    ]
+    assert mixed["dev"] == splits["dev"]
     assert mixed["test"] == splits["test"]
 
 
-def test_apply_sft_mix_keeps_dev_only_for_retained_train_facts() -> None:
-    """自动验证问法必须对应混合后仍在训练集里的同一事实。
+def test_apply_sft_mix_is_deterministic_without_knowledge_limits() -> None:
+    """不限制行为时三分卷必须原样保留并可重复执行。
 
     Raises:
-        AssertionError: 验证集保留了训练集中已经抽掉的事实。
+        AssertionError: 知识被抽掉或重复执行结果变化。
 
     Returns:
         None: 此测试只检查事实对齐和重复执行结果。
@@ -123,19 +123,17 @@ def test_apply_sft_mix_keeps_dev_only_for_retained_train_facts() -> None:
     }
     arguments = {
         "seed": 7,
-        "knowledge_limits": {"train": {"cards": 1}, "dev": {"cards": -1}},
         "human_train_action_limits": {},
     }
 
     mixed = sft.apply_sft_mix(splits, **arguments)
-    retained_fact = mixed["train"][0]["object_id"]
 
-    assert [row["object_id"] for row in mixed["dev"]] == [retained_fact]
+    assert mixed == splits
     assert sft.apply_sft_mix(splits, **arguments) == mixed
 
 
 def test_load_sft_mix_reads_small_toml_recipe(tmp_path: Path) -> None:
-    """混合配方只需种子、知识上限和高频动作上限。
+    """混合配方只需种子和高频动作上限。
 
     Args:
         tmp_path (Path): Pytest 提供的隔离目录。
@@ -152,15 +150,7 @@ def test_load_sft_mix_reads_small_toml_recipe(tmp_path: Path) -> None:
     path.write_text(
         """seed = 20260828
 
-[knowledge.train]
-characters = -1
-ancients = 0
-
-[knowledge.dev]
-characters = -1
-ancients = 0
-
-[human.train_max_per_action]
+    [human.train_max_per_action]
 play_card = 600
 """,
         encoding="utf-8",
@@ -169,8 +159,32 @@ play_card = 600
     config = load_sft_mix(path)
 
     assert config.seed == 20260828
-    assert config.knowledge_limits == {
-        "train": {"characters": -1, "ancients": 0},
-        "dev": {"characters": -1, "ancients": 0},
-    }
     assert config.human_train_action_limits == {"play_card": 600}
+
+
+def test_load_sft_mix_rejects_knowledge_limits(tmp_path: Path) -> None:
+    """旧知识上限不能重新引入事实覆盖缺口。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 配方仍允许按类别截断知识。
+
+    Returns:
+        None: 此测试只检查配置边界。
+    """
+    path = tmp_path / "mix.toml"
+    path.write_text(
+        """seed = 1
+
+[knowledge.train]
+cards = 1
+
+[human.train_max_per_action]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(sft.DatasetBuildError, match="不能再设置知识类别上限"):
+        sft.load_sft_mix(path)

@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     arithmetic = subparsers.add_parser(
         "generate-arithmetic",
-        help="从当前项目实战意图生成互斥的训练与验证算术候选",
+        help="从当前项目实战意图生成题面和运算案例互斥的三用途算术候选",
     )
     arithmetic.add_argument(
         "--human-root",
@@ -96,13 +96,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/game_knowledge/generated-v0.107.1"),
         help="知识与算术候选输出目录",
     )
-    arithmetic.add_argument(
-        "--probes-root",
-        type=Path,
-        default=Path("data/datasets/sft/eval/knowledge"),
-        help="生成时必须排除的最终知识考试目录",
-    )
-
     reviewer = subparsers.add_parser(
         "review",
         help="生成人工可读的缺口与特殊对象审计报告",
@@ -135,7 +128,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         arithmetic_result = generate_arithmetic_candidates(
             human_root=args.human_root,
             output_root=args.output_root,
-            probe_root=args.probes_root,
         )
         print(
             json.dumps(
@@ -143,6 +135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "output_root": str(arithmetic_result.output_root),
                     "train": arithmetic_result.train_count,
                     "validation": arithmetic_result.validation_count,
+                    "evaluation": arithmetic_result.evaluation_count,
                     "buckets": arithmetic_result.buckets,
                 },
                 ensure_ascii=False,
