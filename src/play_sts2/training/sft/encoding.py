@@ -161,7 +161,10 @@ def load_sft_config(path: Path) -> SftConfig:
         invalid.append("warmup_steps")
     if config.checkpoint_steps < 0:
         invalid.append("checkpoint_steps")
-    if invalid or config.device not in {"auto", "mps", "cpu"}:
+    cuda_device = config.device == "cuda" or (
+        config.device.startswith("cuda:") and config.device[5:].isdigit()
+    )
+    if invalid or (config.device not in {"auto", "mps", "cpu"} and not cuda_device):
         detail = ", ".join(invalid) if invalid else f"device={config.device}"
         raise SftTrainingError(f"SFT 配置值无效: {detail}")
     return config

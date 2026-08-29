@@ -184,6 +184,41 @@ def test_load_sft_config_reads_minimal_toml(tmp_path: Path) -> None:
     )
 
 
+def test_load_sft_config_accepts_explicit_cuda_device(tmp_path: Path) -> None:
+    """生成式评测应能复用显式指定 CUDA 卡号的 SFT 配置。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离配置目录。
+
+    Raises:
+        AssertionError: 通用 SFT 配置加载器拒绝合法的 CUDA 设备。
+
+    Returns:
+        None: 此测试只检查设备配置契约。
+    """
+    config_path = tmp_path / "sft-cuda.toml"
+    config_path.write_text(
+        """base_model = "models/base/qwen3.5-4b"
+        dataset_root = "data/datasets/sft"
+        adapter_root = "models/adapters"
+        runs_root = "runs/sft"
+        device = "cuda:2"
+        epochs = 2
+        learning_rate = 0.0001
+        max_length = 1024
+        gradient_accumulation_steps = 4
+        seed = 7
+        lora_rank = 8
+        lora_alpha = 16
+        """,
+        encoding="utf-8",
+    )
+
+    config = load_sft_config(config_path)
+
+    assert config.device == "cuda:2"
+
+
 def test_encode_messages_only_supervises_final_assistant() -> None:
     """prompt token 使用忽略标签，assistant 内容和结尾参与损失。
 
