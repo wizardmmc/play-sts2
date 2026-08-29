@@ -79,6 +79,33 @@ def test_parser_allows_explicit_rl_debug_actions() -> None:
     assert args.enable_debug_actions is True
 
 
+def test_resolve_game_executable_makes_relative_app_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """相对应用路径必须在游戏切换到隔离 HOME 前固定为绝对路径。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pytest 提供的工作目录替换工具。
+        tmp_path (Path): 模拟用户执行命令的项目目录。
+
+    Raises:
+        AssertionError: 可执行文件仍依赖子进程的工作目录。
+
+    Returns:
+        None: 此测试只验证路径解析时点。
+    """
+    cli = importlib.import_module("play_sts2.game_cli")
+    monkeypatch.chdir(tmp_path)
+
+    executable = cli._resolve_game_executable(Path(".runtime/teacher.app"))
+
+    assert executable == (
+        tmp_path / ".runtime/teacher.app/Contents/MacOS/Slay the Spire 2"
+    )
+    assert executable.is_absolute()
+
+
 def test_main_launches_isolated_game_and_waits_for_exit(
     monkeypatch: Any,
     tmp_path: Path,

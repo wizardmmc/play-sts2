@@ -365,15 +365,15 @@ internal static class GameDataExportService
     {
         // 部分真实战斗生物由事件、遗物或角色机制召唤，因此不会出现在
         // EncounterModel.AllPossibleMonsters 中，必须显式补入。
-        var auxiliaryCreatures = new MonsterModel[]
+        var auxiliaryCreatures = new MonsterModel?[]
         {
-            ModelDb.Monster<Byrdpip>(),
-            ModelDb.Monster<Osty>(),
-            ModelDb.Monster<PaelsLegion>(),
-            ModelDb.Monster<TheAdversaryMkOne>(),
-            ModelDb.Monster<TheAdversaryMkTwo>(),
-            ModelDb.Monster<TheAdversaryMkThree>()
-        };
+            GetRegisteredMonster<Byrdpip>(),
+            GetRegisteredMonster<Osty>(),
+            GetRegisteredMonster<PaelsLegion>(),
+            GetRegisteredMonster<TheAdversaryMkOne>(),
+            GetRegisteredMonster<TheAdversaryMkTwo>(),
+            GetRegisteredMonster<TheAdversaryMkThree>()
+        }.OfType<MonsterModel>();
         return GetKnowledgeEncounters()
             .SelectMany(encounter => encounter.AllPossibleMonsters)
             .Concat(ModelDb.Monsters)
@@ -397,7 +397,7 @@ internal static class GameDataExportService
                 model_type = encounter.GetType().FullName,
                 room_type = encounter.RoomType.ToString(),
                 is_weak = encounter.IsWeak,
-                is_debug = encounter.IsDebugEncounter,
+                is_debug = IsDebugEncounter(encounter),
                 should_give_rewards = encounter.ShouldGiveRewards,
                 monster_list_kind = "all_possible_types",
                 tags = encounter.Tags
@@ -426,19 +426,41 @@ internal static class GameDataExportService
     {
         // ModelDb.AllEncounters 只包含 Act 地图遭遇；事件战同样真实可达，因此按
         // 固定版本显式列举，避免遗漏它们或把所有内部测试遭遇一并放入。
-        var eventEncounters = new EncounterModel[]
+        var legacyEventEncounters = new EncounterModel?[]
         {
-            ModelDb.Encounter<BattlewornDummyEventEncounter>(),
-            ModelDb.Encounter<DenseVegetationEventEncounter>(),
-            ModelDb.Encounter<FakeMerchantEventEncounter>(),
-            ModelDb.Encounter<MysteriousKnightEventEncounter>(),
-            ModelDb.Encounter<PunchOffEventEncounter>(),
-            ModelDb.Encounter<TheArchitectEventEncounter>()
-        };
+            GetRegisteredEncounter<BattlewornDummyEventEncounter>(),
+            GetRegisteredEncounter<DenseVegetationEventEncounter>(),
+            GetRegisteredEncounter<FakeMerchantEventEncounter>(),
+            GetRegisteredEncounter<MysteriousKnightEventEncounter>(),
+            GetRegisteredEncounter<PunchOffEventEncounter>(),
+            GetRegisteredEncounter<TheArchitectEventEncounter>()
+        }.OfType<EncounterModel>();
         return ModelDb.AllEncounters
-            .Concat(eventEncounters)
+            .Concat(legacyEventEncounters)
             .GroupBy(encounter => encounter.Id.Entry, StringComparer.Ordinal)
             .Select(group => group.First());
+    }
+
+    /// <summary>
+    /// 获取当前游戏版本实际注册的辅助怪物。
+    /// </summary>
+    /// <typeparam name="TMonster">跨版本源码中存在的怪物模型类型。</typeparam>
+    /// <returns>已注册的规范怪物；当前版本未注册时返回空值。</returns>
+    private static MonsterModel? GetRegisteredMonster<TMonster>()
+        where TMonster : MonsterModel
+    {
+        return ModelDb.Contains(typeof(TMonster)) ? ModelDb.Monster<TMonster>() : null;
+    }
+
+    /// <summary>
+    /// 获取当前游戏版本实际注册的旧版事件战遭遇。
+    /// </summary>
+    /// <typeparam name="TEncounter">跨版本源码中存在的遭遇模型类型。</typeparam>
+    /// <returns>已注册的规范遭遇；当前版本未注册时返回空值。</returns>
+    private static EncounterModel? GetRegisteredEncounter<TEncounter>()
+        where TEncounter : EncounterModel
+    {
+        return ModelDb.Contains(typeof(TEncounter)) ? ModelDb.Encounter<TEncounter>() : null;
     }
 
     /// <summary>
@@ -890,6 +912,23 @@ internal static class GameDataExportService
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// 判断遭遇是否只用于调试、测试或已废弃的历史记录。
+    /// </summary>
+    /// <param name="encounter">待导出的遭遇模型。</param>
+    /// <returns>旧版调试标记或新版 Mock 标记成立，以及遭遇已废弃时返回真。</returns>
+    private static bool IsDebugEncounter(EncounterModel encounter)
+    {
+        var legacyValue = GetReflectedProperty(encounter, "IsDebugEncounter");
+        if (legacyValue is bool legacyDebug)
+        {
+            return legacyDebug;
+        }
+
+        return GetReflectedProperty(encounter, "IsMock") is true
+            || encounter is DeprecatedEncounter;
     }
 
     /// <summary>

@@ -1,0 +1,93 @@
+{
+  "game_version": "v0.111.0",
+  "question_exclusions": {
+    "cards": ["DEPRECATED_CARD", "MAD_SCIENCE"],
+    "relics": ["DEPRECATED_RELIC"],
+    "potions": ["DEPRECATED_POTION", "MOCK_DISCARD_AND_ADD_SHIVS_POTION"],
+    "enchantments": ["DEPRECATED_ENCHANTMENT", "MOCK_FREE_ENCHANTMENT"],
+    "encounters": [],
+    "events": ["FAKE_MERCHANT", "THE_ARCHITECT"],
+    "monsters": [
+      "ARCHITECT",
+      "BYRDPIP",
+      "OSTY",
+      "PAELS_LEGION"
+    ],
+    "powers": [
+      "MOCK_CLONE_CARDS_ON_PLAY_POWER",
+      "MOCK_DO_NOT_SCALE_IN_MULTIPLAYER_POWER",
+      "MOCK_EXTRA_TURN_POWER",
+      "MOCK_FREE_CARDS_POWER",
+      "MOCK_GAIN_BLOCK_ON_ATTACK_POWER",
+      "MOCK_GATED_TURN_START_POWER",
+      "MOCK_INVINCIBLE_ON_DEATH_POWER",
+      "MOCK_MODIFY_ENERGY_COST_POWER",
+      "MOCK_MODIFY_STAR_COST_POWER",
+      "MOCK_PHASE_OBSERVER_POWER",
+      "MOCK_PREVENT_DEATH_POWER",
+      "MOCK_RECORD_CARD_CHANGED_PILES_POWER",
+      "MOCK_REMOVE_DRAWN_CARDS_FROM_COMBAT_POWER",
+      "MOCK_RESET_COMBAT_ON_SHUFFLE_POWER",
+      "MOCK_REVIVE_POWER",
+      "MOCK_SCALE_IN_MULTIPLAYER_POWER",
+      "MOCK_TEMPORARY_STRENGTH_LOSS_POWER",
+      "MOCK_UNHITTABLE_POWER"
+    ]
+  },
+  "entities": {
+    "cards": {
+      "DUALCAST": {
+        "text_replacements": [
+          {
+            "from": "最右侧的充能球",
+            "to": "最旧（队首）的充能球"
+          }
+        ],
+        "reason": "Harness 与实机状态均按 FIFO：最旧充能球先激发",
+        "source": "play_sts2.harness.observation"
+      },
+      "QUADCAST": {
+        "text_replacements": [
+          {
+            "from": "最右侧的充能球",
+            "to": "最旧（队首）的充能球"
+          }
+        ],
+        "reason": "Harness 与实机状态均按 FIFO：最旧充能球先激发",
+        "source": "play_sts2.harness.observation"
+      },
+      "MULTI_CAST": {
+        "text_replacements": [
+          {
+            "from": "最右侧的充能球",
+            "to": "最旧（队首）的充能球"
+          }
+        ],
+        "reason": "Harness 与实机状态均按 FIFO：最旧充能球先激发",
+        "source": "play_sts2.harness.observation"
+      },
+      "CONSUMING_SHADOW": {
+        "text_replacements": [
+          {
+            "from": "最左侧的充能球",
+            "to": "最旧（队首）的充能球"
+          }
+        ],
+        "reason": "Harness 与实机状态均按 FIFO：最旧充能球先激发",
+        "source": "play_sts2.harness.observation"
+      }
+    },
+    "powers": {
+      "ASLEEP_POWER": {
+        "text_replacements": [
+          {
+            "from": "TODO",
+            "to": "受到未被格挡的伤害时苏醒；否则在倒计时结束后苏醒。"
+          }
+        ],
+        "reason": "游戏本地化仍是 TODO；效果由 AsleepPower 的受伤与回合结束钩子确定",
+        "source": "sts2.dll:MegaCrit.Sts2.Core.Models.Powers.AsleepPower"
+      }
+    }
+  }
+}

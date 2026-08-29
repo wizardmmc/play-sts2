@@ -19,7 +19,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         int: 游戏退出状态码；用户中断时返回 ``130``。
     """
     args = _parser().parse_args(argv)
-    executable = args.app_path / "Contents/MacOS/Slay the Spire 2"
+    executable = _resolve_game_executable(args.app_path)
     with tempfile.TemporaryDirectory(prefix="play-sts2-game-") as temporary:
         home = Path(temporary)
         with launch_game(
@@ -37,6 +37,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return game.wait()
             except KeyboardInterrupt:
                 return 130
+
+
+def _resolve_game_executable(app_path: Path) -> Path:
+    """在切换子进程工作目录前固定游戏可执行文件的绝对路径。
+
+    Args:
+        app_path (Path): 用户传入的 ``SlayTheSpire2.app`` 路径。
+
+    Returns:
+        Path: 不再依赖后续工作目录的 macOS 可执行文件绝对路径。
+    """
+    return (app_path / "Contents/MacOS/Slay the Spire 2").resolve()
 
 
 def _parser() -> argparse.ArgumentParser:

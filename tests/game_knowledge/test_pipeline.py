@@ -228,6 +228,24 @@ class WrongVersionGameDataClient(FakeGameDataClient):
         )
 
 
+class PublicBetaGameDataClient(FakeGameDataClient):
+    """返回项目明确支持的 ``v0.111.0`` 教师版本。"""
+
+    def health(self) -> Health:
+        """返回 public-beta 教师运行时的健康信息。
+
+        Returns:
+            Health: ``v0.111.0`` 健康信息。
+        """
+        return Health(
+            service="sts2-ai-agent",
+            mod_version="0.8.0",
+            protocol_version="2026-03-11-v1",
+            game_version="0.111.0",
+            status="ready",
+        )
+
+
 def _required_act_rows() -> list[dict[str, object]]:
     """返回固定版本四张地图及其四类非空遭遇池。
 
@@ -255,11 +273,15 @@ def _required_act_rows() -> list[dict[str, object]]:
     ]
 
 
-def _write_required_act_markdown(snapshot: Path) -> None:
+def _write_required_act_markdown(
+    snapshot: Path,
+    game_version: str = "v0.107.1",
+) -> None:
     """给多问法单元测试写入固定四张地图的最小完整规范事实。
 
     Args:
         snapshot (Path): ``mod_export/v0.107.1`` 测试快照根目录。
+        game_version (str): 写入 frontmatter 的游戏版本。
 
     Returns:
         None: 四个地图 Markdown 写入完成后返回。
@@ -284,7 +306,7 @@ id: {object_id}
 name: {name}
 type: act
 source: mod_export
-game_version: v0.107.1
+game_version: {game_version}
 index: {row["index"]}
 is_default: true
 ---
@@ -455,7 +477,7 @@ def test_export_mod_knowledge_preserves_act_encounter_pools(tmp_path: Path) -> N
     assert "## Boss 遭遇池\n- 同族（THE_KIN_BOSS）" in act
 
 
-def test_export_mod_knowledge_rejects_any_version_except_v01071(
+def test_export_mod_knowledge_rejects_unsupported_version(
     tmp_path: Path,
 ) -> None:
     """知识导出拒绝意外升级后的 Steam 游戏。
@@ -469,8 +491,86 @@ def test_export_mod_knowledge_rejects_any_version_except_v01071(
     Returns:
         None: 此测试只检查固定版本边界。
     """
-    with pytest.raises(ValueError, match="只接受固定游戏版本 v0.107.1"):
+    with pytest.raises(ValueError, match="不在受支持版本中"):
         export_mod_knowledge(WrongVersionGameDataClient(), tmp_path / "knowledge")
+
+
+def test_export_mod_knowledge_keeps_v01110_separate_from_v01071(
+    tmp_path: Path,
+) -> None:
+    """public-beta 导出必须写入独立目录且不覆盖旧基线。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 新旧版本知识没有并存或版本元数据错误。
+
+    Returns:
+        None: 此测试只验证受支持版本的物理隔离。
+    """
+    knowledge_root = tmp_path / "knowledge"
+    old_result = export_mod_knowledge(FakeGameDataClient(), knowledge_root)
+    new_result = export_mod_knowledge(PublicBetaGameDataClient(), knowledge_root)
+
+    assert old_result.output_root.name == "v0.107.1"
+    assert new_result.output_root.name == "v0.111.0"
+    assert (old_result.output_root / "cards/ZAP.md").is_file()
+    new_card = (new_result.output_root / "cards/ZAP.md").read_text(encoding="utf-8")
+    assert "game_version: v0.111.0" in new_card
+
+
+def test_rebuild_mod_knowledge_uses_version_from_raw_parent(tmp_path: Path) -> None:
+    """离线重建应从 raw 父目录选择同版本 curated 与输出目录。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: ``v0.111.0`` 被拒绝或写回旧版目录。
+
+    Returns:
+        None: 此测试只验证版本化离线重建边界。
+    """
+    knowledge_root = tmp_path / "knowledge"
+    raw_root = knowledge_root / "mod_export/v0.111.0/raw"
+    raw_root.mkdir(parents=True)
+    (raw_root / "acts.json").write_text(
+        json.dumps(_required_act_rows(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = game_knowledge.rebuild_mod_knowledge(raw_root, knowledge_root)
+
+    assert result.output_root == knowledge_root / "mod_export/v0.111.0"
+    assert "game_version: v0.111.0" in (
+        result.output_root / "acts/OVERGROWTH.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_generate_question_variants_preserves_v01110_version(tmp_path: Path) -> None:
+    """多问法生成应沿用 ``v0.111.0`` 快照版本。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 新版本快照被拒绝或 manifest 错写为旧版本。
+
+    Returns:
+        None: 此测试只验证多问法产物的版本血缘。
+    """
+    snapshot = tmp_path / "mod_export/v0.111.0"
+    output = tmp_path / "generated-v0.111.0"
+    _write_required_act_markdown(snapshot, "v0.111.0")
+
+    result = game_knowledge.generate_question_variants(snapshot, output)
+
+    manifest = json.loads(
+        (result.output_root / "_knowledge_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["game_version"] == "v0.111.0"
+    assert manifest["facts"] == 16
 
 
 def test_generate_question_variants_uses_curated_facts_without_web_wiki(

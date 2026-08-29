@@ -177,6 +177,111 @@ def test_stage_profile_copies_only_isolated_non_steam_files(tmp_path: Path) -> N
         assert path.read_bytes() == expected
 
 
+def test_stage_profile_accepts_exact_combat_solver_teacher_mods(
+    tmp_path: Path,
+) -> None:
+    """教师存档允许同时启用 Agent、RitsuLib 与 CombatSolver。
+
+    Args:
+        tmp_path (Path): Pytest 提供的单测临时目录。
+
+    Raises:
+        AssertionError: 精确教师 Mod 白名单仍被启动器拒绝。
+
+    Returns:
+        None: 此测试只验证教师 profile 的启动前边界。
+    """
+    launcher = importlib.import_module("play_sts2.game_launcher")
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    settings = {
+        "mod_settings": {
+            "mods_enabled": True,
+            "mod_list": [
+                {"id": "UnifiedSavePath", "is_enabled": False},
+                {"id": "STS2AIAgent", "is_enabled": True},
+                {"id": "STS2-RitsuLib", "is_enabled": True},
+                {"id": "CombatSolver", "is_enabled": True},
+            ],
+        }
+    }
+    (profile / "settings.save").write_text(json.dumps(settings), encoding="utf-8")
+    (profile / "progress.save").write_text('{"unique_id":"TEST"}', encoding="utf-8")
+    (profile / "prefs.save").write_text(
+        '{"fast_mode":"fast","upload_data":false}',
+        encoding="utf-8",
+    )
+
+    enabled_mods = launcher.stage_profile(profile, tmp_path / "home")
+
+    assert enabled_mods == frozenset({"STS2AIAgent", "STS2-RitsuLib", "CombatSolver"})
+
+
+def test_teacher_log_verification_requires_all_three_mods(tmp_path: Path) -> None:
+    """教师启动日志必须证明三个预期 Mod 都完成初始化。
+
+    Args:
+        tmp_path (Path): Pytest 提供的单测临时目录。
+
+    Raises:
+        AssertionError: 教师日志漏掉依赖 Mod 后仍通过验证。
+
+    Returns:
+        None: 此测试只验证启动后的教师 Mod 白名单。
+    """
+    launcher = importlib.import_module("play_sts2.game_launcher")
+    log_path = tmp_path / "game.log"
+    expected_mods = frozenset({"STS2AIAgent", "STS2-RitsuLib", "CombatSolver"})
+    log_path.write_text(
+        (
+            "[INFO] Steam initialization skipped (editor mode). Use --force-steam "
+            "to enable.\n"
+            "[INFO] Skipping loading mod UnifiedSavePath, it is set to disabled "
+            "in settings\n"
+            "[INFO] Finished mod initialization for 'STS2 AI Agent' "
+            "(STS2AIAgent).\n"
+            "[INFO] Finished mod initialization for 'RitsuLib' "
+            "(STS2-RitsuLib).\n"
+            "[INFO] Finished mod initialization for '战斗路线求解器' "
+            "(CombatSolver).\n"
+            "[INFO]  --- RUNNING MODDED! --- Loaded 3 mods (4 total)"
+        ),
+        encoding="utf-8",
+    )
+
+    launcher._verify_isolated_mod_configuration(log_path, expected_mods)
+
+    log_path.write_text(
+        log_path.read_text(encoding="utf-8").replace(
+            "[INFO] Finished mod initialization for 'RitsuLib' (STS2-RitsuLib).\n",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="无法确认游戏隔离"):
+        launcher._verify_isolated_mod_configuration(log_path, expected_mods)
+
+
+def test_repository_combat_solver_profile_is_stageable(tmp_path: Path) -> None:
+    """仓库内教师 profile 应能直接用于隔离启动器。
+
+    Args:
+        tmp_path (Path): Pytest 提供的单测临时目录。
+
+    Raises:
+        AssertionError: 教师 profile 缺文件、启用错误 Mod 或无法复制。
+
+    Returns:
+        None: 此测试验证仓库交付的真实 profile。
+    """
+    launcher = importlib.import_module("play_sts2.game_launcher")
+    profile = Path(__file__).resolve().parents[1] / "e2e/fixtures/combat-solver-profile"
+
+    enabled_mods = launcher.stage_profile(profile, tmp_path / "home")
+
+    assert enabled_mods == frozenset({"STS2AIAgent", "STS2-RitsuLib", "CombatSolver"})
+
+
 def _write_profile(profile: Path) -> None:
     """写入只启用 Agent Mod 的最小隔离存档模板。
 

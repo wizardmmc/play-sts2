@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rebuilder = subparsers.add_parser(
         "rebuild",
-        help="从 v0.107.1 原始快照离线重建规范事实 Markdown",
+        help="从受支持版本的原始快照离线重建规范事实 Markdown",
     )
     rebuilder.add_argument("raw_root", type=Path, help="固定版本 raw 目录")
     rebuilder.add_argument(

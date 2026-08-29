@@ -22,6 +22,9 @@ DEFAULT_PORT = 8080
 DEFAULT_PROFILE = Path(__file__).resolve().parents[2] / "e2e/fixtures/profile"
 _STARTUP_TIMEOUT_SECONDS = 120.0
 _DATA_ROOT = Path("Library/Application Support/SlayTheSpire2")
+_AGENT_MODS = frozenset({"STS2AIAgent"})
+_COMBAT_SOLVER_MODS = frozenset({"STS2AIAgent", "STS2-RitsuLib", "CombatSolver"})
+_ALLOWED_MOD_SETS = frozenset({_AGENT_MODS, _COMBAT_SOLVER_MODS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +87,7 @@ def launch_game(
     if _port_is_open(port):
         raise RuntimeError(f"Agent Mod 端口已被占用: {port}")
 
-    stage_profile(profile, home)
+    enabled_mods = stage_profile(profile, home)
     base_url = f"http://127.0.0.1:{port}"
     log_path = home / f"{mode}.log"
     environment = os.environ.copy()
@@ -105,7 +108,7 @@ def launch_game(
         )
         try:
             _wait_until_ready(process, base_url, log_path)
-            _verify_isolated_mod_configuration(log_path)
+            _verify_isolated_mod_configuration(log_path, enabled_mods)
             yield RunningGame(base_url, home, log_path, process)
         finally:
             _stop_game(process)
@@ -132,7 +135,7 @@ def game_command(executable: Path, mode: str) -> list[str]:
     raise ValueError(f"未知的 STS2 启动模式: {mode}")
 
 
-def stage_profile(profile: Path, home: Path) -> None:
+def stage_profile(profile: Path, home: Path) -> frozenset[str]:
     """把受控存档模板写入隔离 HOME 的非 Steam 路径。
 
     Args:
@@ -145,7 +148,8 @@ def stage_profile(profile: Path, home: Path) -> None:
         OSError: 无法读取或复制存档文件。
 
     Returns:
-        None: 三个允许的存档文件复制完成后返回。
+        frozenset[str]: 三个允许的存档文件复制完成后，返回预期启用的
+            Mod ID。
     """
     settings = profile / "settings.save"
     preferences = profile / "prefs.save"
@@ -156,7 +160,7 @@ def stage_profile(profile: Path, home: Path) -> None:
     if home.exists() and any(home.iterdir()):
         raise ValueError(f"隔离 HOME 必须为空: {home}")
 
-    _validate_profile(settings)
+    enabled_mods = _validate_profile(settings)
     data_root = home / _DATA_ROOT
     targets = (
         (settings, data_root / "default/1/settings.save"),
@@ -166,10 +170,11 @@ def stage_profile(profile: Path, home: Path) -> None:
     for source, target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    return enabled_mods
 
 
-def _validate_profile(settings: Path) -> None:
-    """确认模板关闭共享存档且只启用 Agent Mod。
+def _validate_profile(settings: Path) -> frozenset[str]:
+    """确认模板关闭共享存档且使用已知的精确 Mod 白名单。
 
     Args:
         settings (Path): 待检查的 ``settings.save`` 文件。
@@ -178,7 +183,7 @@ def _validate_profile(settings: Path) -> None:
         ValueError: 设置内容无法证明存档和 Mod 已隔离。
 
     Returns:
-        None: 模板满足隔离边界时返回。
+        frozenset[str]: 模板明确启用的 Mod ID。
     """
     try:
         payload = json.loads(settings.read_text(encoding="utf-8"))
@@ -202,13 +207,18 @@ def _validate_profile(settings: Path) -> None:
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise ValueError(f"隔离存档模板的 Mod 配置无效: {settings}") from exc
 
-    enabled_mods = {mod_id for mod_id, enabled in mod_states.items() if enabled}
+    enabled_mods = frozenset(
+        mod_id for mod_id, enabled in mod_states.items() if enabled
+    )
     if (
         mod_settings.get("mods_enabled") is not True
-        or enabled_mods != {"STS2AIAgent"}
+        or enabled_mods not in _ALLOWED_MOD_SETS
         or mod_states.get("UnifiedSavePath") is not False
     ):
-        raise ValueError("隔离存档模板必须仅启用 Agent 并关闭 UnifiedSavePath")
+        raise ValueError(
+            "隔离存档模板必须仅启用 Agent，或精确启用教师 Mod，并关闭 UnifiedSavePath"
+        )
+    return enabled_mods
 
 
 def _wait_until_ready(
@@ -280,11 +290,15 @@ def _main_menu_is_ready(payload: object) -> bool:
     )
 
 
-def _verify_isolated_mod_configuration(log_path: Path) -> None:
+def _verify_isolated_mod_configuration(
+    log_path: Path,
+    expected_mods: frozenset[str] = _AGENT_MODS,
+) -> None:
     """从游戏日志核对 Steam、共享存档和 Mod 白名单。
 
     Args:
         log_path (Path): 当前游戏进程的标准输出日志路径。
+        expected_mods (frozenset[str]): profile 中预期启用的精确 Mod ID。
 
     Raises:
         RuntimeError: 日志缺少任一隔离证据。
@@ -292,12 +306,12 @@ def _verify_isolated_mod_configuration(log_path: Path) -> None:
     Returns:
         None: 四项隔离证据全部成立时返回。
     """
-    expected = (
+    expected = [
         "[INFO] Steam initialization skipped (editor mode). Use --force-steam to enable.",
         "[INFO] Skipping loading mod UnifiedSavePath, it is set to disabled in settings",
-        "[INFO] Finished mod initialization for 'STS2 AI Agent' (STS2AIAgent).",
-        "[INFO]  --- RUNNING MODDED! --- Loaded 1 mods (",
-    )
+        f"[INFO]  --- RUNNING MODDED! --- Loaded {len(expected_mods)} mods (",
+    ]
+    expected.extend(f"({mod_id})." for mod_id in sorted(expected_mods))
     forbidden = (
         "Steamworks initialization succeeded!",
         "Syncing cloud save files to the local save directory",
@@ -307,11 +321,14 @@ def _verify_isolated_mod_configuration(log_path: Path) -> None:
         log = log_path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"无法读取游戏启动日志: {log_path}") from exc
-    if any(line not in log for line in expected) or any(
-        line in log for line in forbidden
+    if (
+        expected_mods not in _ALLOWED_MOD_SETS
+        or any(line not in log for line in expected)
+        or any(line in log for line in forbidden)
     ):
         raise RuntimeError(
-            "无法确认游戏隔离：Steam 与 UnifiedSavePath 必须关闭，且只允许 Agent Mod"
+            "无法确认游戏隔离：Steam 与 UnifiedSavePath 必须关闭，且加载的 Mod "
+            "必须与 profile 白名单一致"
         )
 
 

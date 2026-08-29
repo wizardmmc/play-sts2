@@ -769,6 +769,36 @@ internal sealed class GameEventService
         BindPlayerState(player, generation);
     }
 
+    /// <summary>
+    /// 订阅不同游戏版本中名称发生变化的无参数事件。
+    /// </summary>
+    /// <param name="target">声明事件的游戏对象。</param>
+    /// <param name="eventNames">按新到旧顺序排列的候选事件名。</param>
+    /// <param name="handler">事件触发时调用的处理器。</param>
+    /// <returns>用于解除本次订阅的无参数操作。</returns>
+    /// <exception cref="MissingMemberException">候选事件在当前游戏版本中均不存在。</exception>
+    private static Action BindParameterlessEvent(
+        object target,
+        IEnumerable<string> eventNames,
+        Action handler)
+    {
+        foreach (var eventName in eventNames)
+        {
+            var eventInfo = target.GetType().GetEvent(eventName);
+            if (eventInfo?.EventHandlerType != typeof(Action))
+            {
+                continue;
+            }
+
+            eventInfo.AddEventHandler(target, handler);
+            return () => eventInfo.RemoveEventHandler(target, handler);
+        }
+
+        throw new MissingMemberException(
+            target.GetType().FullName,
+            string.Join(" or ", eventNames));
+    }
+
     private void BindPlayerState(Player? player, long generation)
     {
         lock (_bindingGate)
@@ -827,6 +857,10 @@ internal sealed class GameEventService
                         UnbindRelic(relic);
                         NotifyStateChanged();
                     });
+                var unbindPotionPermission = BindParameterlessEvent(
+                    boundPlayer,
+                    new[] { "CanUseOrRemovePotionsChanged", "CanRemovePotionsChanged" },
+                    PlayerStateChanged);
 
                 _playerStateUnsubscribe = () =>
                 {
@@ -855,7 +889,7 @@ internal sealed class GameEventService
                         () => boundPlayer.GoldChanged -= PlayerStateChanged,
                         "unbind gold event");
                     TryObserverCleanup(
-                        () => boundPlayer.CanRemovePotionsChanged -= PlayerStateChanged,
+                        unbindPotionPermission,
                         "unbind potion removal event");
                 };
                 boundPlayer.Deck.ContentsChanged += PlayerStateChanged;
@@ -866,7 +900,6 @@ internal sealed class GameEventService
                 boundPlayer.PotionDiscarded += PotionStateChanged;
                 boundPlayer.UsedPotionRemoved += PotionStateChanged;
                 boundPlayer.GoldChanged += PlayerStateChanged;
-                boundPlayer.CanRemovePotionsChanged += PlayerStateChanged;
             }
 
             RefreshRelicBindings(generation);

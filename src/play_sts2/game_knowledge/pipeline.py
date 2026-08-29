@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..client import Health
-from .curation import FIXED_GAME_VERSION, curate_entity
+from .curation import FIXED_GAME_VERSION, SUPPORTED_GAME_VERSIONS, curate_entity
 from .markdown import KnowledgeEntry, KnowledgeFormatError, parse_knowledge_entry
 
 _COLLECTIONS = (
@@ -38,6 +38,7 @@ _ENTITY_TYPES = {
     "keywords": "keyword",
 }
 _FIXED_GAME_VERSION = FIXED_GAME_VERSION
+_SUPPORTED_GAME_VERSIONS = SUPPORTED_GAME_VERSIONS
 _REQUIRED_ACT_IDS = ("OVERGROWTH", "UNDERDOCKS", "HIVE", "GLORY")
 _REQUIRED_ACT_POOLS = (
     "weak_encounters",
@@ -52,8 +53,8 @@ _DEFECT_ORB_IDS = (
     "GLASS_ORB",
     "PLASMA_ORB",
 )
-_DEFECT_ORB_SUPPLEMENT = Path("supplements/v0.107.1/characters/defect_orbs.json")
-_DEFECT_ORB_ORIGIN = "human_rl:data/mod_information/snapshots/v0.107.1/orbs.json"
+_DEFECT_ORB_FILENAME = Path("characters/defect_orbs.json")
+_V01071_DEFECT_ORB_ORIGIN = "human_rl:data/mod_information/snapshots/v0.107.1/orbs.json"
 _LOCAL_MARKER = "<!-- praxis:local -->"
 _MARKUP = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
 _RESOURCE = re.compile(r"res://\S+?\.png")
@@ -182,7 +183,12 @@ def export_mod_knowledge(
         )
         expected[collection] = set()
         for entity in entities:
-            gaps.extend(_entity_gaps(collection, curate_entity(collection, entity)))
+            gaps.extend(
+                _entity_gaps(
+                    collection,
+                    curate_entity(collection, entity, game_version),
+                )
+            )
             entry = _mod_entry(collection, entity, game_version)
             target = destination / collection / f"{_safe_id(entry.object_id)}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -229,20 +235,27 @@ def rebuild_mod_knowledge(
         KnowledgeBuildResult: 重建目录、条目数量与类别计数。
     """
     raw_root = Path(raw_root)
-    if raw_root.name != "raw" or raw_root.parent.name != _FIXED_GAME_VERSION:
-        raise ValueError(f"离线重建只接受 {_FIXED_GAME_VERSION}/raw")
+    if raw_root.name != "raw":
+        raise ValueError("离线重建输入必须是受支持版本目录下的 raw")
+    game_version = _fixed_version(raw_root.parent.name)
     acts_path = raw_root / "acts.json"
     if not acts_path.is_file():
         raise KnowledgeFormatError(f"固定版本重建缺少地图集合: {acts_path}")
-    destination = Path(output_root) / "mod_export" / _FIXED_GAME_VERSION
+    destination = Path(output_root) / "mod_export" / game_version
     observations = _load_cycle_observations(cycles_root)
     event_snapshots = _load_event_snapshots(event_entries_root)
     reference_names = _load_reference_names(raw_root)
-    orb_snapshot_path = Path(output_root) / _DEFECT_ORB_SUPPLEMENT
+    orb_supplement = _defect_orb_supplement(game_version)
+    orb_snapshot_path = Path(output_root) / orb_supplement
     defect_orbs: list[dict[str, Any]] = []
     defect_orb_metadata: dict[str, str] = {}
     if orb_snapshot_path.is_file():
-        defect_orbs, defect_orb_metadata = _load_defect_orbs(orb_snapshot_path)
+        defect_orbs, defect_orb_metadata = _load_defect_orbs(
+            orb_snapshot_path,
+            game_version,
+            orb_supplement,
+            _defect_orb_origin(game_version),
+        )
     categories: dict[str, int] = {}
     expected: dict[str, set[str]] = {}
     gaps: list[str] = []
@@ -272,13 +285,19 @@ def rebuild_mod_knowledge(
                     reference_names,
                     defect_orbs,
                     defect_orb_metadata,
+                    orb_supplement,
                 )
                 for entity in entities
             ]
         expected[collection] = set()
         for entity in entities:
-            gaps.extend(_entity_gaps(collection, curate_entity(collection, entity)))
-            entry = _mod_entry(collection, entity, _FIXED_GAME_VERSION)
+            gaps.extend(
+                _entity_gaps(
+                    collection,
+                    curate_entity(collection, entity, game_version),
+                )
+            )
+            entry = _mod_entry(collection, entity, game_version)
             target = destination / collection / f"{_safe_id(entry.object_id)}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(entry.to_markdown(), encoding="utf-8")
@@ -293,12 +312,12 @@ def rebuild_mod_knowledge(
     if event_entries_root is not None:
         supplement_sources.append("game_ui_snapshot:resolved_options")
     if defect_orbs:
-        supplement_sources.append(_DEFECT_ORB_SUPPLEMENT.as_posix())
+        supplement_sources.append(orb_supplement.as_posix())
     return _write_result(
         destination,
         "mod_export",
         categories,
-        game_version=_FIXED_GAME_VERSION,
+        game_version=game_version,
         gaps=sorted(set(gaps)),
         supplements=supplement_sources,
     )
@@ -375,11 +394,17 @@ def _load_reference_names(raw_root: Path) -> dict[str, str]:
 
 def _load_defect_orbs(
     path: Path,
+    game_version: str,
+    supplement_path: Path,
+    supplement_origin: str,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """读取并严格校验固定版本故障机器人充能球实测快照。
 
     Args:
         path (Path): 受控 ``defect_orbs.json`` 补录文件。
+        game_version (str): 补录必须声明的受支持游戏版本。
+        supplement_path (Path): 相对游戏知识根目录的补录路径。
+        supplement_origin (str): 写入规范事实元数据的补录上游来源。
 
     Raises:
         KnowledgeFormatError: 版本、球种集合或机制字段不完整。
@@ -392,11 +417,13 @@ def _load_defect_orbs(
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise KnowledgeFormatError(f"充能球快照不是 JSON 对象: {path}")
-    if str(payload.get("game_version") or "").removeprefix("v") != "0.107.1":
-        raise KnowledgeFormatError(f"充能球快照版本不是 {_FIXED_GAME_VERSION}: {path}")
+    if str(payload.get("game_version") or "").removeprefix("v") != (
+        game_version.removeprefix("v")
+    ):
+        raise KnowledgeFormatError(f"充能球快照版本不是 {game_version}: {path}")
     supplement_metadata: dict[str, str] = {
-        "orb_supplement_source": _DEFECT_ORB_SUPPLEMENT.as_posix(),
-        "orb_supplement_origin": _DEFECT_ORB_ORIGIN,
+        "orb_supplement_source": supplement_path.as_posix(),
+        "orb_supplement_origin": supplement_origin,
     }
     for source_field, target_field in (
         ("captured_at_utc", "orb_supplement_captured_at"),
@@ -424,9 +451,13 @@ def _load_defect_orbs(
         if type(orb.get("passive_base")) is not int:
             raise KnowledgeFormatError(f"充能球 {orb_id} 的 passive_base 无效")
         evoke = orb.get("evoke_base")
-        if orb_id == "DARK_ORB" and evoke is not None:
-            raise KnowledgeFormatError(f"充能球 {orb_id} 的 evoke_base 无效")
-        if orb_id != "DARK_ORB" and type(evoke) is not int:
+        if orb_id == "DARK_ORB":
+            dark_evoke_is_valid = (
+                game_version == _FIXED_GAME_VERSION and evoke is None
+            ) or (game_version == "v0.111.0" and type(evoke) is int)
+            if not dark_evoke_is_valid:
+                raise KnowledgeFormatError(f"充能球 {orb_id} 的 evoke_base 无效")
+        elif type(evoke) is not int:
             raise KnowledgeFormatError(f"充能球 {orb_id} 的 evoke_base 无效")
         if orb["trigger"] not in {"turn_end", "turn_start"}:
             raise KnowledgeFormatError(f"充能球 {orb_id} 的 trigger 无效")
@@ -443,6 +474,7 @@ def _supplement_character(
     reference_names: Mapping[str, str],
     defect_orbs: Sequence[Mapping[str, Any]],
     defect_orb_metadata: Mapping[str, str],
+    orb_supplement: Path,
 ) -> dict[str, Any]:
     """解析角色起始物品名称，并只给故障机器人附加充能球事实。
 
@@ -451,6 +483,7 @@ def _supplement_character(
         reference_names (Mapping[str, str]): 起始物品 ID 到显示名的映射。
         defect_orbs (Sequence[Mapping[str, Any]]): 固定版本五种充能球实测事实。
         defect_orb_metadata (Mapping[str, str]): 补充文件、上游来源与采样元数据。
+        orb_supplement (Path): 当前版本的受控充能球补录相对路径。
 
     Raises:
         KnowledgeFormatError: 故障机器人缺少补充文件或起始物品显示名。
@@ -480,7 +513,7 @@ def _supplement_character(
         ]
     if is_defect and not defect_orbs:
         raise KnowledgeFormatError(
-            f"缺少故障机器人充能球补充: {_DEFECT_ORB_SUPPLEMENT.as_posix()}"
+            f"缺少故障机器人充能球补充: {orb_supplement.as_posix()}"
         )
     if is_defect:
         result["orbs"] = [dict(orb) for orb in defect_orbs]
@@ -506,7 +539,7 @@ def _mod_entry(
     Returns:
         KnowledgeEntry: 可写入对应类别目录的知识条目。
     """
-    entity = curate_entity(collection, entity)
+    entity = curate_entity(collection, entity, game_version)
     object_id = _required_text(entity, "id")
     name = _required_text(entity, "name")
     metadata = {
@@ -1412,24 +1445,51 @@ def _safe_version(game_version: str) -> str:
 
 
 def _fixed_version(game_version: str) -> str:
-    """规范化并锁定本项目唯一允许的游戏知识版本。
+    """规范化并限制为项目明确支持的游戏知识版本。
 
     Args:
         game_version (str): Mod 健康检查返回的版本。
 
     Raises:
-        KnowledgeFormatError: 游戏版本不是固定的 ``v0.107.1``。
+        KnowledgeFormatError: 游戏版本不在明确支持的集合中。
 
     Returns:
-        str: 固定目录名 ``v0.107.1``。
+        str: 带 ``v`` 前缀的受支持版本目录名。
     """
     safe = _safe_version(game_version)
     normalized = safe if safe.startswith("v") else f"v{safe}"
-    if normalized != _FIXED_GAME_VERSION:
+    if normalized not in _SUPPORTED_GAME_VERSIONS:
         raise KnowledgeFormatError(
-            f"知识导出只接受固定游戏版本 {_FIXED_GAME_VERSION}，实际为 {game_version}"
+            "知识导出版本不在受支持版本中："
+            f"{sorted(_SUPPORTED_GAME_VERSIONS)}，实际为 {game_version}"
         )
     return normalized
+
+
+def _defect_orb_supplement(game_version: str) -> Path:
+    """返回指定版本的故障机器人充能球受控补录路径。
+
+    Args:
+        game_version (str): 带 ``v`` 前缀的受支持游戏版本。
+
+    Returns:
+        Path: 相对游戏知识根目录的补录文件路径。
+    """
+    return Path("supplements") / game_version / _DEFECT_ORB_FILENAME
+
+
+def _defect_orb_origin(game_version: str) -> str:
+    """返回指定版本补录写入规范事实的来源说明。
+
+    Args:
+        game_version (str): 带 ``v`` 前缀的受支持游戏版本。
+
+    Returns:
+        str: 可审计的上游来源标识。
+    """
+    if game_version == _FIXED_GAME_VERSION:
+        return _V01071_DEFECT_ORB_ORIGIN
+    return f"play_sts2:data/game_knowledge/{_defect_orb_supplement(game_version)}"
 
 
 def _remove_stale_entries(

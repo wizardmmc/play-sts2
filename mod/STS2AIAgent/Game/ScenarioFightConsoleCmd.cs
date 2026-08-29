@@ -89,11 +89,9 @@ public sealed class ScenarioFightConsoleCmd : AbstractConsoleCmd
 
         // 与 EncounterModel.GenerateMonstersWithSlots 使用完全相同的公式，只把
         // 当前调试局层数替换为场景指定的总层数参数。其他 RNG 流保持当前计数。
-        var encounterSeed = unchecked((uint)(
-            (int)runState.Rng.Seed
-            + floor
-            + StringHelper.GetDeterministicHashCode(encounter.Id.Entry)));
-        EncounterRngField.SetValue(encounter, new Rng(encounterSeed));
+        EncounterRngField.SetValue(
+            encounter,
+            CreateEncounterRng(runState.Rng.Seed, floor, encounter.Id.Entry));
 
         var task = RunManager.Instance.EnterRoomDebug(
             RoomType.Monster,
@@ -103,6 +101,41 @@ public sealed class ScenarioFightConsoleCmd : AbstractConsoleCmd
             task,
             success: true,
             $"Jumped to deterministic encounter: '{encounter.Id.Entry}' (floor={floor})");
+    }
+
+    /// <summary>
+    /// 按当前游戏版本的原生位宽重建遭遇随机数生成器。
+    /// </summary>
+    /// <param name="runSeed">运行状态公开的根随机种子。</param>
+    /// <param name="floor">参与原生遭遇公式的总层数。</param>
+    /// <param name="encounterId">用于稳定哈希的遭遇 ID。</param>
+    /// <returns>与当前版本 <c>GenerateMonstersWithSlots</c> 公式一致的 RNG。</returns>
+    /// <exception cref="InvalidOperationException">当前版本缺少稳定哈希方法或匹配的 RNG 构造方法。</exception>
+    private static Rng CreateEncounterRng(object runSeed, int floor, string encounterId)
+    {
+        var hashMethod = typeof(StringHelper).GetMethod(
+            "GetDeterministicHashCode",
+            BindingFlags.Public | BindingFlags.Static,
+            binder: null,
+            types: new[] { typeof(string) },
+            modifiers: null);
+        var hash = hashMethod?.Invoke(null, new object[] { encounterId })
+            ?? throw new InvalidOperationException("Deterministic hash method is unavailable.");
+
+        object encounterSeed = hash switch
+        {
+            ulong hash64 => unchecked(Convert.ToUInt64(runSeed) + (ulong)floor + hash64),
+            int hash32 => unchecked((uint)(
+                (int)Convert.ToUInt32(runSeed)
+                + floor
+                + hash32)),
+            _ => throw new InvalidOperationException(
+                $"Unsupported deterministic hash type: {hash.GetType().FullName}")
+        };
+        var constructor = typeof(Rng).GetConstructor(new[] { encounterSeed.GetType() })
+            ?? throw new InvalidOperationException(
+                $"RNG constructor for {encounterSeed.GetType().Name} is unavailable.");
+        return (Rng)constructor.Invoke(new[] { encounterSeed });
     }
 
     /// <summary>

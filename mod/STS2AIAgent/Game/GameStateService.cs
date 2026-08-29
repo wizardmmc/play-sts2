@@ -3912,7 +3912,7 @@ internal static class GameStateService
             selected_character_id = selectedCharacterId,
             player_count = lobby?.Players.Count ?? 0,
             max_players = lobby != null
-                ? lobby.MaxPlayers > 0 ? lobby.MaxPlayers : lobby.Players.Count
+                ? GetLobbyMaxPlayers(lobby, lobby.Players.Count)
                 : 4,
             players = lobby?.Players
                 .OrderBy(player => player.slotId)
@@ -4070,7 +4070,7 @@ internal static class GameStateService
                 local_ready = localPlayer.isReady,
                 is_waiting_for_players = waitingPanel?.Visible ?? false,
                 player_count = lobby.Players.Count,
-                max_players = lobby.MaxPlayers > 0 ? lobby.MaxPlayers : lobby.Players.Count,
+                max_players = GetLobbyMaxPlayers(lobby, lobby.Players.Count),
                 ascension = lobby.Ascension,
                 max_ascension = lobby.MaxAscension,
                 seed = lobby.Seed,
@@ -4980,6 +4980,58 @@ internal static class GameStateService
         }
     }
 
+    /// <summary>
+    /// 读取跨游戏版本仍保留名称的实例字段。
+    /// </summary>
+    /// <param name="target">声明该字段的运行时对象。</param>
+    /// <param name="fieldName">要读取的字段名。</param>
+    /// <returns>字段值；字段缺失或读取失败时返回 <see langword="null"/>。</returns>
+    private static object? GetReflectedField(object target, string fieldName)
+    {
+        try
+        {
+            return target.GetType().GetField(
+                fieldName,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(target);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 返回角色选择大厅的最大玩家数，并兼容公开属性改为私有字段的版本变化。
+    /// </summary>
+    /// <param name="lobby">当前角色选择大厅。</param>
+    /// <param name="playerCount">无法取得有效上限时使用的当前玩家数。</param>
+    /// <returns>大于零的大厅玩家上限，或当前玩家数。</returns>
+    private static int GetLobbyMaxPlayers(object lobby, int playerCount)
+    {
+        var value = GetReflectedProperty(lobby, "MaxPlayers")
+            ?? GetReflectedField(lobby, "_maxPlayers");
+        try
+        {
+            var maxPlayers = Convert.ToInt32(value);
+            return maxPlayers > 0 ? maxPlayers : playerCount;
+        }
+        catch (Exception)
+        {
+            return playerCount;
+        }
+    }
+
+    /// <summary>
+    /// 读取当前版本中玩家是否可以使用或移除药水。
+    /// </summary>
+    /// <param name="player">拥有药水栏的玩家。</param>
+    /// <returns>当前界面时点允许使用或移除药水时返回真。</returns>
+    private static bool GetPlayerPotionPermission(Player player)
+    {
+        return (GetReflectedProperty(player, "CanUseOrRemovePotions")
+            ?? GetReflectedProperty(player, "CanRemovePotions")) is true;
+    }
+
     private static string? GetReflectedStringProperty(object target, string propertyName)
     {
         var value = GetReflectedProperty(target, propertyName);
@@ -5063,17 +5115,31 @@ internal static class GameStateService
         }
     }
 
-    private static CharacterSelectPlayerPayload BuildCharacterSelectPlayerPayload(LobbyPlayer player, ulong localPlayerId)
+    /// <summary>
+    /// 把角色选择大厅玩家转换为版本无关的 HTTP 载荷。
+    /// </summary>
+    /// <typeparam name="TLobbyPlayer">当前游戏版本的大厅玩家结构体。</typeparam>
+    /// <param name="player">角色选择大厅中的玩家。</param>
+    /// <param name="localPlayerId">本地玩家网络 ID。</param>
+    /// <returns>只包含两版共有字段的角色选择玩家载荷。</returns>
+    private static CharacterSelectPlayerPayload BuildCharacterSelectPlayerPayload<TLobbyPlayer>(
+        TLobbyPlayer player,
+        ulong localPlayerId)
+        where TLobbyPlayer : struct
     {
+        object boxedPlayer = player;
+        var playerId = Convert.ToUInt64(GetReflectedField(boxedPlayer, "id"));
+        var character = GetReflectedField(boxedPlayer, "character") as CharacterModel;
         return new CharacterSelectPlayerPayload
         {
-            player_id = NetIdToString(player.id),
-            slot_index = player.slotId,
-            is_local = player.id == localPlayerId,
-            character_id = player.character?.Id.Entry,
-            character_name = player.character?.Title.GetFormattedText(),
-            is_ready = player.isReady,
-            max_multiplayer_ascension_unlocked = player.maxMultiplayerAscensionUnlocked
+            player_id = NetIdToString(playerId),
+            slot_index = Convert.ToInt32(GetReflectedField(boxedPlayer, "slotId")),
+            is_local = playerId == localPlayerId,
+            character_id = character?.Id.Entry,
+            character_name = character?.Title.GetFormattedText(),
+            is_ready = Convert.ToBoolean(GetReflectedField(boxedPlayer, "isReady")),
+            max_multiplayer_ascension_unlocked = Convert.ToInt32(
+                GetReflectedField(boxedPlayer, "maxMultiplayerAscensionUnlocked"))
         };
     }
 
@@ -5361,7 +5427,7 @@ internal static class GameStateService
         return potion != null &&
             !potion.IsQueued &&
             !potion.Owner.Creature.IsDead &&
-            player.CanRemovePotions;
+            GetPlayerPotionPermission(player);
     }
 
     public static bool PotionRequiresTarget(CombatState? combatState, PotionModel potion)
@@ -5856,10 +5922,15 @@ internal static class GameStateService
             return Array.Empty<ulong>();
         }
 
-        var connectedPlayerIds = RunManager.Instance.RunLobby?.ConnectedPlayerIds;
-        if (connectedPlayerIds != null && connectedPlayerIds.Count > 0)
+        var lobby = RunManager.Instance.RunLobby;
+        var connectedPlayerIds = lobby == null
+            ? null
+            : (GetReflectedProperty(lobby, "PlayerIds")
+                ?? GetReflectedProperty(lobby, "ConnectedPlayerIds")) as IEnumerable<ulong>;
+        var connectedPlayerIdArray = connectedPlayerIds?.ToArray();
+        if (connectedPlayerIdArray is { Length: > 0 })
         {
-            return connectedPlayerIds;
+            return connectedPlayerIdArray;
         }
 
         return runState.Players.Select(player => player.NetId).ToArray();

@@ -8,11 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .curation import FIXED_GAME_VERSION, curate_entry, is_question_excluded
+from .curation import (
+    FIXED_GAME_VERSION,
+    SUPPORTED_GAME_VERSIONS,
+    curate_entry,
+    is_question_excluded,
+)
 from .markdown import KnowledgeEntry, parse_knowledge_entry
 from .pipeline import KnowledgeBuildResult
 
 _FIXED_VERSION = FIXED_GAME_VERSION
+_SUPPORTED_VERSIONS = SUPPORTED_GAME_VERSIONS
 _REQUIRED_MAP_IDS = ("OVERGROWTH", "UNDERDOCKS", "HIVE", "GLORY")
 _BAD_TEXT = re.compile(r"\{[^{}]+\}|\bTODO\b|res://", re.IGNORECASE)
 _INCOMPLETE_MARKERS = (
@@ -104,8 +110,8 @@ def generate_question_variants(
 ) -> KnowledgeBuildResult:
     """把固定版本单实体知识展开成可重建的多问法 JSONL。
 
-    该函数只消费 ``mod_export/v0.107.1``，不会读取 ``web_wiki``，也不会
-    构建训练、验证或测试分卷。
+    该函数只消费项目明确支持的 ``mod_export/v*`` 快照，不会读取
+    ``web_wiki``，也不会构建训练、验证或测试分卷。
 
     Args:
         snapshot_root (Path): 固定版本规范事实 Markdown 根目录。
@@ -119,8 +125,12 @@ def generate_question_variants(
         KnowledgeBuildResult: 输出目录、问答总数和各类别问答数量。
     """
     snapshot_root = Path(snapshot_root)
-    if snapshot_root.name != _FIXED_VERSION:
-        raise ValueError(f"多问法生成只接受固定版本 {_FIXED_VERSION}")
+    game_version = snapshot_root.name
+    if game_version not in _SUPPORTED_VERSIONS:
+        raise ValueError(
+            f"多问法生成版本不受支持: {game_version}，"
+            f"允许 {sorted(_SUPPORTED_VERSIONS)}"
+        )
     output_root = Path(output_root)
     _validate_map_catalog(snapshot_root)
     categories: dict[str, int] = {}
@@ -151,10 +161,10 @@ def generate_question_variants(
                 raise ValueError(
                     f"多问法输入只能来自 mod_export: {category}/{entry.object_id}"
                 )
-            if is_question_excluded(category, entry.object_id):
+            if is_question_excluded(category, entry.object_id, game_version):
                 skipped.append(f"{category}:{entry.object_id}:curated_exclusion")
                 continue
-            patched = curate_entry(category, entry)
+            patched = curate_entry(category, entry, game_version)
             if name_counts[patched.name] > 1:
                 patched = _disambiguate_entry(category, patched)
             if (
@@ -196,7 +206,7 @@ def generate_question_variants(
     _remove_stale_generated(output_root, expected)
     entry_count = sum(categories.values())
     manifest = {
-        "game_version": _FIXED_VERSION,
+        "game_version": game_version,
         "source": "mod_export + curated_override",
         "samples": entry_count,
         "facts": len(fact_ids),
