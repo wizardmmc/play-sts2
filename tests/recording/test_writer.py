@@ -58,7 +58,11 @@ def test_human_writer_groups_one_jsonl_per_battle_and_updates_metadata(
             option_index=0,
         )
     )
-    writer.finalize("game_over", completed_at="2026-08-27T08:05:00Z")
+    writer.finalize(
+        "game_over",
+        completed_at="2026-08-27T08:05:00Z",
+        victory=True,
+    )
 
     battle_files = sorted((writer.run_dir / "combat").glob("*.jsonl"))
     assert [path.name for path in battle_files] == [
@@ -92,19 +96,21 @@ def test_human_writer_groups_one_jsonl_per_battle_and_updates_metadata(
     assert saved["max_floor_reached"] == 3
     assert saved["schema_version"] == 2
     assert saved["termination_reason"] == "game_over"
+    assert saved["victory"] is True
     assert saved["completed_at"] == "2026-08-27T08:05:00Z"
     assert saved["training_eligible"] is True
     assert saved["recording_complete"] is True
     assert saved["integrity"] == {
         "samples_verified": True,
         "ineligibility_reasons": [],
+        "recording_gaps": [],
     }
 
 
-def test_human_writer_marks_integrity_failures_as_training_ineligible(
+def test_human_writer_marks_invalid_samples_as_training_ineligible(
     tmp_path: Path,
 ) -> None:
-    """采集缺口保留在元数据中，并阻止整局进入训练。
+    """样本自身校验失败时保留原因，并阻止相关样本进入训练。
 
     Args:
         tmp_path (Path): Pytest 提供的临时数据目录。
@@ -129,7 +135,11 @@ def test_human_writer_marks_integrity_failures_as_training_ineligible(
 
     writer.record_integrity_failure("native_ui_capture_gap: play_card: no match")
     writer.record_integrity_failure("native_ui_capture_gap: play_card: no match")
-    writer.finalize("game_over", completed_at="2026-08-27T08:05:00Z")
+    writer.finalize(
+        "game_over",
+        completed_at="2026-08-27T08:05:00Z",
+        victory=False,
+    )
 
     saved = json.loads((writer.run_dir / "meta.json").read_text(encoding="utf-8"))
     assert saved["training_eligible"] is False
@@ -137,6 +147,52 @@ def test_human_writer_marks_integrity_failures_as_training_ineligible(
     assert saved["integrity"] == {
         "samples_verified": False,
         "ineligibility_reasons": ["native_ui_capture_gap: play_card: no match"],
+        "recording_gaps": [],
+    }
+
+
+def test_human_writer_keeps_valid_samples_eligible_after_recording_gap(
+    tmp_path: Path,
+) -> None:
+    """缺失动作只关闭连续录制完整性，不否定其他已验证样本。
+
+    Args:
+        tmp_path (Path): Pytest 提供的临时数据目录。
+
+    Raises:
+        AssertionError: gap 被误当成样本非法，或整局仍声称完整。
+
+    Returns:
+        None: 此测试只约束 gap 与单步训练资格的分离。
+    """
+    writer = HumanRunWriter(
+        tmp_path,
+        RunMetadata(
+            run_id="RUN-RECORDING-GAP",
+            source="human_combat_solver",
+            started_at="2026-08-29T08:00:00Z",
+            character_id="DEFECT",
+            seed="RUN-RECORDING-GAP",
+            ascension=1,
+        ),
+    )
+    reason = "action_capture_gap: combat_solver: select_deck_card: missing"
+
+    writer.record_recording_gap(reason)
+    writer.record_recording_gap(reason)
+    writer.finalize(
+        "game_over",
+        completed_at="2026-08-29T08:05:00Z",
+        victory=True,
+    )
+
+    saved = json.loads((writer.run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert saved["training_eligible"] is True
+    assert saved["recording_complete"] is False
+    assert saved["integrity"] == {
+        "samples_verified": True,
+        "ineligibility_reasons": [],
+        "recording_gaps": [reason],
     }
 
 

@@ -130,6 +130,15 @@ def _validate_metadata(metadata: Mapping[str, Any], run_dir: Path) -> None:
         raise RawRunIntegrityError(f"{run_dir} 的训练准入与样本校验结论冲突")
     if recording_complete and not samples_verified:
         raise RawRunIntegrityError(f"{run_dir} 声称录制完整但样本未通过校验")
+    recording_gaps = (
+        integrity.get("recording_gaps", []) if isinstance(integrity, Mapping) else []
+    )
+    if not isinstance(recording_gaps, list) or any(
+        not isinstance(gap, str) or not gap.strip() for gap in recording_gaps
+    ):
+        raise RawRunIntegrityError(f"{run_dir} 的录制缺口字段无效")
+    if recording_complete and recording_gaps:
+        raise RawRunIntegrityError(f"{run_dir} 声称录制完整但仍有录制缺口")
     for field in (
         "battle_count",
         "battle_sample_count",

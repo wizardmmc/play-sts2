@@ -128,7 +128,11 @@ def test_recorder_saves_changed_states_and_exact_mod_events(
             {
                 "event_id": 3,
                 "type": "run_ended",
-                "data": {"run_id": "SEED-001", "reason": "game_over"},
+                "data": {
+                    "run_id": "SEED-001",
+                    "reason": "game_over",
+                    "victory": False,
+                },
             },
         ],
     )
@@ -154,6 +158,7 @@ def test_recorder_saves_changed_states_and_exact_mod_events(
     assert metadata["ascension"] == 4
     assert metadata["battle_sample_count"] == 0
     assert metadata["strategic_sample_count"] == 1
+    assert metadata["victory"] is False
     assert not (result.run_dir / "events.jsonl").exists()
     rows = [
         json.loads(line)
@@ -371,16 +376,16 @@ def test_recorder_stops_when_player_returns_to_menu(tmp_path: Path) -> None:
     ]
 
 
-def test_recorder_marks_solver_capture_gaps_as_training_ineligible(
+def test_recorder_keeps_received_samples_eligible_after_solver_capture_gap(
     tmp_path: Path,
 ) -> None:
-    """Solver 动作缺口保留来源并关闭整局训练准入。
+    """Solver 动作缺口只关闭连续轨迹完整性，不否定已收到的独立样本。
 
     Args:
         tmp_path (Path): Pytest 提供的原始数据目录。
 
     Raises:
-        AssertionError: 采集缺口未进入完整性元数据或局仍可训练。
+        AssertionError: 采集缺口未进入元数据，或错误否定了已收到的样本。
 
     Returns:
         None: 此测试只检查缺口事件的保守处理。
@@ -408,7 +413,11 @@ def test_recorder_marks_solver_capture_gaps_as_training_ineligible(
             {
                 "event_id": 3,
                 "type": "run_ended",
-                "data": {"run_id": "GAP-SEED", "reason": "game_over"},
+                "data": {
+                    "run_id": "GAP-SEED",
+                    "reason": "game_over",
+                    "victory": False,
+                },
             },
         ],
     )
@@ -422,10 +431,11 @@ def test_recorder_marks_solver_capture_gaps_as_training_ineligible(
 
     assert result is not None
     metadata = json.loads((result.run_dir / "meta.json").read_text(encoding="utf-8"))
-    assert metadata["training_eligible"] is False
+    assert metadata["training_eligible"] is True
     assert metadata["recording_complete"] is False
-    assert metadata["integrity"]["samples_verified"] is False
-    assert metadata["integrity"]["ineligibility_reasons"] == [
+    assert metadata["integrity"]["samples_verified"] is True
+    assert metadata["integrity"]["ineligibility_reasons"] == []
+    assert metadata["integrity"]["recording_gaps"] == [
         "action_capture_gap: combat_solver: play_card: no matching state transition"
     ]
 

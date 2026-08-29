@@ -69,6 +69,7 @@ def test_audit_rejects_mixed_run_with_wrong_action_source_counts(
                 "run_id": "MIXED-RUN",
                 "source": "human_combat_solver",
                 "termination_reason": "game_over",
+                "victory": False,
                 "training_eligible": True,
                 "recording_complete": True,
                 "integrity": {
@@ -85,4 +86,45 @@ def test_audit_rejects_mixed_run_with_wrong_action_source_counts(
     )
 
     with pytest.raises(RawRunIntegrityError, match="action_source_counts"):
+        audit_human_run(run_dir)
+
+
+def test_audit_rejects_complete_run_with_recording_gaps(tmp_path: Path) -> None:
+    """存在已知缺失动作时不能同时声明整局录制完整。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 审计器接受互相冲突的完整性字段。
+
+    Returns:
+        None: 此测试只约束录制 gap 与完整性声明。
+    """
+    run_dir = tmp_path / "CONTRADICTED-RUN"
+    (run_dir / "combat").mkdir(parents=True)
+    (run_dir / "strategy").mkdir()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_id": "CONTRADICTED-RUN",
+                "termination_reason": "game_over",
+                "victory": True,
+                "training_eligible": True,
+                "recording_complete": True,
+                "integrity": {
+                    "samples_verified": True,
+                    "ineligibility_reasons": [],
+                    "recording_gaps": ["select_deck_card missing"],
+                },
+                "battle_count": 0,
+                "battle_sample_count": 0,
+                "strategic_sample_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RawRunIntegrityError, match="录制缺口"):
         audit_human_run(run_dir)

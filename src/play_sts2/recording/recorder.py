@@ -126,6 +126,7 @@ class HumanRunRecorder:
         active_run_id: str | None = None
         event_count = 0
         termination_reason: str | None = None
+        victory: bool | None = None
 
         try:
             self._wait_for_stream(stream_ready, error_queue, listener_stop)
@@ -149,9 +150,9 @@ class HumanRunRecorder:
                 assert active_run_id is not None
                 if envelope.get("type") == "combat_ended":
                     writer.end_battle()
-                integrity_failure = self._integrity_failure_from_event(envelope)
-                if integrity_failure is not None:
-                    writer.record_integrity_failure(integrity_failure)
+                recording_gap = self._recording_gap_from_event(envelope)
+                if recording_gap is not None:
+                    writer.record_recording_gap(recording_gap)
                 decision = self._decision_from_event(
                     active_run_id,
                     observed_at,
@@ -160,11 +161,12 @@ class HumanRunRecorder:
                 if decision is not None:
                     writer.append_decision(decision)
                     event_count += 1
-                termination_reason = self._termination_from_event(
+                termination = self._termination_from_event(
                     envelope,
                     active_run_id,
                 )
-                if termination_reason is not None:
+                if termination is not None:
+                    termination_reason, victory = termination
                     break
         except _RecordingStreamError:
             if writer is None:
@@ -181,7 +183,11 @@ class HumanRunRecorder:
         if writer is None:
             return None
         termination_reason = termination_reason or "interrupted"
-        writer.finalize(termination_reason, completed_at=_utc_now())
+        writer.finalize(
+            termination_reason,
+            completed_at=_utc_now(),
+            victory=victory,
+        )
         return RecordedRun(
             run_dir=writer.run_dir,
             termination_reason=termination_reason,
@@ -325,7 +331,7 @@ class HumanRunRecorder:
     def _termination_from_event(
         envelope: Mapping[str, Any],
         run_id: str,
-    ) -> str | None:
+    ) -> tuple[str, bool | None] | None:
         """读取 Mod 明确发布的一局终止原因。
 
         Args:
@@ -333,7 +339,8 @@ class HumanRunRecorder:
             run_id (str): 当前正在录制的局 ID。
 
         Returns:
-            str | None: 终局或返回菜单的原因；仍在局中时为 ``None``。
+            tuple[str, bool | None] | None: 终止原因和胜负；仍在局中时为
+                ``None``。
         """
         data = envelope.get("data")
         if envelope.get("type") != "run_ended" or not isinstance(data, Mapping):
@@ -341,11 +348,15 @@ class HumanRunRecorder:
         if str(data.get("run_id")) != run_id:
             return None
         reason = data.get("reason")
-        return reason if isinstance(reason, str) and reason else "game_over"
+        victory = data.get("victory")
+        return (
+            reason if isinstance(reason, str) and reason else "game_over",
+            victory if isinstance(victory, bool) else None,
+        )
 
     @staticmethod
-    def _integrity_failure_from_event(envelope: Mapping[str, Any]) -> str | None:
-        """把 Mod 报告的原生 UI 采集缺口转成稳定审计原因。
+    def _recording_gap_from_event(envelope: Mapping[str, Any]) -> str | None:
+        """把 Mod 报告的动作缺口转成不否定已有样本的审计原因。
 
         Args:
             envelope (Mapping[str, Any]): Mod 的原始 SSE 事件对象。

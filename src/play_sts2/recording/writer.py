@@ -57,6 +57,7 @@ class HumanRunWriter:
         self._current_battle_key: str | None = None
         self._event_ids: set[int | str] = set()
         self._integrity_failures: list[str] = []
+        self._recording_gaps: list[str] = []
 
         source_root = Path(output_root) / metadata.source
         source_root.mkdir(parents=True, exist_ok=True)
@@ -123,12 +124,19 @@ class HumanRunWriter:
         self._write_metadata()
         return destination
 
-    def finalize(self, reason: str, *, completed_at: str) -> None:
+    def finalize(
+        self,
+        reason: str,
+        *,
+        completed_at: str,
+        victory: bool | None = None,
+    ) -> None:
         """写入终止状态，并把临时目录原子发布为最终名称。
 
         Args:
             reason (str): ``game_over``、``returned_to_menu`` 或 ``interrupted``。
             completed_at (str): 录制完成时的 UTC ISO 8601 时间。
+            victory (bool | None): 完整终局的胜负；非终局或未知时为 ``None``。
 
         Raises:
             FileExistsError: 同名最终局已经存在，拒绝覆盖。
@@ -137,7 +145,11 @@ class HumanRunWriter:
         Returns:
             None: 元数据和目录发布完成后返回。
         """
-        self._write_metadata(termination_reason=reason, completed_at=completed_at)
+        self._write_metadata(
+            termination_reason=reason,
+            completed_at=completed_at,
+            victory=victory,
+        )
         destination = self._run_dir.parent / self._final_name()
         if destination.exists():
             raise FileExistsError(destination)
@@ -170,6 +182,26 @@ class HumanRunWriter:
         normalized = reason.strip()
         if normalized not in self._integrity_failures:
             self._integrity_failures.append(normalized)
+            self._write_metadata()
+
+    def record_recording_gap(self, reason: str) -> None:
+        """记录缺失动作，但保留已验证独立样本的训练资格。
+
+        Args:
+            reason (str): 可供逐局审计的稳定缺口原因。
+
+        Raises:
+            ValueError: 原因不是非空字符串。
+            OSError: 无法刷新元数据。
+
+        Returns:
+            None: 原因去重并持久化后返回。
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("录制缺口原因不能为空")
+        normalized = reason.strip()
+        if normalized not in self._recording_gaps:
+            self._recording_gaps.append(normalized)
             self._write_metadata()
 
     def _normalize_decision(
@@ -294,18 +326,25 @@ class HumanRunWriter:
         *,
         termination_reason: str | None = None,
         completed_at: str | None = None,
+        victory: bool | None = None,
     ) -> None:
         """以文件替换方式保存可用于异常恢复的当前统计。
 
         Args:
             termination_reason (str | None): 可选的最终终止原因。
             completed_at (str | None): 可选的最终完成时间。
+            victory (bool | None): 完整终局的胜负；未知时为 ``None``。
 
         Returns:
             None: 元数据原子替换完成后返回。
         """
         samples_verified = not self._integrity_failures
-        recording_complete = termination_reason == "game_over" and samples_verified
+        recording_complete = (
+            termination_reason == "game_over"
+            and isinstance(victory, bool)
+            and samples_verified
+            and not self._recording_gaps
+        )
         metadata = self._metadata.to_dict()
         if metadata.get("recording_context") is None:
             metadata.pop("recording_context", None)
@@ -320,12 +359,14 @@ class HumanRunWriter:
             "strategic_sample_count": self._strategic_sample_count,
             "action_source_counts": dict(sorted(self._action_source_counts.items())),
             "termination_reason": termination_reason,
+            "victory": victory,
             "completed_at": completed_at,
             "training_eligible": samples_verified,
             "recording_complete": recording_complete,
             "integrity": {
                 "samples_verified": samples_verified,
                 "ineligibility_reasons": list(self._integrity_failures),
+                "recording_gaps": list(self._recording_gaps),
             },
         }
         temporary = self._run_dir / ".meta.json.tmp"

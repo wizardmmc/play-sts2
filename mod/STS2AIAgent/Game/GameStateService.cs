@@ -62,17 +62,68 @@ internal static class GameStateService
     private static int _readyPlayerTurn = -1;
 
     public static GameStatePayload BuildStatePayload() =>
-        BuildStatePayload(null);
+        BuildStatePayload(null, null);
 
     internal static GameStatePayload BuildStatePayload(
-        string? trustedNativeUiAction)
+        string? trustedNativeUiAction) =>
+        BuildStatePayload(trustedNativeUiAction, null);
+
+    /// <summary>为原版牌堆选择构造与可见网格同构的动作前状态。</summary>
+    /// <param name="options">经过原版过滤后的候选牌，顺序与玩家可见索引一致。</param>
+    /// <param name="prefs">原版选择数量和确认规则。</param>
+    /// <param name="selectedCards">本条动作前已经选中的牌。</param>
+    /// <returns>只开放选牌动作、且不暴露 Solver 计划的完整状态。</returns>
+    internal static GameStatePayload BuildCombatPileSelectionState(
+        IReadOnlyList<CardModel> options,
+        CardSelectorPrefs prefs,
+        IReadOnlySet<CardModel> selectedCards)
+    {
+        var minSelect = Math.Min(prefs.MinSelect, options.Count);
+        var maxSelect = Math.Min(prefs.MaxSelect, options.Count);
+        var canConfirm = prefs.RequireManualConfirmation &&
+            selectedCards.Count >= minSelect;
+        var selection = new SelectionPayload
+        {
+            kind = "deck_card_select",
+            prompt = SafeReadString(() => prefs.Prompt.GetFormattedText()),
+            min_select = minSelect,
+            max_select = maxSelect,
+            selected_count = selectedCards.Count,
+            requires_confirmation = prefs.RequireManualConfirmation,
+            can_confirm = canConfirm,
+            cards = options.Select((card, index) => BuildSelectionCardPayload(
+                card,
+                index,
+                selectedCards.Contains(card))).ToArray()
+        };
+        return BuildStatePayload(null, selection);
+    }
+
+    /// <summary>构造当前完整状态，并可用原版隐式选牌上下文覆盖界面投影。</summary>
+    /// <param name="trustedNativeUiAction">原生提交点允许补入的动作。</param>
+    /// <param name="selectionOverride">没有真实 UI 时使用的可见选牌上下文。</param>
+    /// <returns>带单调 revision 的完整游戏状态。</returns>
+    private static GameStatePayload BuildStatePayload(
+        string? trustedNativeUiAction,
+        SelectionPayload? selectionOverride)
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
         var combatState = CombatManager.Instance.DebugOnlyGetState();
         var runState = RunManager.Instance.DebugOnlyGetState();
-        var screen = ResolveScreen(currentScreen);
+        var screen = selectionOverride == null
+            ? ResolveScreen(currentScreen)
+            : "CARD_SELECTION";
         var session = BuildSessionPayload(currentScreen, runState);
-        var availableActions = BuildAvailableActionNames(currentScreen, combatState, runState);
+        var availableActions = BuildAvailableActionNames(
+            currentScreen,
+            combatState,
+            runState);
+        if (selectionOverride != null)
+        {
+            availableActions = BuildCombatPileSelectionActions(
+                availableActions,
+                selectionOverride);
+        }
         if (!string.IsNullOrEmpty(trustedNativeUiAction) &&
             !availableActions.Contains(trustedNativeUiAction,
                 StringComparer.Ordinal))
@@ -86,7 +137,7 @@ internal static class GameStateService
         var multiplayer = BuildMultiplayerPayload(currentScreen, runState);
         var multiplayerLobby = BuildMultiplayerLobbyPayload(currentScreen);
         var map = BuildMapPayload(currentScreen, runState);
-        var selection = BuildSelectionPayload(currentScreen);
+        var selection = selectionOverride ?? BuildSelectionPayload(currentScreen);
         var cardsView = BuildCardsViewPayload(currentScreen);
         var characterSelect = BuildCharacterSelectPayload(currentScreen);
         var timeline = BuildTimelinePayload(currentScreen);
@@ -151,6 +202,31 @@ internal static class GameStateService
                 modal,
                 gameOver)
         });
+    }
+
+    /// <summary>保留选牌时仍可用的通用动作，并加入选择和确认动作。</summary>
+    /// <param name="currentActions">真实战斗画面当前开放的动作。</param>
+    /// <param name="selection">准备投影的牌堆选择上下文。</param>
+    /// <returns>与可见选牌页一致的动作名称。</returns>
+    private static string[] BuildCombatPileSelectionActions(
+        IReadOnlyList<string> currentActions,
+        SelectionPayload selection)
+    {
+        var actions = new List<string>();
+        if (currentActions.Contains("save_and_quit", StringComparer.Ordinal))
+        {
+            actions.Add("save_and_quit");
+        }
+        actions.Add("select_deck_card");
+        if (selection.can_confirm)
+        {
+            actions.Add("confirm_selection");
+        }
+        if (currentActions.Contains("discard_potion", StringComparer.Ordinal))
+        {
+            actions.Add("discard_potion");
+        }
+        return actions.ToArray();
     }
 
     private static SessionPayload BuildSessionPayload(IScreenContext? currentScreen, RunState? runState)

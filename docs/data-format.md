@@ -18,7 +18,9 @@ data/raw/human/20260827-a0-f17-VX7C7FLRRS/
 最高层原子改为最终名称。录制器只消费 Mod SSE 中的精确 `action_executed`，不
 轮询 `/state`，也不保存高频通用事件流。流中断前已经验证的单步样本仍可用于
 SFT，但 `recording_complete=false`；Mod 若报告 `native_ui_capture_gap`，录制器
-保留已收到的事实，并把整局标记为不可训练且不完整。
+保留已收到的事实，在 `integrity.recording_gaps` 中记录缺口，并把整局标记为不完整。
+由于每条 SFT 样本都自带完整当前状态，缺少的动作只是不生成对应标签，不会否定
+其他已经通过 Harness 校验的独立样本。
 
 一个战斗文件严格对应一场战斗。战斗与战略 JSONL 的每一行都是动作事实：
 
@@ -54,16 +56,22 @@ SFT，但 `recording_complete=false`；Mod 若报告 `native_ui_capture_gap`，�
   "battle_sample_count": 179,
   "strategic_sample_count": 77,
   "termination_reason": "game_over",
+  "victory": false,
   "training_eligible": true,
   "recording_complete": true,
-  "integrity": {"samples_verified": true, "ineligibility_reasons": []}
+  "integrity": {
+    "samples_verified": true,
+    "ineligibility_reasons": [],
+    "recording_gaps": []
+  }
 }
 ```
 
 `training_eligible` 只回答已经落盘的单步样本能否进入 SFT，并与
 `integrity.samples_verified` 保持一致。`recording_complete` 单独回答该局是否从
 开局录到 `game_over` 且没有已知采集缺口；它为 `false` 不会自动排除已经验证的
-单步样本。
+单步样本。`victory` 保存终局胜负，完整 `game_over` 新录制必须为布尔值；非终局
+或旧数据未知时为 `null`。
 
 `data/raw/human/splits.json` 使用 seed 按局整体划分训练、验证和测试集。构建器
 拒绝任何未在名册中声明的可训练局，并只读取
@@ -86,8 +94,9 @@ data/transcripts/
 └── human_combat_solver/
 ```
 
-每个 TXT 只在开头展示一次 system 规则，再按“决策 N / 状态 / 动作”展开。它不
-显示 `sample_id`、`event_id` 或 `human_play/...` 等内部定位信息，也不作为训练
+每个 TXT 按“决策 N / system / user 状态 / assistant 动作”展开；每条决策都会重复
+完整 system，因为真实 SFT 也是彼此独立的三消息样本，不共享文件内历史。Transcript
+不显示 `sample_id`、`event_id` 或 `human_play/...` 等内部定位信息，也不作为训练
 事实源。Harness 改动后可以直接覆盖重建：
 
 ```bash

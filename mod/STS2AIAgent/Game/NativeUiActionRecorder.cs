@@ -3,12 +3,16 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using Godot;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Rewards;
 using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
@@ -50,6 +54,9 @@ internal static class NativeUiActionRecorder
     private static NCardGridSelectionScreen? _pendingGridScreen;
     private static readonly List<(CardModel Card, Capture Capture)>
         _pendingGridSelections = new();
+    private static CombatPileSelectionCapture? _activeCombatPileSelection;
+    private static string _lastCombatActionSource = HumanUiSource;
+    private static long _lastCombatActionGeneration = -1;
     [ThreadStatic] private static int _buttonPatchDepth;
     [ThreadStatic] private static int _cardUiCommitDepth;
 
@@ -64,6 +71,34 @@ internal static class NativeUiActionRecorder
     private sealed record NativeAttempt(string Action, Capture? Capture);
     private sealed record GridCommitCapture(
         Capture[] Selections, NativeAttempt? Confirmation);
+    /// <summary>保存一次原版战斗牌堆选择的候选、来源和可见点击状态。</summary>
+    /// <param name="Options">原版过滤后的候选牌。</param>
+    /// <param name="Prefs">原版选择数量与确认规则。</param>
+    /// <param name="LifecycleGeneration">本次选择所属的局生命周期。</param>
+    /// <param name="ActionSource">触发选择的战斗动作来源。</param>
+    private sealed record CombatPileSelectionCapture(
+        CardModel[] Options,
+        CardSelectorPrefs Prefs,
+        long LifecycleGeneration,
+        string ActionSource)
+    {
+        /// <summary>保存可见网格的真实候选顺序。</summary>
+        public CardModel[]? VisibleOptions { get; set; }
+
+        /// <summary>可见点击调用栈能够提供时保存更直接的动作来源。</summary>
+        public string? VisibleActionSource { get; set; }
+
+        /// <summary>优先使用可见点击来源，否则继承触发本次选择的战斗动作。</summary>
+        public string EffectiveActionSource =>
+            VisibleActionSource ?? ActionSource;
+
+        /// <summary>按卡牌实例保存点击时构造的真实动作前状态。</summary>
+        public Dictionary<CardModel, Capture> VisibleCaptures { get; } =
+            new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>保存最终仍被选中的可见点击顺序。</summary>
+        public List<CardModel> VisibleSelectionOrder { get; } = new();
+    }
 
     private static NativeAttempt? BeginGridConfirmation(
         NCardGridSelectionScreen screen)
@@ -283,12 +318,149 @@ internal static class NativeUiActionRecorder
 
     private static Capture? BeginSelectedCard(CardModel card)
     {
-        var holders = GameStateService.GetDeckSelectionOptions(
-            ActiveScreenContext.Instance.GetCurrentScreen());
+        return BeginSelectedCard(
+            ActiveScreenContext.Instance.GetCurrentScreen(),
+            card);
+    }
+
+    /// <summary>使用已经确定的界面查找选牌索引，避免再次读取滞后的活动界面。</summary>
+    /// <param name="screen">实际收到点击的选牌界面。</param>
+    /// <param name="card">玩家或 Solver 选择的卡牌。</param>
+    /// <returns>动作前捕获；界面中找不到卡牌时为 <see langword="null"/>。</returns>
+    private static Capture? BeginSelectedCard(
+        IScreenContext? screen,
+        CardModel card)
+    {
+        var holders = GameStateService.GetDeckSelectionOptions(screen);
         var match = holders.Select((holder, index) => new { holder, index })
             .FirstOrDefault(x => ReferenceEquals(x.holder.CardModel, card));
         return match == null ? null
             : Begin("select_deck_card", optionIndex: match.index);
+    }
+
+    /// <summary>保存最近一次实际提交的战斗动作来源，供其异步选牌效果继承。</summary>
+    /// <param name="source">提交卡牌或药水的执行者。</param>
+    private static void RememberCombatActionSource(string source)
+    {
+        _lastCombatActionSource = source;
+        _lastCombatActionGeneration =
+            GameEventService.Instance.CaptureGeneration();
+    }
+
+    /// <summary>从真实候选和已选卡牌构造一条牌堆选择动作。</summary>
+    /// <param name="selection">当前原版牌堆选择。</param>
+    /// <param name="options">玩家可见的候选顺序。</param>
+    /// <param name="selectedCards">本条动作前已经选中的牌。</param>
+    /// <param name="card">本次实际选择的牌。</param>
+    /// <returns>可发布的动作捕获；目标卡牌不在候选中时为 <see langword="null"/>。</returns>
+    private static Capture? BuildCombatPileCardCapture(
+        CombatPileSelectionCapture selection,
+        IReadOnlyList<CardModel> options,
+        IReadOnlySet<CardModel> selectedCards,
+        CardModel card)
+    {
+        var optionIndex = RefIndex(options, card);
+        if (optionIndex < 0) return null;
+        try
+        {
+            var before = GameStateService.BuildCombatPileSelectionState(
+                options,
+                selection.Prefs,
+                selectedCards);
+            return new Capture(new ActionRequest
+            {
+                action = "select_deck_card",
+                option_index = optionIndex,
+                client_context = new
+                {
+                    source = selection.EffectiveActionSource,
+                    layer = "battle"
+                }
+            }, before, selection.LifecycleGeneration,
+                selection.EffectiveActionSource);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>等待原版牌堆选择完成，并按真实返回结果发布选择动作。</summary>
+    /// <param name="task">原版选牌任务。</param>
+    /// <param name="selection">调用前保存的候选与来源。</param>
+    /// <returns>不改变内容和顺序的原版选择结果。</returns>
+    private static async Task<IEnumerable<CardModel>> FinishCombatPileSelectionAsync(
+        Task<IEnumerable<CardModel>> task,
+        CombatPileSelectionCapture selection)
+    {
+        try
+        {
+            var result = (await task).ToArray();
+            var selectedCards = new HashSet<CardModel>(
+                ReferenceEqualityComparer.Instance);
+            var options = selection.VisibleOptions ?? selection.Options;
+            var orderedResult = selection.VisibleSelectionOrder
+                .Where(card => result.Any(candidate =>
+                    ReferenceEquals(candidate, card)))
+                .Concat(result.Where(card =>
+                    !selection.VisibleSelectionOrder.Any(candidate =>
+                        ReferenceEquals(candidate, card))))
+                .ToArray();
+            foreach (var card in orderedResult)
+            {
+                var capture = selection.VisibleCaptures.GetValueOrDefault(card)
+                    ?? BuildCombatPileCardCapture(
+                        selection,
+                        options,
+                        selectedCards,
+                        card);
+                if (capture == null)
+                {
+                    CaptureGap(
+                        "select_deck_card",
+                        "combat pile returned a card without a complete before-state",
+                        selection.LifecycleGeneration,
+                        selection.EffectiveActionSource);
+                }
+                else
+                {
+                    Finish(capture);
+                }
+                selectedCards.Add(card);
+            }
+
+            if (result.Length > 0 && selection.Prefs.RequireManualConfirmation)
+            {
+                try
+                {
+                    var before = GameStateService.BuildCombatPileSelectionState(
+                        options,
+                        selection.Prefs,
+                        selectedCards);
+                    Finish(new Capture(new ActionRequest
+                    {
+                        action = "confirm_selection",
+                        client_context = new
+                        {
+                            source = selection.EffectiveActionSource,
+                            layer = "battle"
+                        }
+                    }, before, selection.LifecycleGeneration,
+                        selection.EffectiveActionSource));
+                }
+                catch
+                {
+                    CaptureGap(
+                        "confirm_selection",
+                        "combat pile confirmation lacks a complete before-state",
+                        selection.LifecycleGeneration,
+                        selection.EffectiveActionSource);
+                }
+            }
+            return result;
+        }
+        finally
+        {
+            if (ReferenceEquals(_activeCombatPileSelection, selection))
+                _activeCombatPileSelection = null;
+        }
     }
 
     private static IReadOnlyList<CardModel>? GetSelectedGridCards(
@@ -332,6 +504,40 @@ internal static class NativeUiActionRecorder
             return;
         }
 
+        if (screen is NCombatPileCardSelectScreen &&
+            _activeCombatPileSelection is { } combatPileSelection)
+        {
+            combatPileSelection.VisibleActionSource = ResolveActionSource();
+            var options = GameStateService.GetDeckSelectionOptions(screen)
+                .Select(holder => holder.CardModel)
+                .Where(candidate => candidate != null)
+                .Cast<CardModel>()
+                .ToArray();
+            combatPileSelection.VisibleOptions = options;
+            if (selected.Any(candidate => ReferenceEquals(candidate, card)))
+            {
+                combatPileSelection.VisibleCaptures.Remove(card);
+                combatPileSelection.VisibleSelectionOrder.RemoveAll(candidate =>
+                    ReferenceEquals(candidate, card));
+                return;
+            }
+            var combatCapture = BuildCombatPileCardCapture(
+                combatPileSelection,
+                options,
+                new HashSet<CardModel>(
+                    selected,
+                    ReferenceEqualityComparer.Instance),
+                card);
+            if (combatCapture != null)
+            {
+                combatPileSelection.VisibleCaptures[card] = combatCapture;
+                combatPileSelection.VisibleSelectionOrder.RemoveAll(candidate =>
+                    ReferenceEquals(candidate, card));
+                combatPileSelection.VisibleSelectionOrder.Add(card);
+            }
+            return;
+        }
+
         var pendingIndex = _pendingGridSelections.FindIndex(
             pending => ReferenceEquals(pending.Card, card));
         if (selected.Any(candidate => ReferenceEquals(candidate, card)))
@@ -340,7 +546,7 @@ internal static class NativeUiActionRecorder
             return;
         }
 
-        var capture = BeginSelectedCard(card);
+        var capture = BeginSelectedCard(screen, card);
         if (capture == null) return;
         if (pendingIndex >= 0) _pendingGridSelections.RemoveAt(pendingIndex);
         _pendingGridSelections.Add((card, capture));
@@ -538,6 +744,8 @@ internal static class NativeUiActionRecorder
         {
             if (!__result) return;
             if (Volatile.Read(ref _suppressionDepth) != 0) return;
+            RememberCombatActionSource(
+                __state?.ActionSource ?? HumanUiSource);
             GameActionService.RecordCardPlayed(
                 CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0,
                 __instance.Type.ToString());
@@ -600,6 +808,8 @@ internal static class NativeUiActionRecorder
         }
         static void Postfix(CommitCapture? __state)
         {
+            if (__state != null)
+                RememberCombatActionSource(__state.ActionSource);
             if (__state?.Capture != null)
             {
                 Finish(__state.Capture);
@@ -744,14 +954,70 @@ internal static class NativeUiActionRecorder
             return methods.Where(method => method != null)!;
         }
         static void Prefix(NCardGridSelectionScreen __instance,
-            out GridCommitCapture __state) =>
-            __state = new GridCommitCapture(
-                TakeCommittedGridSelections(__instance),
-                BeginGridConfirmation(__instance));
+            out GridCommitCapture __state)
+        {
+            __state = __instance is NCombatPileCardSelectScreen
+                ? new GridCommitCapture(Array.Empty<Capture>(), null)
+                : new GridCommitCapture(
+                    TakeCommittedGridSelections(__instance),
+                    BeginGridConfirmation(__instance));
+        }
         static void Postfix(GridCommitCapture __state)
         {
             foreach (var capture in __state.Selections) Finish(capture);
             FinishAttempt(__state.Confirmation);
+        }
+    }
+
+    /// <summary>在原版返回真实牌堆选择结果后统一发布可见和隐式动作。</summary>
+    [HarmonyPatch(typeof(CardSelectCmd), nameof(CardSelectCmd.FromCombatPile),
+        typeof(PlayerChoiceContext), typeof(CardPile), typeof(Player),
+        typeof(CardSelectorPrefs), typeof(Func<CardModel, bool>))]
+    private static class CombatPileSelectionPatch
+    {
+        /// <summary>保存过滤后的候选、动作来源和局生命周期。</summary>
+        /// <param name="pile">原版准备展示或隐式选择的战斗牌堆。</param>
+        /// <param name="player">执行选择的玩家。</param>
+        /// <param name="prefs">原版选择数量和确认规则。</param>
+        /// <param name="filter">原版用于限制候选牌的过滤器。</param>
+        /// <param name="__state">返回给后置补丁的选牌上下文。</param>
+        static void Prefix(
+            CardPile pile,
+            Player player,
+            CardSelectorPrefs prefs,
+            Func<CardModel, bool>? filter,
+            out CombatPileSelectionCapture? __state)
+        {
+            __state = null;
+            if (Volatile.Read(ref _suppressionDepth) != 0) return;
+            var local = GameStateService.GetLocalPlayer(
+                CombatManager.Instance.DebugOnlyGetState());
+            if (!ReferenceEquals(player, local)) return;
+            var options = (filter == null
+                    ? pile.Cards
+                    : pile.Cards.Where(filter))
+                .ToArray();
+            if (options.Length == 0) return;
+            var generation = GameEventService.Instance.CaptureGeneration();
+            __state = new CombatPileSelectionCapture(
+                options,
+                prefs,
+                generation,
+                _lastCombatActionGeneration == generation
+                    ? _lastCombatActionSource
+                    : ResolveActionSource());
+            _activeCombatPileSelection = __state;
+        }
+
+        /// <summary>包装异步返回值，在调用方应用选择结果前发布动作。</summary>
+        /// <param name="__result">原版异步选择结果。</param>
+        /// <param name="__state">前置补丁保存的选牌上下文。</param>
+        static void Postfix(
+            ref Task<IEnumerable<CardModel>> __result,
+            CombatPileSelectionCapture? __state)
+        {
+            if (__state != null)
+                __result = FinishCombatPileSelectionAsync(__result, __state);
         }
     }
 

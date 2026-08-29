@@ -82,10 +82,11 @@ ID 只用于带明确 provenance 的人工确认修正。
 训练资格和整局录制完整性。`training_eligible` 与
 `integrity.samples_verified` 表示已有样本能否用于 SFT；`recording_complete`
 表示是否从开局录到 `game_over` 且没有已知采集缺口。流中断只把后者设为
-`false`，不会否定断流前已经验证的样本。Mod 报告任何
-`native_ui_capture_gap` 时，两项都会变为 `false`。录制中的隐藏目录以及尚无终止
-原因的目录不会被 dataset builder 读取；`A7L5LAXFYJ` 也因旧录制缺失动作而明确
-排除。
+`false`，不会否定断流前已经验证的样本。Mod 报告
+`native_ui_capture_gap` 时，缺口进入 `integrity.recording_gaps` 并关闭整局完整性；
+已经收到且合法的独立状态—动作样本仍保持训练资格。录制中的隐藏目录以及尚无终止
+原因的目录不会被 dataset builder 读取；历史局 `A7L5LAXFYJ` 仍沿用既有明确排除
+结论，是否按新的独立样本语义重新准入需单独复核，不在本次 A1 修复中顺带改写。
 
 ## 重建命令
 
