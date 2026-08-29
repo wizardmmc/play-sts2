@@ -129,7 +129,12 @@ def test_profile_enables_only_the_agent_mod() -> None:
     mod_states = {mod["id"]: mod["is_enabled"] for mod in mod_list}
 
     assert settings["mod_settings"]["mods_enabled"] is True
-    assert mod_states == {"STS2AIAgent": True, "UnifiedSavePath": False}
+    assert mod_states == {
+        "STS2AIAgent": True,
+        "STS2-RitsuLib": False,
+        "CombatSolver": False,
+        "UnifiedSavePath": False,
+    }
 
 
 def test_profile_enables_native_fast_mode_without_data_upload() -> None:

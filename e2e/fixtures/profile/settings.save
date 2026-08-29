@@ -60,6 +60,16 @@
         "id": "STS2AIAgent",
         "is_enabled": true,
         "source": "mods_directory"
+      },
+      {
+        "id": "STS2-RitsuLib",
+        "is_enabled": false,
+        "source": "mods_directory"
+      },
+      {
+        "id": "CombatSolver",
+        "is_enabled": false,
+        "source": "mods_directory"
       }
     ],
     "mods_enabled": true
