@@ -1,12 +1,11 @@
 """渲染战略模型进行整局规划所需的长期状态与地图。"""
 
-import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-_MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
-_RESOURCE_PATTERN = re.compile(r"res://\S+?\.png")
+from .text import card_display_name, clean_game_text, human_act_number
+
 _CARD_TYPE_NAMES = {
     "Attack": "攻击",
     "Curse": "诅咒",
@@ -58,7 +57,7 @@ def render_strategic_context(state: Mapping[str, Any]) -> str:
         str: 幕、Boss、进阶效果、资源、遗物、药水与牌组摘要。
     """
     run = state.get("run") or {}
-    act_id = _as_int(run.get("act_id"))
+    act_id = human_act_number(run.get("act_id"))
     boss_id = _clean_text(run.get("boss_id")) or "未知"
     boss_name = _BOSS_NAMES.get(boss_id)
     boss = f"{boss_name} ({boss_id})" if boss_name else boss_id
@@ -211,9 +210,10 @@ def _render_deck(deck: Sequence[Mapping[str, Any]]) -> str:
     """
     groups: dict[tuple[str, str, str], int] = {}
     for card in deck:
-        name = _clean_text(card.get("name")) or "未知卡牌"
-        if card.get("upgraded"):
-            name += "+"
+        name = card_display_name(
+            card.get("name"),
+            upgraded=card.get("upgraded") is True,
+        )
         cost = _card_cost(card)
         card_type = _CARD_TYPE_NAMES.get(
             str(card.get("card_type") or ""),
@@ -479,6 +479,4 @@ def _clean_text(value: Any) -> str:
     Returns:
         str: 适合直接放入模型观测的纯文本。
     """
-    text = _MARKUP_PATTERN.sub("", str(value or ""))
-    text = _RESOURCE_PATTERN.sub("", text)
-    return " ".join(text.split())
+    return clean_game_text(value)

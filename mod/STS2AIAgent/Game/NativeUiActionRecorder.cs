@@ -100,6 +100,17 @@ internal static class NativeUiActionRecorder
         public List<CardModel> VisibleSelectionOrder { get; } = new();
     }
 
+    /// <summary>保存一次无需显示界面的原版手牌选择。</summary>
+    /// <param name="Options">原版过滤后的手牌候选。</param>
+    /// <param name="Prefs">原版选择数量与确认规则。</param>
+    /// <param name="LifecycleGeneration">本次选择所属的局生命周期。</param>
+    /// <param name="ActionSource">触发选择的战斗动作来源。</param>
+    private sealed record ImplicitHandSelectionCapture(
+        CardModel[] Options,
+        CardSelectorPrefs Prefs,
+        long LifecycleGeneration,
+        string ActionSource);
+
     private static NativeAttempt? BeginGridConfirmation(
         NCardGridSelectionScreen screen)
     {
@@ -461,6 +472,61 @@ internal static class NativeUiActionRecorder
             if (ReferenceEquals(_activeCombatPileSelection, selection))
                 _activeCombatPileSelection = null;
         }
+    }
+
+    /// <summary>等待隐式手牌选择完成，并按原版真实返回结果发布动作。</summary>
+    /// <param name="task">原版手牌选择任务。</param>
+    /// <param name="selection">调用前保存的候选与来源。</param>
+    /// <returns>不改变内容和顺序的原版选择结果。</returns>
+    private static async Task<IEnumerable<CardModel>> FinishImplicitHandSelectionAsync(
+        Task<IEnumerable<CardModel>> task,
+        ImplicitHandSelectionCapture selection)
+    {
+        var result = (await task).ToArray();
+        var selectedCards = new HashSet<CardModel>(
+            ReferenceEqualityComparer.Instance);
+        foreach (var card in result)
+        {
+            var optionIndex = RefIndex(selection.Options, card);
+            Capture? capture = null;
+            if (optionIndex >= 0)
+            {
+                try
+                {
+                    var before = GameStateService.BuildCombatHandSelectionState(
+                        selection.Options,
+                        selection.Prefs,
+                        selectedCards);
+                    capture = new Capture(new ActionRequest
+                    {
+                        action = "select_deck_card",
+                        option_index = optionIndex,
+                        client_context = new
+                        {
+                            source = selection.ActionSource,
+                            layer = "battle"
+                        }
+                    }, before, selection.LifecycleGeneration,
+                        selection.ActionSource);
+                }
+                catch { }
+            }
+
+            if (capture == null)
+            {
+                CaptureGap(
+                    "select_deck_card",
+                    "implicit hand selection returned a card without a complete before-state",
+                    selection.LifecycleGeneration,
+                    selection.ActionSource);
+            }
+            else
+            {
+                Finish(capture);
+            }
+            selectedCards.Add(card);
+        }
+        return result;
     }
 
     private static IReadOnlyList<CardModel>? GetSelectedGridCards(
@@ -1018,6 +1084,61 @@ internal static class NativeUiActionRecorder
         {
             if (__state != null)
                 __result = FinishCombatPileSelectionAsync(__result, __state);
+        }
+    }
+
+    /// <summary>捕获原版不会显示手牌界面的单候选隐式选择。</summary>
+    [HarmonyPatch(typeof(CardSelectCmd), nameof(CardSelectCmd.FromHand),
+        typeof(PlayerChoiceContext), typeof(Player), typeof(CardSelectorPrefs),
+        typeof(Func<CardModel, bool>), typeof(AbstractModel))]
+    private static class ImplicitHandSelectionPatch
+    {
+        /// <summary>在原版直接返回候选前保存候选、来源和局生命周期。</summary>
+        /// <param name="player">被选择手牌的玩家。</param>
+        /// <param name="prefs">原版选择数量和确认规则。</param>
+        /// <param name="filter">原版用于限制候选牌的过滤器。</param>
+        /// <param name="__state">返回给后置补丁的隐式选择上下文。</param>
+        static void Prefix(
+            Player player,
+            CardSelectorPrefs prefs,
+            Func<CardModel, bool>? filter,
+            out ImplicitHandSelectionCapture? __state)
+        {
+            __state = null;
+            if (Volatile.Read(ref _suppressionDepth) != 0) return;
+            var local = GameStateService.GetLocalPlayer(
+                CombatManager.Instance.DebugOnlyGetState());
+            if (!ReferenceEquals(player, local)) return;
+            var options = PileType.Hand.GetPile(player).Cards
+                .Where(filter ?? (_ => true))
+                .ToArray();
+            if (options.Length == 0 || prefs.RequireManualConfirmation ||
+                options.Length > prefs.MinSelect)
+            {
+                return;
+            }
+
+            var generation = GameEventService.Instance.CaptureGeneration();
+            __state = new ImplicitHandSelectionCapture(
+                options,
+                prefs,
+                generation,
+                _lastCombatActionGeneration == generation
+                    ? _lastCombatActionSource
+                    : ResolveActionSource());
+        }
+
+        /// <summary>包装异步返回值，在调用方移动所选手牌前发布动作。</summary>
+        /// <param name="__result">原版异步选择结果。</param>
+        /// <param name="__state">前置补丁保存的隐式选择上下文。</param>
+        static void Postfix(
+            ref Task<IEnumerable<CardModel>> __result,
+            ImplicitHandSelectionCapture? __state)
+        {
+            if (__state != null)
+            {
+                __result = FinishImplicitHandSelectionAsync(__result, __state);
+            }
         }
     }
 

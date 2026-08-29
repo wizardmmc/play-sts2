@@ -76,7 +76,39 @@ internal static class GameStateService
     internal static GameStatePayload BuildCombatPileSelectionState(
         IReadOnlyList<CardModel> options,
         CardSelectorPrefs prefs,
-        IReadOnlySet<CardModel> selectedCards)
+        IReadOnlySet<CardModel> selectedCards) =>
+        BuildCombatSelectionState(
+            options,
+            prefs,
+            selectedCards,
+            "deck_card_select");
+
+    /// <summary>为原版手牌隐式选择构造与可见手牌选择同构的动作前状态。</summary>
+    /// <param name="options">经过原版过滤后的手牌候选，顺序与玩家可见索引一致。</param>
+    /// <param name="prefs">原版选择数量和确认规则。</param>
+    /// <param name="selectedCards">本条动作前已经选中的牌。</param>
+    /// <returns>只开放选牌动作、且不暴露 Solver 计划的完整状态。</returns>
+    internal static GameStatePayload BuildCombatHandSelectionState(
+        IReadOnlyList<CardModel> options,
+        CardSelectorPrefs prefs,
+        IReadOnlySet<CardModel> selectedCards) =>
+        BuildCombatSelectionState(
+            options,
+            prefs,
+            selectedCards,
+            "combat_hand_select");
+
+    /// <summary>按指定选择类型构造原版战斗选牌的动作前状态。</summary>
+    /// <param name="options">经过原版过滤后的候选牌。</param>
+    /// <param name="prefs">原版选择数量和确认规则。</param>
+    /// <param name="selectedCards">本条动作前已经选中的牌。</param>
+    /// <param name="selectionKind">Harness 使用的稳定选牌类型。</param>
+    /// <returns>包含候选、选择约束和合法动作的完整状态。</returns>
+    private static GameStatePayload BuildCombatSelectionState(
+        IReadOnlyList<CardModel> options,
+        CardSelectorPrefs prefs,
+        IReadOnlySet<CardModel> selectedCards,
+        string selectionKind)
     {
         var minSelect = Math.Min(prefs.MinSelect, options.Count);
         var maxSelect = Math.Min(prefs.MaxSelect, options.Count);
@@ -84,7 +116,7 @@ internal static class GameStateService
             selectedCards.Count >= minSelect;
         var selection = new SelectionPayload
         {
-            kind = "deck_card_select",
+            kind = selectionKind,
             prompt = SafeReadString(() => prefs.Prompt.GetFormattedText()),
             min_select = minSelect,
             max_select = maxSelect,

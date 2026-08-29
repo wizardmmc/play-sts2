@@ -1,19 +1,11 @@
 """从独立文本资源加载 Harness 系统提示词。"""
 
-import re
 from collections.abc import Mapping
 from importlib import resources
 from typing import Any
 
 from ..ownership import HarnessLayer
-
-_MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
-_RESOURCE_ICON_PATTERN = re.compile(
-    r"(?:\[img\])?(res://[^\[\]\s]+?\.[A-Za-z0-9]+)(?:\[/img\])?",
-    re.IGNORECASE,
-)
-_ENERGY_TOKEN = "\ue000"
-_STAR_TOKEN = "\ue001"
+from ..text import clean_game_text
 
 
 def system_prompt(
@@ -78,47 +70,7 @@ def _clean_text(value: Any) -> str:
     Returns:
         str: 适合直接进入模型提示词的单行文本。
     """
-    text = _RESOURCE_ICON_PATTERN.sub(_replace_resource_icon, str(value or ""))
-    text = _MARKUP_PATTERN.sub("", text)
-    text = _expand_resource_tokens(text, _ENERGY_TOKEN, "能量")
-    text = _expand_resource_tokens(text, _STAR_TOKEN, "星能")
-    return " ".join(text.split())
-
-
-def _replace_resource_icon(match: re.Match[str]) -> str:
-    """把通用资源图标替换为等待计数展开的内部标记。
-
-    Args:
-        match (re.Match[str]): 含完整 ``[img]`` 标记和资源路径的匹配。
-
-    Returns:
-        str: 能量、星能内部标记；未知图片转换为明确的缺失语义标记。
-    """
-    filename = match.group(1).rsplit("/", 1)[-1].casefold()
-    stem = filename.rsplit(".", 1)[0]
-    if stem.endswith("_energy_icon"):
-        return _ENERGY_TOKEN
-    if stem == "star_icon":
-        return _STAR_TOKEN
-    return f"〔未知图标: {stem}〕"
-
-
-def _expand_resource_tokens(text: str, token: str, resource_name: str) -> str:
-    """把显式数值或连续图标转换为带数量的资源文本。
-
-    Args:
-        text (str): 已移除富文本标签、仍含内部资源标记的文本。
-        token (str): 当前资源的单字符内部标记。
-        resource_name (str): 输出使用的中文资源名称。
-
-    Returns:
-        str: ``4 + 图标`` 和连续图标均转换为明确数量后的文本。
-    """
-    return re.sub(
-        rf"(?:(\d+)\s*点?\s*)?({token}+)",
-        lambda match: f"{match.group(1) or len(match.group(2))}点{resource_name}",
-        text,
-    )
+    return clean_game_text(value)
 
 
 __all__ = ["system_prompt"]

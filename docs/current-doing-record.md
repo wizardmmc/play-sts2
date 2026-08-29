@@ -2,10 +2,11 @@
 
 最后更新：2026-08-29
 
-- 状态：CombatPile 捕获与胜负持久化已经修复。修复后首盘正式 A3 已通关并通过
-  日志、raw 与 Harness 三方验收，736 条样本连续完整。
-- 下一步：沿用当前协议继续下一难度录制；E5 构建前先修 Harness 样式问题，再从 raw
-  统一重建 transcript 和训练分卷。
+- 状态：A5 已通关并转录；952 条已收到样本均可训练，但日志发现 1 次
+  `SCAVENGE` 隐式单候选 Hand 选择漏录，因此该局不是无缺口连续轨迹。对应捕获边界
+  已修复并通过隔离实机回归，磁盘运行时等待重启加载。
+- 下一步：重启教师游戏，以 High 档录制 A6；首战部署前确认游戏内档位与 recorder
+  的 `--solver-preset high` 一致。
 
 ## 当前目标
 
@@ -146,43 +147,110 @@ A0、A1、A2 的胜负本身可以从各自游戏日志中的明确 `WON/LOST` �
 `data/transcripts/human_combat_solver/20260829-a3-f48-PHRNGCP5S2QS/`，包含 24 个
 战斗文件和 1 个战略文件，493/243 条决策与 raw 完全一致。
 
-## Harness 训练前样式审计
+## 已确认完整：A4
 
-审计范围为两盘 A2 与完整 A3，共 75 个 transcript 文件、2,250 条独立决策。
+目录：`data/raw/human_combat_solver/20260829-a4-f48-DKM6RXF43VH4`
 
-已经通过的契约：
+故障机器人 A4 在 48 层击败 `TEST_SUBJECT_BOSS` 通关：
 
-- 2,250 条决策都有一组 system/user/assistant 和恰好一行合法 `ACTION:`；
-- 训练消息没有 `draw_cards`、`discard_cards`、`exhaust_cards`、revision、event ID、
-  CombatSolver、RNG 状态或搜索树字段，也没有残留 `res://` 路径；
-- 正式 Qwen3.5 tokenizer 下长度为 470～2,076 token，P99 为 1,873，没有样本超过
-  8,192 或训练配置的 12,288 token 上限；
-- 战斗、战略、地图、商店、奖励和选牌页面的动作索引与 raw 合法域一致；A3 的隐式
-  与可见 CombatPile 选择都呈现完整战斗状态和明确候选。
+- 27 场战斗、564 条 Solver 战斗动作、262 条人工战略动作，共 826 条；
+- 日志 431 次出牌和 9 次药水，与 raw 的 440 条部署动作身份及顺序逐项一致；
+- 日志 120 次 `end_turn=true` 与 raw 的 120 条 `end_turn` 一致；
+- 日志 4 次 `NATIVE_CHOICE_REQUEST/SELECTED` 与 raw 的 4 条 Solver 选牌身份及顺序
+  一致，依次为 `THUNDER`、`MIND_ROT`、`SLOTH`、`DISINTEGRATION`；本盘四次均为
+  ChooseCard，没有触发全息影像 CombatPile；
+- 826 个 event ID 唯一，战斗/战略来源没有混淆；全部样本通过当前 Harness 合法动作
+  与样式审计，能量空句、重复升级符号、英文枚举、零基幕号、本地化键、假已售卡和
+  `res://` 路径计数均为零；
+- 日志没有 capture gap、非零 deployment drift 或实际 unexpected replan；
+- 最终元数据为 `victory=true`、`training_eligible=true`、
+  `recording_complete=true`，`recording_gaps=[]`。
 
-E5 构建前必须修正的表现层问题：
+可读投影位于
+`data/transcripts/human_combat_solver/20260829-a4-f48-DKM6RXF43VH4/`，包含 27 个
+战斗文件和 1 个战略文件，564/262 条决策与 raw 完全一致。正式 Qwen3.5 tokenizer
+下 P99 1,985、最大 2,064 token，没有样本超过 12,288 上限。
 
-1. 能量图标资源路径被 `_clean_text` 直接删除，出现 1,859 行“获得。”、“在下个回合
-   获得。”等缺失语义，影响卡牌、药水和遗物；raw 仍保留 18,180 个
-   `defect_energy_icon.png`，可以按连续图标数重建能量值。
-2. Mod 的升级牌名称已经带 `+`，Harness 又根据 `upgraded=true` 追加一次，产生
-   4,272 行 `++`。
-3. 卡牌目标和不可用原因仍暴露内部英文枚举：2,804 个 `<AnyEnemy>`、
-   `<AllEnemies>`、`<RandomEnemy>` 或 `<None>`，以及 1,226 个
-   `not_enough_energy`、`unplayable`、`blocked_by_hook`。
-4. `act_id` 是零基索引，但战略文本直接写成“第0幕/第1幕/第2幕”；717 条战略决策
-   都应转成人类口径的第一至第三幕。
-5. Neow、古代人等事件有 18 行 `*.pages.*.description` 本地化键；旧 raw 无法恢复
-   文本时至少应隐藏键，新 Mod 应优先输出已解析描述。
-6. 商店已售出的空槽出现 17 行“未知卡牌(0费) | 0金币 | 已售出”，应简化为明确的
-   已售出槽位。
+## A5 通关、一个 Hand 隐式选择缺口
 
-Transcript 中每条决策重复 system 是刻意镜像实际 SFT 的独立三消息结构，不是训练
-重复错误；`docs/data-format.md` 里“每个 TXT 只在开头展示一次 system”的旧描述需要
-随修复一起更新。
+目录：`data/raw/human_combat_solver/20260829-a5-f50-9JG499AMX7JS`
 
-以上问题不要求重录。先继续保存 raw；修正 Harness/Mod 后覆盖重建 transcript，再
-构建 E5，禁止直接编辑当前 TXT 或生成后的 SFT JSONL。
+故障机器人 A5 在 50 层击败 `AEONGLASS_BOSS` 通关：
+
+- 21 场战斗、717 条战斗样本、235 条战略样本，共 952 条；其中
+  `combat_solver=714`、`human_ui=238`。13 层 `GAS_BOMB.EXPLODE_MOVE` 令 Solver
+  连续 7 次在 `combat_root_snapshot` 初始化失败，用户手动执行 2 次出牌和 1 次药水；
+  三条动作均以 `human_ui` 保存，后续战斗恢复 Solver，数据来源没有混淆；
+- 日志 537 次部署动作与 raw 的 `532 play_card + 5 use_potion` 逐项一致，148 次
+  `end_turn=true` 与 raw 逐项一致；952 个 event ID 全部唯一；
+- 日志有 30 次 `NATIVE_CHOICE_SELECTED`，raw 只有 29 条 Solver
+  `select_deck_card`。唯一缺口位于 `battle-f031-11` 第 1 回合：`SCAVENGE` 在 Hand
+  仅有一个合格候选时隐式选择 `WHITE_NOISE+1@TAINTED:2`，日志显示
+  `surface=Hand visible=False options=1`，但没有动作事件或 `capture_gap`；
+- 缺失行没有完整动作前状态，故不从日志伪造。元数据已受控改为
+  `training_eligible=true`、`recording_complete=false`，并在
+  `integrity.recording_gaps` 记录该缺口；已有 952 条独立样本均能由 Harness 重建为
+  合法动作；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a5-f50-9JG499AMX7JS/`，包含 21 个
+  战斗文件和 1 个战略文件。脏文本与隐藏字段计数均为零，system/user/assistant/
+  `ACTION:` 都是 952 条；Qwen3.5 tokenizer P99 1,949、最大 2,047，没有样本超过
+  12,288。
+
+这盘也覆盖了两类动态遗物和特殊地图：
+
+- 精致折扇的 system 说明明确写出“同一回合第 3 张攻击牌获得 4 格挡”；user 状态从
+  `计数 0 → 1 → 2；已高亮` 推进。实际第三张攻击牌前为计数 2，打出后格挡从 22
+  增至 26，和说明一致；
+- 艳丽围巾明确写出“从手牌打出的第 5 张牌免费”；计数 4 时显示“已高亮”，候选
+  手牌实时显示为 0 费，打出后计数清空。训练输入同时含触发规则与当前触发进度；
+- 18 层事件选择了黄金罗盘，选项和遗物说明都写明“将第 2 阶段地图替换为特殊直道”。
+  下一张 MAP 状态为 18 个节点、每行仅 `(row,3)`、每个节点只有一个后继；Harness
+  全图忠实输出从古代节点到 Boss 的 17 段单链，而非误还原成普通分叉图。
+
+缺口根因是上一次只包装了 `CardSelectCmd.FromCombatPile` 的异步结果。原版
+`CardSelectCmd.FromHand` 具有相同的隐式分支：无需手动确认且候选数不大于最少选择
+数时直接返回，不调用 `NPlayerHand.SelectCardInSimpleMode`，所以既绕过点击捕获，也
+不会触发现有 gap。修复只包装这个隐式 Hand 分支；可见 Hand 路径保持原样，避免重复。
+
+隔离 0.111.0 实机回归使用 `SCAVENGE + WITHER` 强制单候选 Hand 选择：修复前 Solver
+日志有 `NATIVE_CHOICE_SELECTED`，事件流只有 `play_card`；修复后无人测试通过，事件
+流新增且仅新增 1 条 `select_deck_card`，状态为 `CARD_SELECTION / combat_hand_select`、
+候选 `[WITHER]`、索引 0、来源 `combat_solver`，并且没有 `capture_gap`。
+
+## 已修复：Harness 训练前样式
+
+初次审计两盘 A2 与完整 A3 的 2,250 条独立决策时，动作合法性、隐藏信息和长度已经
+通过，但发现六类高频表现问题：能量图标被删为空句、升级牌重复 `+`、内部目标/不可用
+枚举、零基幕号、事件本地化键和已售空槽假卡牌。
+
+这些问题不是第一次出现。前辈项目 `human-rl` 在 2026-08-23～25 已经实现并测试：
+
+- 连续能量/星能图标按数量转为“1点能量/2点能量”；
+- 游戏名称已经带 `+` 时不再追加；
+- 目标与不可用原因转换成玩家措辞；
+- 零基 `act_id` 加一显示；
+- 已售空槽不伪造零费未知卡牌。
+
+Git 历史确认当前 `Play_sts2` 的 Harness 于 2026-08-27～28 重新实现时没有移植这些
+规则，且旧测试反而固定了 `<AnyEnemy>`、`unplayable` 和“第0幕”。本次修复复用了
+前辈已经实证的语义，但按当前 stateless Harness 和 pytest 结构重新实现：
+
+- 新增共享文本清洗，保留连续图标数量，未知图标保持可发现；
+- 战斗、选牌、商店与战略牌组统一去除重复升级符号；
+- 只为真实需要目标的卡牌显示中文目标，三种已出现的不可用原因全部中文化；
+- 战略幕号转成玩家的一基编号；
+- `*.pages.*` 未解析事件键不再输出，已售空槽显示为“已售出”。
+
+随后从 raw 覆盖重建 A0、A1、两盘 A2、A3 和 A4：共 6 局、148 个战斗文件、6 个
+战略文件、4,874 条决策。能量空句、`++`、英文目标/不可用原因、零基幕号、本地化键、
+假已售卡牌和 `res://` 路径计数均为零；system/user/assistant 与 `ACTION:` 数量均为
+4,874。正式 Qwen3.5 tokenizer 的既有总集最大值仍为 2,085，
+没有样本超过 8,192 或训练上限 12,288。
+
+Transcript 每条决策重复 system 是刻意镜像实际 SFT 的独立三消息结构，不是训练
+重复错误；`docs/data-format.md` 已同步更正。全部问题都通过 raw 重建解决，没有直接
+手工修补 TXT、生成 JSONL 或重录游戏。
 
 ## 已修复：胜负标签持久化
 
@@ -204,7 +272,8 @@ A0、A1、A2 已根据仍保留的明确终局日志受控回填为 `true/true/f
 3. 对账 `DEPLOY_END` 与 raw 的 `end_turn`。
 4. 对账 `NATIVE_CHOICE_SELECTED` 与 raw 的 `select_deck_card`，按战斗、回合和部署顺序定位每个差异。
 5. 检查 `capture_gap`、意外 replan、动作重复、非法动作、来源混淆和转录禁用字段。
-6. 若仍缺失，判断是否继续集中在 `CombatPile/Hologram`，以及可见与隐式路径各自的比例。
+6. 若仍缺失，分别检查 `CombatPile/Hologram` 与 `Hand/SCAVENGE`，以及可见与隐式
+   路径各自的比例。
 7. 核对 raw 中持久化的胜负与日志终局一致。
 8. 已收到样本合法即可转录和训练；只有三方数量和顺序一致后，才设置
    `recording_complete=true`。

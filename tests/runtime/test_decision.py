@@ -52,7 +52,8 @@ def test_decision_engine_executes_model_action() -> None:
         )
         assert body["messages"][1]["role"] == "user"
         assert (
-            "[0]打击(1费)<AnyEnemy> 造成6点伤害。" in (body["messages"][1]["content"])
+            "[0]打击(1费)<目标:任一敌人> 造成6点伤害。"
+            in (body["messages"][1]["content"])
         )
         assert body["messages"][1]["content"].endswith(
             "可执行动作:\n- play_card(card_index, target_index)\n- end_turn"

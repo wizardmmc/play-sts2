@@ -8,9 +8,12 @@ from typing import Any
 from .actions import action_signature, model_actions
 from .ownership import HarnessLayer, state_layer
 from .strategic_observation import render_map, render_strategic_context
+from .text import (
+    card_display_name,
+    clean_game_text,
+    is_unresolved_localization_key,
+)
 
-_MARKUP_PATTERN = re.compile(r"\[/?[A-Za-z_]+(?:=[^\]]+)?\]")
-_RESOURCE_PATTERN = re.compile(r"res://\S+?\.png")
 _VISIBLE_PILE_COST_PATTERN = re.compile(r"\s*\[([^\]]+费)\]\s*[：:]\s*")
 _INTENT_NAMES = {
     "Attack": "攻击",
@@ -28,6 +31,21 @@ _INTENT_NAMES = {
     "Stun": "眩晕",
     "Summon": "召唤",
     "Unknown": "未知",
+}
+_TARGET_TYPE_NAMES = {
+    "AnyEnemy": "任一敌人",
+    "Enemy": "敌人",
+    "AnyPlayer": "任一角色",
+    "SelfAndEnemy": "自身与敌人",
+    "AnyAlly": "任一友方",
+    "AllAllies": "所有友方",
+    "TargetedNoCreature": "指定位置",
+}
+_UNPLAYABLE_REASON_NAMES = {
+    "unplayable": "牌本身不能被打出",
+    "not_enough_energy": "能量不足",
+    "not_enough_stars": "星能不足",
+    "blocked_by_hook": "当前效果禁止打出",
 }
 
 
@@ -206,17 +224,31 @@ def _render_event(state: Mapping[str, Any]) -> str:
         str: 可供战略模型选择的事件观测。
     """
     event = state.get("event") or {}
-    lines = [f"=== 事件: {_clean_text(event.get('title'))} ==="]
+    raw_title = event.get("title")
+    title = "" if is_unresolved_localization_key(raw_title) else _clean_text(raw_title)
+    title = title or _clean_text(event.get("event_id")) or "未知事件"
+    lines = [f"=== 事件: {title} ==="]
     description = _clean_text(event.get("description"))
+    if is_unresolved_localization_key(event.get("description")):
+        description = ""
     if description:
         lines.append(description)
     for option in event.get("options") or []:
+        raw_option_title = option.get("title")
+        option_title = (
+            ""
+            if is_unresolved_localization_key(raw_option_title)
+            else _clean_text(raw_option_title)
+        )
+        option_title = option_title or f"选项 {option.get('index')}"
         parts = [
-            f"[{option.get('index')}] {_clean_text(option.get('title'))}",
+            f"[{option.get('index')}] {option_title}",
         ]
         if option.get("is_locked"):
             parts.append("已锁定")
         description = _clean_text(option.get("description"))
+        if is_unresolved_localization_key(option.get("description")):
+            description = ""
         if description:
             parts.append(description)
         lines.append(" | ".join(parts))
@@ -590,8 +622,11 @@ def _format_card(card: Mapping[str, Any]) -> str:
     if cost:
         prefix += f"({cost})"
     target_type = _clean_text(card.get("target_type"))
-    if target_type and target_type != "Self":
-        prefix += f"<{target_type}>"
+    requires_target = card.get("requires_target") is True or bool(
+        card.get("valid_target_indices")
+    )
+    if requires_target and target_type not in {"", "Self", "None"}:
+        prefix += f"<目标:{_TARGET_TYPE_NAMES.get(target_type, '需指定目标')}>"
     parts = [prefix]
     rules = _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
     if rules:
@@ -602,7 +637,8 @@ def _format_card(card: Mapping[str, Any]) -> str:
     if card.get("selected"):
         parts.append("(已选择)")
     if card.get("playable") is False:
-        reason = _clean_text(card.get("unplayable_reason"))
+        raw_reason = _clean_text(card.get("unplayable_reason"))
+        reason = _UNPLAYABLE_REASON_NAMES.get(raw_reason, "当前不可使用")
         parts.append(f"(不可使用{f': {reason}' if reason else ''})")
     return " ".join(part for part in parts if part)
 
@@ -632,8 +668,10 @@ def _card_name(card: Mapping[str, Any]) -> str:
     Returns:
         str: 去除富文本标记后的卡牌名称。
     """
-    name = _clean_text(card.get("name")) or "未知卡牌"
-    return f"{name}+" if card.get("upgraded") else name
+    return card_display_name(
+        card.get("name"),
+        upgraded=card.get("upgraded") is True,
+    )
 
 
 def _format_cost(card: Mapping[str, Any]) -> str:
@@ -931,6 +969,8 @@ def _format_shop_card(card: Mapping[str, Any]) -> str:
     Returns:
         str: 可用于 ``buy_card`` 选择的卡牌文本。
     """
+    if card.get("is_stocked") is False and not _clean_text(card.get("name")):
+        return f"[{card.get('index')}] 已售出"
     parts = [_format_card(card), f"{card.get('price', 0)} 金币"]
     status = _purchase_status(card)
     if status:
@@ -947,6 +987,8 @@ def _format_shop_relic(relic: Mapping[str, Any]) -> str:
     Returns:
         str: 可用于 ``buy_relic`` 选择的遗物文本。
     """
+    if relic.get("is_stocked") is False and not _clean_text(relic.get("name")):
+        return f"[{relic.get('index')}] 已售出"
     parts = [
         f"[{relic.get('index')}] {_clean_text(relic.get('name'))}",
         f"{relic.get('price', 0)} 金币",
@@ -969,6 +1011,8 @@ def _format_shop_potion(potion: Mapping[str, Any]) -> str:
     Returns:
         str: 可用于 ``buy_potion`` 选择的药水文本。
     """
+    if potion.get("is_stocked") is False and not _clean_text(potion.get("name")):
+        return f"[{potion.get('index')}] 已售出"
     parts = [
         f"[{potion.get('index')}] {_clean_text(potion.get('name'))}",
         f"{potion.get('price', 0)} 金币",
@@ -1007,6 +1051,4 @@ def _clean_text(value: Any) -> str:
     Returns:
         str: 适合直接放入模型观测的纯文本。
     """
-    text = _MARKUP_PATTERN.sub("", str(value or ""))
-    text = _RESOURCE_PATTERN.sub("", text)
-    return " ".join(text.split())
+    return clean_game_text(value)

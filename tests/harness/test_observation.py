@@ -645,9 +645,9 @@ def test_build_observation_renders_combat_decision() -> None:
     assert "    意图:攻击6" in observation.text
     assert "  敌[1] 树枝史莱姆: HP 8/8 | 格挡0" in observation.text
     assert "    意图:塞状态牌1" in observation.text
-    assert "  [0]打击(1费)<AnyEnemy> 造成6点伤害。" in observation.text
+    assert "  [0]打击(1费)<目标:任一敌人> 造成6点伤害。" in observation.text
     assert "  [1]防御(1费) 获得5点格挡。" in observation.text
-    assert "  [2]凡庸 不能被打出。 (不可使用: unplayable)" in observation.text
+    assert "  [2]凡庸 不能被打出。 (不可使用: 牌本身不能被打出)" in observation.text
     assert "造成6点伤害。 | 目标: [0]" not in observation.text
     assert "-1费" not in observation.text
     assert (
@@ -672,6 +672,224 @@ def test_build_observation_renders_combat_decision() -> None:
         "- discard_potion(option_index)\n"
         "- end_turn"
     )
+
+
+def test_combat_observation_preserves_resource_icons_and_player_facing_card_text() -> (
+    None
+):
+    """资源图标、升级名和内部枚举必须转换成完整玩家可读语义。
+
+    Raises:
+        AssertionError: 能量数量丢失、升级符号重复或内部枚举泄漏。
+
+    Returns:
+        None: 此测试覆盖真实教师 transcript 中的高频脏文本。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    energy_icon = "res://images/packed/sprite_fonts/defect_energy_icon.png"
+    state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["play_card", "end_turn"],
+        "run": {"relics": [], "potions": []},
+        "combat": {
+            "player": {
+                "current_hp": 20,
+                "max_hp": 20,
+                "block": 0,
+                "energy": 0,
+                "stars": 0,
+            },
+            "enemies": [],
+            "hand": [
+                {
+                    "index": 0,
+                    "name": "内核加速+",
+                    "upgraded": True,
+                    "energy_cost": 0,
+                    "resolved_rules_text": (
+                        f"获得{energy_icon}{energy_icon}。"
+                        f"在下个回合获得1{energy_icon}。"
+                    ),
+                    "target_type": "AnyEnemy",
+                    "requires_target": True,
+                    "playable": False,
+                    "unplayable_reason": "not_enough_energy",
+                },
+                {
+                    "index": 1,
+                    "name": "晕眩",
+                    "energy_cost": -1,
+                    "resolved_rules_text": "不能被打出。虚无。",
+                    "target_type": "None",
+                    "requires_target": False,
+                    "playable": False,
+                    "unplayable_reason": "unplayable",
+                },
+            ],
+            "draw_count": 0,
+            "discard_count": 0,
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert (
+        "[0]内核加速+(0费)<目标:任一敌人> "
+        "获得2点能量。在下个回合获得1点能量。 "
+        "(不可使用: 能量不足)" in observation.text
+    )
+    assert "[1]晕眩 不能被打出。虚无。 (不可使用: 牌本身不能被打出)" in (
+        observation.text
+    )
+    assert "res://" not in observation.text
+    assert "内核加速++" not in observation.text
+    assert "<None>" not in observation.text
+    assert "not_enough_energy" not in observation.text
+    assert "unplayable" not in observation.text
+
+
+def test_strategic_observation_uses_human_act_and_preserves_resource_icons() -> None:
+    """战略上下文使用人类幕号，并保留药水遗物中的能量数量。
+
+    Raises:
+        AssertionError: 零基幕号、重复升级符号或空洞能量文本进入观测。
+
+    Returns:
+        None: 此测试覆盖战略快照的共享清洗契约。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    energy_icon = "res://images/packed/sprite_fonts/defect_energy_icon.png"
+    state = {
+        "screen": "MAP",
+        "in_combat": False,
+        "available_actions": ["choose_map_node"],
+        "run": {
+            "act_id": "0",
+            "boss_id": "SOUL_FYSH_BOSS",
+            "ascension": 4,
+            "current_hp": 60,
+            "max_hp": 75,
+            "gold": 99,
+            "floor": 2,
+            "potions": [
+                {
+                    "index": 0,
+                    "occupied": True,
+                    "name": "痊愈药水",
+                    "description": f"获得{energy_icon}{energy_icon}。抽2张牌。",
+                }
+            ],
+            "relics": [
+                {
+                    "index": 0,
+                    "name": "灯笼",
+                    "description": f"在第一回合获得{energy_icon}。",
+                }
+            ],
+            "deck": [
+                {
+                    "index": 0,
+                    "name": "电击+",
+                    "upgraded": True,
+                    "card_type": "Skill",
+                    "energy_cost": 0,
+                }
+            ],
+        },
+        "map": {
+            "available_nodes": [
+                {"index": 0, "row": 1, "col": 0, "node_type": "Monster"}
+            ]
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "【第1幕】" in observation.text
+    assert "痊愈药水（获得2点能量。抽2张牌。）" in observation.text
+    assert "灯笼（在第一回合获得1点能量。）" in observation.text
+    assert "- 电击+ x1（0费技能）" in observation.text
+    assert "【第0幕】" not in observation.text
+    assert "电击++" not in observation.text
+    assert "res://" not in observation.text
+
+
+def test_event_observation_hides_unresolved_localization_keys() -> None:
+    """事件描述未解析时隐藏内部本地化键，不把键名当游戏文本。
+
+    Raises:
+        AssertionError: ``*.pages.*`` 键泄漏到模型观测。
+
+    Returns:
+        None: 标题、选项和动作仍然可见。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "EVENT",
+        "in_combat": False,
+        "available_actions": ["choose_event_option"],
+        "run": {"act_id": "0", "relics": [], "potions": [], "deck": []},
+        "event": {
+            "event_id": "ABYSSAL_BATHS",
+            "title": "ABYSSAL_BATHS.pages.INITIAL.title",
+            "description": "ABYSSAL_BATHS.pages.INITIAL.description",
+            "options": [
+                {
+                    "index": 0,
+                    "title": "ABYSSAL_BATHS.pages.INITIAL.options.IMMERSE.title",
+                    "description": (
+                        "ABYSSAL_BATHS.pages.INITIAL.options.IMMERSE.description"
+                    ),
+                }
+            ],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "=== 事件: ABYSSAL_BATHS ===" in observation.text
+    assert "[0] 选项 0" in observation.text
+    assert ".pages." not in observation.text
+
+
+def test_shop_observation_renders_empty_sold_slot_without_fake_card() -> None:
+    """已售空槽只显示已售出，不伪造零费未知卡牌。
+
+    Raises:
+        AssertionError: 清空后的商店 DTO 被渲染成可购买卡牌。
+
+    Returns:
+        None: 原始槽位索引仍保留用于审计。
+    """
+    harness = importlib.import_module("play_sts2.harness")
+    state = {
+        "screen": "SHOP",
+        "in_combat": False,
+        "available_actions": ["proceed"],
+        "run": {"act_id": "0", "relics": [], "potions": [], "deck": []},
+        "shop": {
+            "is_open": True,
+            "cards": [
+                {
+                    "index": 4,
+                    "name": None,
+                    "price": 0,
+                    "energy_cost": 0,
+                    "is_stocked": False,
+                    "enough_gold": False,
+                }
+            ],
+            "relics": [],
+            "potions": [],
+        },
+    }
+
+    observation = harness.build_observation(state)
+
+    assert "[4] 已售出" in observation.text
+    assert "未知卡牌" not in observation.text
+    assert "0 金币" not in observation.text
 
 
 def test_battle_observation_hides_dead_enemies_without_renumbering_targets() -> None:
@@ -788,6 +1006,7 @@ def test_combat_observation_renders_generic_card_and_relic_ui_state() -> None:
                     "star_cost": 0,
                     "resolved_rules_text": "造成5点伤害。",
                     "target_type": "AnyEnemy",
+                    "requires_target": True,
                     "playable": True,
                     "should_glow_gold": True,
                     "should_glow_red": False,
@@ -816,12 +1035,12 @@ def test_combat_observation_renders_generic_card_and_relic_ui_state() -> None:
     assert "  [1] 翼靴〔计数 2；已禁用；已耗尽〕" in observation.text
     assert "普通遗物" not in observation.text
     assert (
-        "[0]正面条件牌(0费)<AnyEnemy> 造成5点伤害。 "
+        "[0]正面条件牌(0费)<目标:任一敌人> 造成5点伤害。 "
         "〔金光：有利条件满足〕" in observation.text
     )
     assert (
         "[1]负面限制牌(1费) 不能被打出。 "
-        "〔红光：不利条件生效〕 (不可使用: unplayable)" in observation.text
+        "〔红光：不利条件生效〕 (不可使用: 牌本身不能被打出)" in observation.text
     )
 
 
@@ -1061,7 +1280,7 @@ def test_build_observation_renders_complete_strategic_map_context() -> None:
 
     observation = harness.build_observation(state)
 
-    assert "【第0幕】" in observation.text
+    assert "【第1幕】" in observation.text
     assert (
         "本幕Boss: 同族小队 (THE_KIN_BOSS) | 组成: 同族信徒、同族神官"
         in observation.text

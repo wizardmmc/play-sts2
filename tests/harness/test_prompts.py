@@ -5,6 +5,51 @@ import importlib
 import pytest
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            (
+                "获得4[img]res://images/packed/sprite_fonts/defect_energy_icon.png"
+                "[/img][img]res://images/packed/sprite_fonts/defect_energy_icon.png"
+                "[/img]。"
+            ),
+            "获得4点能量。",
+        ),
+        (
+            (
+                "获得res://images/packed/sprite_fonts/star_icon.svg"
+                "res://images/packed/sprite_fonts/star_icon.svg。"
+            ),
+            "获得2点星能。",
+        ),
+        (
+            "查看[img]res://images/icons/unknown_resource.webp[/img]。",
+            "查看〔未知图标: unknown_resource〕。",
+        ),
+    ],
+)
+def test_shared_game_text_handles_explicit_counts_and_generic_resources(
+    raw: str,
+    expected: str,
+) -> None:
+    """共享清洗器消费完整图标段，并支持非 PNG 与未知资源。
+
+    Args:
+        raw (str): 游戏返回的富文本描述。
+        expected (str): 玩家可读的完整资源语义。
+
+    Raises:
+        AssertionError: 数字与图标重复计数，或资源路径残留。
+
+    Returns:
+        None: 此测试直接约束在线与离线共用的文本边界。
+    """
+    text_module = importlib.import_module("play_sts2.harness.text")
+
+    assert text_module.clean_game_text(raw) == expected
+
+
 def test_system_prompt_loads_layer_specific_action_contracts() -> None:
     """战斗和战略层读取不同且包含规范动作契约的提示词。
 
