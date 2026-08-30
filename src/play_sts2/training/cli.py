@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from .rl import collect_battle_rollout_group
+from .rl import collect_battle_rollout_group, label_dagger_rollout_group
 from .sft import (
     build_sft_dataset,
     evaluate_sft,
@@ -46,6 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
     collect_rl.add_argument("--max-tokens", type=int, default=128)
     collect_rl.add_argument("--temperature", type=float, default=0.8)
     collect_rl.add_argument("--infrastructure-attempts", type=int, default=3)
+    label_dagger = subparsers.add_parser(
+        "label-rl-dagger",
+        help="在教师游戏中重放学生状态并收集 CombatSolver 旁路标签",
+    )
+    label_dagger.add_argument("--rollout", type=Path, required=True)
+    label_dagger.add_argument("--game-url", required=True)
+    label_dagger.add_argument("--output", type=Path, required=True)
+    label_dagger.add_argument("--max-labels", type=int, default=8)
+    label_dagger.add_argument("--selection-seed", type=int, default=0)
+    label_dagger.add_argument("--search-timeout", type=float, default=135.0)
     build = subparsers.add_parser("build-sft", help="构建可读 SFT messages")
     build.add_argument(
         "--knowledge-root",
@@ -76,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-splits",
         type=Path,
         help="覆盖所有 human raw 根默认名册的独立 splits.json",
+    )
+    build.add_argument(
+        "--dagger-root",
+        type=Path,
+        help="可选的学生状态 CombatSolver 标签文件或目录",
+    )
+    build.add_argument(
+        "--dagger-policy-model",
+        help="--dagger-root 中唯一允许的学生父 policy",
     )
     build.add_argument(
         "--mix",
@@ -180,6 +199,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         and any((args.train_run, args.dev_run, args.test_run))
     ):
         parser.error("--run-splits 不能与 --train-run/--validation-run/--eval-run 混用")
+    if args.command == "build-sft" and (
+        (args.dagger_root is None) != (args.dagger_policy_model is None)
+    ):
+        parser.error("--dagger-root 与 --dagger-policy-model 必须同时提供")
     if args.command == "collect-rl-battle":
         output = collect_battle_rollout_group(
             scenario_path=args.scenario,
@@ -194,6 +217,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             temperature=args.temperature,
             infrastructure_attempts=args.infrastructure_attempts,
         )
+    elif args.command == "label-rl-dagger":
+        output = label_dagger_rollout_group(
+            rollout_path=args.rollout,
+            game_url=args.game_url,
+            output_path=args.output,
+            max_labels=args.max_labels,
+            selection_seed=args.selection_seed,
+            search_timeout=args.search_timeout,
+        )
     elif args.command == "build-sft":
         result = build_sft_dataset(
             knowledge_root=args.knowledge_root,
@@ -204,6 +236,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             dev_run_ids=args.dev_run,
             test_run_ids=args.test_run,
             run_splits_path=args.run_splits,
+            dagger_root=args.dagger_root,
+            dagger_policy_version=args.dagger_policy_model,
             mix_config_path=args.mix,
         )
         output = {

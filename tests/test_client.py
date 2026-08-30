@@ -12,6 +12,7 @@ from play_sts2.client import (
     GameClient,
     Health,
     ProtocolError,
+    SolverSuggestion,
 )
 
 
@@ -153,6 +154,58 @@ def test_state_returns_complete_mod_payload() -> None:
         state = client.state()
 
     assert state == state_data
+
+
+def test_solver_suggestion_posts_revision_and_reads_action() -> None:
+    """只读教师端点应绑定当前 revision 并返回规范动作。
+
+    Returns:
+        None: 此测试固定 DAgger 标注所需的最小 HTTP 契约。
+    """
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """核对教师建议请求并返回一条合法动作。
+
+        Args:
+            request (httpx.Request): 游戏客户端发出的请求。
+
+        Raises:
+            AssertionError: 请求方法、路径、正文或超时不符合契约。
+
+        Returns:
+            httpx.Response: 不含搜索树或分数的教师建议响应。
+        """
+        assert request.method == "POST"
+        assert request.url.path == "/solver/suggest"
+        assert json.loads(request.content) == {"expected_state_revision": 41}
+        assert request.extensions["timeout"]["read"] == 135.0
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "request_id": "req_solver",
+                "data": {
+                    "action": "ACTION: play_card 0 1",
+                    "solver_version": "0.17.0",
+                    "state_revision": 41,
+                },
+            },
+        )
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        suggestion = client.solver_suggestion(
+            expected_state_revision=41,
+            timeout=135.0,
+        )
+
+    assert suggestion == SolverSuggestion(
+        action="ACTION: play_card 0 1",
+        solver_version="0.17.0",
+        state_revision=41,
+    )
 
 
 def test_data_collection_returns_complete_entities() -> None:

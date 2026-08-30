@@ -66,6 +66,21 @@ class AvailableActions:
     actions: tuple[AvailableAction, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SolverSuggestion:
+    """表示 CombatSolver 对当前真实战斗状态的只读建议。
+
+    Args:
+        action (str): 与 Harness 共用的规范动作行。
+        solver_version (str): 当前加载的 CombatSolver 版本。
+        state_revision (int): 生成建议时绑定的游戏状态 revision。
+    """
+
+    action: str
+    solver_version: str
+    state_revision: int
+
+
 class GameClient:
     """持有与单个游戏实例通信的 HTTP 会话。"""
 
@@ -176,6 +191,49 @@ class GameClient:
         if not isinstance(data, Mapping):
             raise ProtocolError("invalid /state response")
         return dict(data)
+
+    def solver_suggestion(
+        self,
+        *,
+        expected_state_revision: int,
+        timeout: float = 135.0,
+    ) -> SolverSuggestion:
+        """请求 CombatSolver 对当前状态搜索一次但不执行动作。
+
+        Args:
+            expected_state_revision (int): 学生观察到的精确状态 revision。
+            timeout (float): 等待 Solver 完成搜索的最长秒数。
+
+        Raises:
+            ValueError: revision 或超时参数无效。
+            httpx.HTTPStatusError: Mod 拒绝请求或 Solver 搜索失败。
+            ProtocolError: 响应缺少规范动作、版本或绑定 revision。
+
+        Returns:
+            SolverSuggestion: 不含搜索分数、树或隐藏状态的教师动作。
+        """
+        if (
+            isinstance(expected_state_revision, bool)
+            or not isinstance(expected_state_revision, int)
+            or expected_state_revision < 0
+        ):
+            raise ValueError("expected_state_revision must be a non-negative integer")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        path = "/solver/suggest"
+        data = self._request_data(
+            path,
+            method="POST",
+            body={"expected_state_revision": expected_state_revision},
+            timeout=timeout,
+        )
+        if not isinstance(data, Mapping):
+            raise ProtocolError(f"invalid {path} response")
+        return SolverSuggestion(
+            action=_required_text(data, "action", path),
+            solver_version=_required_text(data, "solver_version", path),
+            state_revision=_required_integer(data, "state_revision", path),
+        )
 
     def data_collection(self, collection: str) -> list[dict[str, Any]]:
         """读取 Mod 从当前游戏实例导出的实体集合。
@@ -482,5 +540,29 @@ def _required_bool(
     """
     value = data.get(field)
     if not isinstance(value, bool):
+        raise ProtocolError(f"invalid {path} response")
+    return value
+
+
+def _required_integer(
+    data: Mapping[object, object],
+    field: str,
+    path: str,
+) -> int:
+    """从协议对象中读取一个非负整数字段。
+
+    Args:
+        data (Mapping[object, object]): 解码后的协议对象。
+        field (str): 必需字段的名称。
+        path (str): 协议对象所属的端点路径。
+
+    Raises:
+        ProtocolError: 字段缺失、不是整数或小于零。
+
+    Returns:
+        int: 校验通过的非负整数。
+    """
+    value = data.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ProtocolError(f"invalid {path} response")
     return value

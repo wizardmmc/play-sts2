@@ -151,7 +151,7 @@ def apply_sft_mix(
         for index, row in enumerate(rows)
         if not (
             row.get("source") == "human_play"
-            and row.get("behavior_origin", "human") != "human_combat_solver"
+            and row.get("behavior_origin", "human") == "human"
             and str(row.get("action", "")) in human_train_action_limits
         )
         and not (arithmetic_limits and row.get("source") == "synthetic_arithmetic")
@@ -162,7 +162,7 @@ def apply_sft_mix(
             index
             for index, row in enumerate(rows)
             if row.get("source") == "human_play"
-            and row.get("behavior_origin", "human") != "human_combat_solver"
+            and row.get("behavior_origin", "human") == "human"
             and row.get("action") == action
         ]
         selected.update(_take_indices(indices, human_train_action_limits[action], rng))

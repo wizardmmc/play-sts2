@@ -157,14 +157,14 @@ def test_apply_sft_mix_is_deterministic_without_knowledge_limits() -> None:
     assert sft.apply_sft_mix(splits, **arguments) == mixed
 
 
-def test_apply_sft_mix_keeps_solver_data_and_stratifies_arithmetic() -> None:
-    """E5 只裁剪旧行为，并按题型精确抽取算术锚点。
+def test_apply_sft_mix_keeps_teacher_and_dagger_data() -> None:
+    """高频旧行为上限不应裁剪教师或学生状态 DAgger 标签。
 
     Raises:
-        AssertionError: Solver 行为被旧上限裁剪或算术数量不符合配方。
+        AssertionError: 教师、DAgger 行为被旧上限裁剪或算术数量不符合配方。
 
     Returns:
-        None: 此测试只检查内存中的 E5 混合。
+        None: 此测试只检查内存中的来源分层混合。
     """
     splits = {
         "train": [
@@ -180,6 +180,8 @@ def test_apply_sft_mix_keeps_solver_data_and_stratifies_arithmetic() -> None:
                 "play_card",
                 origin="human_combat_solver",
             ),
+            _human("dagger-play-1", "play_card", origin="dagger"),
+            _human("dagger-play-2", "play_card", origin="dagger"),
             _arithmetic("orb-1", "orb_focus"),
             _arithmetic("orb-2", "orb_focus"),
             _arithmetic("status-1", "status_math"),
@@ -199,6 +201,7 @@ def test_apply_sft_mix_keeps_solver_data_and_stratifies_arithmetic() -> None:
 
     ids = {row["sample_id"] for row in mixed["train"]}
     assert {"solver-play-1", "solver-play-2"} <= ids
+    assert {"dagger-play-1", "dagger-play-2"} <= ids
     assert len(ids & {"old-play-1", "old-play-2"}) == 1
     assert len(ids & {"orb-1", "orb-2"}) == 1
     assert len(ids & {"status-1", "status-2", "status-3"}) == 2

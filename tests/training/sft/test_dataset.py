@@ -515,6 +515,82 @@ def test_build_sft_dataset_combines_human_and_solver_roots_without_losing_source
     assert train_audit["action_sources"] == {"human_ui": 1}
 
 
+def test_build_sft_dataset_adds_dagger_labels_only_to_training(
+    tmp_path: Path,
+) -> None:
+    """学生状态教师标签只进入 train，并保留独立训练角色和来源。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Returns:
+        None: 此测试固定 DAgger 原始标签到正式 SFT 树的聚合边界。
+    """
+    knowledge = tmp_path / "knowledge"
+    human = tmp_path / "human"
+    dagger = tmp_path / "dagger"
+    knowledge.mkdir()
+    human.mkdir()
+    dagger.mkdir()
+    (human / "splits.json").write_text(
+        json.dumps({"train": [], "dev": [], "test": []}),
+        encoding="utf-8",
+    )
+    label = {
+        "label_id": "group-test:0:1",
+        "training_role": "dagger_label",
+        "group_id": "group-test",
+        "arm_index": 0,
+        "step_index": 1,
+        "selection_reason": "uncertainty",
+        "student_policy_version": "policy-test",
+        "student_action": "ACTION: end_turn",
+        "teacher_action": "ACTION: play_card 0",
+        "agrees": False,
+        "legal_actions": ["ACTION: play_card 0", "ACTION: end_turn"],
+        "messages": [
+            {"role": "system", "content": "战斗系统"},
+            {"role": "user", "content": "当前战斗状态"},
+            {"role": "assistant", "content": "ACTION: play_card 0"},
+        ],
+        "game_version": "v0.111.0",
+        "mod_version": "0.8.0",
+        "protocol_version": "2026-08-28-v2",
+        "solver_name": "CombatSolver",
+        "solver_version": "0.17.0",
+        "harness_version": "0.1.0",
+        "label_status": "labeled",
+    }
+    (dagger / "labels.jsonl").write_text(
+        json.dumps(label, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    result = build_sft_dataset(
+        knowledge_root=knowledge,
+        human_root=human,
+        dagger_root=dagger,
+        dagger_policy_version="policy-test",
+        output_root=tmp_path / "dataset",
+    )
+
+    assert _directory_rows(result.dev_path) == []
+    assert _directory_rows(result.test_path) == []
+    rows = _directory_rows(result.train_path)
+    assert len(rows) == 1
+    assert rows[0]["training_role"] == "dagger_label"
+    assert rows[0]["behavior_origin"] == "dagger"
+    assert rows[0]["messages"][-1]["content"] == "ACTION: play_card 0"
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["dagger"] == {
+        "root": str(dagger),
+        "samples": 1,
+        "student_policy_version": "policy-test",
+        "game_versions": {"v0.111.0": 1},
+        "solver_versions": {"0.17.0": 1},
+    }
+
+
 def test_build_sft_dataset_uses_independent_cross_root_split_manifest(
     tmp_path: Path,
 ) -> None:

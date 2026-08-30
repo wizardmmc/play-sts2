@@ -1,7 +1,9 @@
 """连接本地游戏 workers 与远程冻结策略收集一个战斗 group。"""
 
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import asdict
+from importlib.metadata import version
 from pathlib import Path
 
 from ...client import GameClient
@@ -10,6 +12,13 @@ from ...runtime import BattleRunner
 from ...scenario import BattleResetter
 from .collector import BattleGroupCollector, GameBattleRolloutWorker
 from .contracts import BEHAVIOR_LOGPROBS_MODE
+from .dagger import (
+    DaggerReplayLabeler,
+    load_dagger_rollout_source,
+    select_dagger_candidates,
+    summarize_dagger_unsupported,
+    write_dagger_labels,
+)
 from .io import load_battle_scenario, write_battle_rollout_group
 
 
@@ -103,5 +112,66 @@ def collect_battle_rollout_group(
         "arms": len(group.rollouts),
         "reward_mean": group.reward_mean,
         "reward_std": group.reward_std,
+        "output": str(output),
+    }
+
+
+def label_dagger_rollout_group(
+    *,
+    rollout_path: Path,
+    game_url: str,
+    output_path: Path,
+    max_labels: int = 8,
+    selection_seed: int = 0,
+    search_timeout: float = 135.0,
+) -> dict[str, object]:
+    """在教师游戏中重放学生前缀并写出旁路 DAgger 标签。
+
+    Args:
+        rollout_path (Path): 已通过准入的学生 battle group JSON。
+        game_url (str): 加载 CombatSolver 教师 Mod 的本地游戏地址。
+        output_path (Path): 不含隐藏状态的标签 JSONL 输出路径。
+        max_labels (int): 本批最多标注的学生状态数。
+        selection_seed (int): 普通状态抽样种子。
+        search_timeout (float): 每次 Solver 搜索最长秒数。
+
+    Raises:
+        DaggerContractError: 学生 group、重放或教师动作不满足标签契约。
+        httpx.HTTPStatusError: 教师游戏或 Solver 端点失败。
+
+    Returns:
+        dict[str, object]: 标签数、分歧数、选择原因和输出路径摘要。
+    """
+    source = load_dagger_rollout_source(rollout_path)
+    candidates = select_dagger_candidates(
+        source,
+        max_labels=max_labels,
+        seed=selection_seed,
+    )
+    with GameClient(game_url.rstrip("/")) as game:
+        labels = DaggerReplayLabeler(
+            game,
+            resetter=BattleResetter(game),
+            search_timeout=search_timeout,
+            harness_version=version("play-sts2"),
+        ).label(source, candidates)
+    unsupported_reasons = summarize_dagger_unsupported(source)
+    output = write_dagger_labels(
+        output_path,
+        labels,
+        selection_seed=selection_seed,
+        selection_budget=max_labels,
+        unsupported_reasons=unsupported_reasons,
+    )
+    return {
+        "group_id": source.group_id,
+        "student_policy_version": source.policy_version,
+        "labels": len(labels),
+        "agreements": sum(label.agrees for label in labels),
+        "disagreements": sum(not label.agrees for label in labels),
+        "selection_reasons": dict(
+            sorted(Counter(label.selection_reason for label in labels).items())
+        ),
+        "unsupported_reasons": unsupported_reasons,
         "output": str(output),
     }

@@ -105,6 +105,67 @@ def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
     assert '"arms": 8' in capsys.readouterr().out
 
 
+def test_label_rl_dagger_command_routes_rollout_and_teacher_game(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """DAgger 命令应把学生 group、教师游戏和抽样预算交给标注器。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Returns:
+        None: 此测试不启动真实游戏或 Solver。
+    """
+    calls: list[dict[str, object]] = []
+
+    def label(**kwargs: object) -> dict[str, object]:
+        """记录 CLI 参数并返回最小摘要。
+
+        Args:
+            **kwargs (object): CLI 传入的标注参数。
+
+        Returns:
+            dict[str, object]: 可序列化的标签摘要。
+        """
+        calls.append(kwargs)
+        return {"labels": kwargs["max_labels"], "disagreements": 3}
+
+    monkeypatch.setattr(cli, "label_dagger_rollout_group", label)
+
+    result = cli.main(
+        [
+            "label-rl-dagger",
+            "--rollout",
+            "runs/rl/group.json",
+            "--game-url",
+            "http://127.0.0.1:8084",
+            "--output",
+            "runs/rl/dagger/labels.jsonl",
+            "--max-labels",
+            "8",
+            "--selection-seed",
+            "17",
+            "--search-timeout",
+            "140",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        {
+            "rollout_path": Path("runs/rl/group.json"),
+            "game_url": "http://127.0.0.1:8084",
+            "output_path": Path("runs/rl/dagger/labels.jsonl"),
+            "max_labels": 8,
+            "selection_seed": 17,
+            "search_timeout": 140.0,
+        }
+    ]
+    assert '"disagreements": 3' in capsys.readouterr().out
+
+
 def test_build_sft_command_passes_explicit_mix_recipe(
     monkeypatch: object,
     capsys: object,
@@ -150,6 +211,55 @@ def test_build_sft_command_passes_explicit_mix_recipe(
     assert result == 0
     assert calls == [Path("configs/sft/mix.toml")]
     assert '"train": 10' in capsys.readouterr().out
+
+
+def test_build_sft_command_passes_dagger_root(
+    monkeypatch: object,
+) -> None:
+    """SFT 构建命令应把旁路标签根传给数据聚合器。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+
+    Returns:
+        None: 此测试只验证 CLI 到构建器的参数边界。
+    """
+    calls: list[tuple[Path | None, object]] = []
+
+    class Result:
+        """提供 CLI 输出需要的最小构建结果。"""
+
+        output_root = Path("data/datasets/dagger-smoke/sft")
+        train_count = 1
+        dev_count = 0
+        test_count = 0
+
+    def build(**kwargs: object) -> Result:
+        """记录 DAgger 根并返回最小结果。
+
+        Args:
+            **kwargs (object): CLI 传入的数据构建参数。
+
+        Returns:
+            Result: 最小构建结果。
+        """
+        calls.append((kwargs.get("dagger_root"), kwargs.get("dagger_policy_version")))
+        return Result()
+
+    monkeypatch.setattr(cli, "build_sft_dataset", build)
+
+    result = cli.main(
+        [
+            "build-sft",
+            "--dagger-root",
+            "runs/rl/dagger",
+            "--dagger-policy-model",
+            "policy-test",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [(Path("runs/rl/dagger"), "policy-test")]
 
 
 def test_build_sft_command_passes_independent_run_splits(

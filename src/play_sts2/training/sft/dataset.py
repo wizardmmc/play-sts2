@@ -134,6 +134,8 @@ def build_sft_dataset(
     dev_run_ids: Collection[str] = (),
     test_run_ids: Collection[str] = (),
     run_splits_path: Path | None = None,
+    dagger_root: Path | None = None,
+    dagger_policy_version: str | None = None,
     mix_config_path: Path | None = None,
 ) -> SftDatasetResult:
     """构建三棵同构且可逐实体审查的 SFT 数据目录。
@@ -151,6 +153,8 @@ def build_sft_dataset(
         dev_run_ids (Collection[str]): 整局进入 validation 的 run ID。
         test_run_ids (Collection[str]): 整局进入 eval 的 run ID。
         run_splits_path (Path | None): 可选的跨 raw 根独立整局分卷名册。
+        dagger_root (Path | None): 可选的学生状态 CombatSolver 标签目录。
+        dagger_policy_version (str | None): DAgger 标签唯一允许的学生父 policy。
         mix_config_path (Path | None): 可选的训练高频行为上限配方。
 
     Raises:
@@ -162,6 +166,8 @@ def build_sft_dataset(
         SftDatasetResult: 三个分卷目录、清单路径与样本计数。
     """
     human_roots = (Path(human_root), *(Path(root) for root in additional_human_roots))
+    if (dagger_root is None) != (dagger_policy_version is None):
+        raise DatasetBuildError("dagger_root 与 dagger_policy_version 必须同时提供")
     explicit_ids = any((train_run_ids, dev_run_ids, test_run_ids))
     if run_splits_path is not None and explicit_ids:
         raise DatasetBuildError(
@@ -230,6 +236,15 @@ def build_sft_dataset(
         run_id = str(row["run_id"])
         split = next(name for name, runs in run_splits.items() if run_id in runs)
         splits[split].append(row)
+    dagger_rows: list[dict[str, Any]] = []
+    if dagger_root is not None:
+        from ..rl.dagger import load_dagger_sft_rows
+
+        dagger_rows = load_dagger_sft_rows(
+            dagger_root,
+            expected_policy_version=dagger_policy_version or "",
+        )
+        splits["train"].extend(dagger_rows)
     mix_manifest = None
     if mix_config_path is not None:
         from .mix import apply_sft_mix, load_sft_mix
@@ -315,6 +330,20 @@ def build_sft_dataset(
         manifest["mix"] = mix_manifest
         if mix_config.human_game_version is not None:
             manifest["human"]["game_version"] = mix_config.human_game_version
+    if dagger_root is not None:
+        manifest["dagger"] = {
+            "root": str(dagger_root),
+            "samples": len(dagger_rows),
+            "student_policy_version": dagger_policy_version,
+            "game_versions": dict(
+                sorted(Counter(str(row["game_version"]) for row in dagger_rows).items())
+            ),
+            "solver_versions": dict(
+                sorted(
+                    Counter(str(row["solver_version"]) for row in dagger_rows).items()
+                )
+            ),
+        }
     arithmetic_provenance = _arithmetic_provenance(Path(knowledge_root))
     if arithmetic_provenance is not None:
         manifest["arithmetic"] = arithmetic_provenance

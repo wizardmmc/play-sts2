@@ -11,8 +11,8 @@ namespace STS2AIAgent.Server;
 internal static class Router
 {
     private const string ServiceName = "sts2-ai-agent";
-    private const string ProtocolVersion = "2026-08-28-v2";
-    private const string ModVersion = "0.8.0-rlsts2.46";
+    private const string ProtocolVersion = "2026-08-30-v3";
+    private const string ModVersion = "0.8.0-rlsts2.47";
     private const string LogPrefix = "[STS2AIAgent.Router]";
     private const int MaxEventStreamTimeoutMs = 86_400_000;
 
@@ -129,6 +129,33 @@ internal static class Router
                     request,
                     response,
                     cancellationToken);
+                return;
+            }
+
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/solver/suggest")
+            {
+                var suggestionRequest = await JsonHelper.DeserializeAsync<SolverSuggestionRequest>(
+                    request.InputStream,
+                    cancellationToken);
+                if (suggestionRequest?.expected_state_revision == null)
+                {
+                    throw new ApiException(
+                        400,
+                        "invalid_request",
+                        "Request body must contain expected_state_revision.");
+                }
+                var suggestion = await GameThread.InvokeAsync(() =>
+                    CombatSolverSuggestionService.SuggestAsync(
+                        suggestionRequest.expected_state_revision.Value,
+                        cancellationToken));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = suggestion
+                });
+                statusCode = 200;
                 return;
             }
 
@@ -390,4 +417,11 @@ internal static class Router
         var bytes = Encoding.UTF8.GetBytes(text);
         return response.OutputStream.WriteAsync(bytes);
     }
+}
+
+/// <summary>读取只读 Solver 建议所需的状态 revision。</summary>
+internal sealed class SolverSuggestionRequest
+{
+    /// <summary>获取学生观察到的状态 revision。</summary>
+    public long? expected_state_revision { get; init; }
 }
