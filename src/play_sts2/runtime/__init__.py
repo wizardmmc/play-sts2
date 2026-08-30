@@ -15,7 +15,14 @@ from .decision import (
     DecisionStep,
 )
 from .router import RunRoute, classify_run_state
-from .run import RunDecision, RunError, RunOutcome, RunResult, RunRunner
+from .run import (
+    RunDecision,
+    RunError,
+    RunOutcome,
+    RunResult,
+    RunRunner,
+    project_strategic_model_state,
+)
 from .strategic import StrategicRunError, StrategicRunner
 
 __all__ = [
@@ -38,4 +45,5 @@ __all__ = [
     "StrategicRunError",
     "StrategicRunner",
     "classify_run_state",
+    "project_strategic_model_state",
 ]

@@ -111,6 +111,216 @@ def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
     assert '"arms": 8' in capsys.readouterr().out
 
 
+def test_collect_rl_tree_command_routes_checkpoint_two_games_and_a100(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """Tree 命令应把原生 checkpoint、两个本地端口和远程 E6 policy 传入。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Returns:
+        None: 此测试不启动游戏或 A100 服务。
+    """
+    calls: list[dict[str, object]] = []
+
+    def collect(**kwargs: object) -> dict[str, object]:
+        """记录 Tree collector 参数。
+
+        Args:
+            **kwargs (object): CLI 解析后的完整参数。
+
+        Returns:
+            dict[str, object]: 最小可序列化摘要。
+        """
+        calls.append(kwargs)
+        return {"group_id": kwargs["group_id"], "arms": kwargs["group_size"]}
+
+    monkeypatch.setattr(cli, "collect_tree_rollout_group", collect)
+
+    result = cli.main(
+        [
+            "collect-rl-tree",
+            "--checkpoint",
+            "runs/rl/tree/checkpoint",
+            "--executable",
+            "/game/SlayTheSpire2",
+            "--profile",
+            "e2e/fixtures/profile",
+            "--home-root",
+            "runs/rl/tree/homes",
+            "--port",
+            "8080",
+            "--port",
+            "8081",
+            "--strategy-model-url",
+            "http://127.0.0.1:8900",
+            "--battle-model-url",
+            "http://127.0.0.1:8900",
+            "--strategy-policy-model",
+            "e6-feasibility",
+            "--battle-policy-model",
+            "e6-feasibility",
+            "--vllm-logprobs-mode",
+            "processed_logprobs",
+            "--structured-output-backend",
+            "xgrammar",
+            "--structured-output-version",
+            "0.1.33",
+            "--group-id",
+            "tree-demo-001",
+            "--output",
+            "runs/rl/tree/tree-demo-001.json",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        {
+            "checkpoint_path": Path("runs/rl/tree/checkpoint"),
+            "executable": Path("/game/SlayTheSpire2"),
+            "profile": Path("e2e/fixtures/profile"),
+            "home_root": Path("runs/rl/tree/homes"),
+            "ports": (8080, 8081),
+            "strategy_model_url": "http://127.0.0.1:8900",
+            "battle_model_url": "http://127.0.0.1:8900",
+            "strategy_policy_model": "e6-feasibility",
+            "battle_policy_model": "e6-feasibility",
+            "vllm_logprobs_mode": "processed_logprobs",
+            "structured_output_backend": "xgrammar",
+            "structured_output_version": "0.1.33",
+            "group_id": "tree-demo-001",
+            "output_path": Path("runs/rl/tree/tree-demo-001.json"),
+            "group_size": 8,
+            "max_tokens": 128,
+            "temperature": 0.8,
+            "max_macro_checkpoints": 2,
+        }
+    ]
+    assert '"arms": 8' in capsys.readouterr().out
+
+
+def test_tree_grpo_command_routes_engineering_smoke(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """Tree 训练命令应读取配置并只执行一次命名 smoke。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Returns:
+        None: 此测试不加载真实模型。
+    """
+    calls: list[object] = []
+    sentinel = object()
+
+    def load(path: Path) -> object:
+        """记录配置路径并返回哨兵配置。
+
+        Args:
+            path (Path): CLI 传入的配置路径。
+
+        Returns:
+            object: 哨兵配置。
+        """
+        calls.append(path)
+        return sentinel
+
+    def train(config: object, name: str) -> dict[str, object]:
+        """记录训练参数并返回最小摘要。
+
+        Args:
+            config (object): 已加载配置。
+            name (str): smoke 名称。
+
+        Returns:
+            dict[str, object]: 可序列化摘要。
+        """
+        calls.extend((config, name))
+        return {"optimizer_steps": 1, "name": name}
+
+    monkeypatch.setattr(cli, "load_tree_grpo_config", load)
+    monkeypatch.setattr(cli, "train_tree_grpo", train)
+
+    result = cli.main(
+        [
+            "tree-grpo",
+            "--config",
+            "configs/rl/tree-grpo.toml",
+            "--name",
+            "tree-feasibility",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        Path("configs/rl/tree-grpo.toml"),
+        sentinel,
+        "tree-feasibility",
+    ]
+    assert '"optimizer_steps": 1' in capsys.readouterr().out
+
+
+def test_eval_tree_regret_command_routes_frozen_policy(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """Tree regret 命令应在落盘兄弟组上查询指定冻结 policy。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Returns:
+        None: 此测试不连接推理服务。
+    """
+    calls: list[dict[str, object]] = []
+
+    def evaluate(**kwargs: object) -> dict[str, object]:
+        """记录 regret 评估参数。
+
+        Args:
+            **kwargs (object): CLI 传入的评估参数。
+
+        Returns:
+            dict[str, object]: 最小 regret 摘要。
+        """
+        calls.append(kwargs)
+        return {"regret": 0.25}
+
+    monkeypatch.setattr(cli, "evaluate_tree_branch_regret", evaluate)
+
+    result = cli.main(
+        [
+            "eval-tree-regret",
+            "--rollout",
+            "runs/rl/tree/heldout.json",
+            "--model-url",
+            "http://127.0.0.1:8900",
+            "--policy-model",
+            "strategy-after",
+            "--output",
+            "runs/rl/tree/regret-after.json",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        {
+            "rollout_path": Path("runs/rl/tree/heldout.json"),
+            "model_url": "http://127.0.0.1:8900",
+            "policy_model": "strategy-after",
+            "output_path": Path("runs/rl/tree/regret-after.json"),
+            "max_tokens": 128,
+        }
+    ]
+    assert '"regret": 0.25' in capsys.readouterr().out
+
+
 def test_label_rl_dagger_command_routes_rollout_and_teacher_game(
     monkeypatch: object,
     capsys: object,

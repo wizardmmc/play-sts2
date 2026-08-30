@@ -263,7 +263,7 @@ def load_grpo_training_group(
             expected_version=str(environment["structured_output_version"]),
         )
     arms = tuple(
-        _training_arm(
+        build_grpo_arm(
             value,
             tokenizer,
             advantage=advantages[index],
@@ -379,7 +379,7 @@ def compare_battle_reward_schemes(
     """对相同 rollout 离线比较第三阶段固定奖励方案。
 
     报告保留 arm 级回报和排序，便于识别均值相近但偏好方向不同的 reward hacking。
-    此函数只重算奖励，不执行模型更新，也不把 E5 工程数据提升为正式结论。
+    此函数只重算奖励，不执行模型更新，也不把工程数据提升为正式结论。
 
     Args:
         paths (Sequence[Path]): 待比较的完整八臂 group JSON。
@@ -524,7 +524,7 @@ def _grpo_loss_tensors(
     return policy_loss + kl_beta * kl, policy_loss, kl, ratio.mean()
 
 
-def _training_arm(
+def build_grpo_arm(
     rollout: Mapping[str, Any],
     tokenizer: Any,
     *,

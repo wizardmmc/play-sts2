@@ -145,13 +145,10 @@ class RunRunner:
                 card_reward_skipped = False
             if screen != "SHOP":
                 shop_inventory_closed = False
-            model_state = _hide_skipped_card_rewards(
+            model_state = project_strategic_model_state(
                 state,
-                hide_card_rewards=card_reward_skipped,
-            )
-            model_state = _hide_closed_shop_inventory(
-                model_state,
-                inventory_closed=shop_inventory_closed,
+                card_reward_skipped=card_reward_skipped,
+                shop_inventory_closed=shop_inventory_closed,
             )
             route = classify_run_state(model_state)
             if route is RunRoute.TRANSIENT:
@@ -351,6 +348,32 @@ def _hide_skipped_card_rewards(
             if action != "claim_reward"
         ]
     return model_state
+
+
+def project_strategic_model_state(
+    state: Mapping[str, Any],
+    *,
+    card_reward_skipped: bool,
+    shop_inventory_closed: bool,
+) -> dict[str, Any]:
+    """应用跨战略动作的奖励与商店可见性记忆。
+
+    Args:
+        state (Mapping[str, Any]): Mod 返回的当前完整状态。
+        card_reward_skipped (bool): 当前奖励流程是否已跳过卡牌入口。
+        shop_inventory_closed (bool): 当前商店访问是否已主动关闭库存。
+
+    Returns:
+        dict[str, Any]: 可交给整局或 Tree 战略 policy 的状态副本。
+    """
+    model_state = _hide_skipped_card_rewards(
+        state,
+        hide_card_rewards=card_reward_skipped,
+    )
+    return _hide_closed_shop_inventory(
+        model_state,
+        inventory_closed=shop_inventory_closed,
+    )
 
 
 def _hide_closed_shop_inventory(

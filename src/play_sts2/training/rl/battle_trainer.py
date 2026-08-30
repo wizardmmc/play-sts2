@@ -353,7 +353,7 @@ def train_battle_grpo(
         raise GrpoTrainingError(f"战斗 GRPO 输出已存在: {adapter_path} 或 {run_path}")
 
     device = resolve_device(config.device)
-    dtype = _base_model_dtype(device)
+    dtype = grpo_base_model_dtype(device)
     tokenizer = AutoTokenizer.from_pretrained(
         str(config.base_model),
         local_files_only=True,
@@ -439,7 +439,7 @@ def train_battle_grpo(
             if max_groups is not None and groups_this_call >= max_groups:
                 break
             group = groups[next_group_index]
-            metric, dagger_cursor = _optimize_group(
+            metric, dagger_cursor = optimize_grpo_group(
                 model,
                 optimizer,
                 anchor,
@@ -566,7 +566,7 @@ def write_battle_reward_comparison(
     return report
 
 
-def _optimize_group(
+def optimize_grpo_group(
     model: Any,
     optimizer: Any,
     anchor: FrozenAnchor,
@@ -1084,7 +1084,7 @@ def _config_json(config: BattleGrpoConfig) -> dict[str, Any]:
     }
 
 
-def _base_model_dtype(device: str) -> Any:
+def grpo_base_model_dtype(device: str) -> Any:
     """根据单卡设备选择基座模型精度。
 
     Args:

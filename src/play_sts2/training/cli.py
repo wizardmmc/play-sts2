@@ -7,10 +7,14 @@ from pathlib import Path
 
 from .rl import (
     collect_battle_rollout_group,
+    collect_tree_rollout_group,
     evaluate_battle_rollout_file,
+    evaluate_tree_branch_regret,
     label_dagger_rollout_group,
     load_battle_grpo_config,
+    load_tree_grpo_config,
     train_battle_grpo,
+    train_tree_grpo,
     write_battle_reward_comparison,
 )
 from .sft import (
@@ -64,6 +68,36 @@ def build_parser() -> argparse.ArgumentParser:
     collect_rl.add_argument("--max-tokens", type=int, default=128)
     collect_rl.add_argument("--temperature", type=float, default=0.8)
     collect_rl.add_argument("--infrastructure-attempts", type=int, default=3)
+    collect_tree = subparsers.add_parser(
+        "collect-rl-tree",
+        help="从原生战略 checkpoint 收集两个本地 worker 的 K=8 Tree group",
+    )
+    collect_tree.add_argument("--checkpoint", type=Path, required=True)
+    collect_tree.add_argument("--executable", type=Path, required=True)
+    collect_tree.add_argument("--profile", type=Path, required=True)
+    collect_tree.add_argument("--home-root", type=Path, required=True)
+    collect_tree.add_argument("--port", type=int, action="append", required=True)
+    collect_tree.add_argument("--strategy-model-url", required=True)
+    collect_tree.add_argument("--battle-model-url", required=True)
+    collect_tree.add_argument("--strategy-policy-model", required=True)
+    collect_tree.add_argument("--battle-policy-model", required=True)
+    collect_tree.add_argument(
+        "--vllm-logprobs-mode",
+        choices=("processed_logprobs",),
+        required=True,
+    )
+    collect_tree.add_argument(
+        "--structured-output-backend",
+        choices=("xgrammar",),
+        required=True,
+    )
+    collect_tree.add_argument("--structured-output-version", required=True)
+    collect_tree.add_argument("--group-id", required=True)
+    collect_tree.add_argument("--output", type=Path, required=True)
+    collect_tree.add_argument("--group-size", type=int, default=8)
+    collect_tree.add_argument("--max-tokens", type=int, default=128)
+    collect_tree.add_argument("--temperature", type=float, default=0.8)
+    collect_tree.add_argument("--max-macro-checkpoints", type=int, default=2)
     label_dagger = subparsers.add_parser(
         "label-rl-dagger",
         help="在教师游戏中重放学生状态并收集 CombatSolver 旁路标签",
@@ -94,6 +128,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="从同名运行的 checkpoint-last 精确恢复",
     )
+    train_tree = subparsers.add_parser(
+        "tree-grpo",
+        help="在一个 K=8 战略兄弟组上执行单卡可行性更新",
+    )
+    train_tree.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/rl/tree-grpo.toml"),
+    )
+    train_tree.add_argument("--name", required=True)
+    evaluate_tree = subparsers.add_parser(
+        "eval-tree-regret",
+        help="查询冻结战略 policy 并计算 held-out 兄弟计划 regret",
+    )
+    evaluate_tree.add_argument("--rollout", type=Path, required=True)
+    evaluate_tree.add_argument("--model-url", required=True)
+    evaluate_tree.add_argument("--policy-model", required=True)
+    evaluate_tree.add_argument("--output", type=Path, required=True)
+    evaluate_tree.add_argument("--max-tokens", type=int, default=128)
     compare_rewards = subparsers.add_parser(
         "compare-rl-rewards",
         help="在相同八臂 rollout 上离线比较第三阶段奖励方案",
@@ -279,6 +332,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             temperature=args.temperature,
             infrastructure_attempts=args.infrastructure_attempts,
         )
+    elif args.command == "collect-rl-tree":
+        output = collect_tree_rollout_group(
+            checkpoint_path=args.checkpoint,
+            executable=args.executable,
+            profile=args.profile,
+            home_root=args.home_root,
+            ports=tuple(args.port),
+            strategy_model_url=args.strategy_model_url,
+            battle_model_url=args.battle_model_url,
+            strategy_policy_model=args.strategy_policy_model,
+            battle_policy_model=args.battle_policy_model,
+            vllm_logprobs_mode=args.vllm_logprobs_mode,
+            structured_output_backend=args.structured_output_backend,
+            structured_output_version=args.structured_output_version,
+            group_id=args.group_id,
+            output_path=args.output,
+            group_size=args.group_size,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            max_macro_checkpoints=args.max_macro_checkpoints,
+        )
     elif args.command == "label-rl-dagger":
         output = label_dagger_rollout_group(
             rollout_path=args.rollout,
@@ -295,6 +369,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.name,
             max_groups=args.max_groups,
             exact_resume=args.resume,
+        )
+    elif args.command == "tree-grpo":
+        config = load_tree_grpo_config(args.config)
+        output = train_tree_grpo(config, args.name)
+    elif args.command == "eval-tree-regret":
+        output = evaluate_tree_branch_regret(
+            rollout_path=args.rollout,
+            model_url=args.model_url,
+            policy_model=args.policy_model,
+            output_path=args.output,
+            max_tokens=args.max_tokens,
         )
     elif args.command == "compare-rl-rewards":
         config = load_battle_grpo_config(args.config)

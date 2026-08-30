@@ -423,19 +423,30 @@ def checkpoint_option_ids(state: Mapping[str, Any]) -> tuple[str, ...]:
         )
     if screen == "CARD_SELECTION":
         selection = state.get("selection") or {}
-        return tuple(
+        values = [
             f"card:{item.get('index')}:{item.get('card_id')}"
             for item in selection.get("cards") or []
-        )
+        ]
+        actions = model_actions(state)
+        if "skip_reward_cards" in actions or "skip_card_selection" in actions:
+            values.append("card:skip")
+        return tuple(values)
     if screen == "SHOP":
-        return _shop_option_ids(state.get("shop") or {})
+        values = list(_shop_option_ids(state.get("shop") or {}))
+        actions = model_actions(state)
+        if "close_shop_inventory" in actions or "proceed" in actions:
+            values.append("shop:leave")
+        return tuple(values)
     if screen == "REST":
         rest = state.get("rest") or {}
-        return tuple(
+        values = [
             f"rest:{item.get('index')}:{item.get('option_id')}"
             for item in rest.get("options") or []
             if item.get("is_enabled") is not False
-        )
+        ]
+        if "proceed" in model_actions(state):
+            values.append("rest:leave")
+        return tuple(values)
     if screen == "EVENT":
         event = state.get("event") or {}
         return tuple(

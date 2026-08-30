@@ -1,0 +1,15 @@
+base_model = "models/base/qwen3.5-4b"
+init_adapter = "models/adapters/my-frozen-parent"
+policy_model = "my-frozen-parent"
+run_role = "engineering_smoke"
+rollout_path = "runs/rl/tree/groups/train.json"
+adapter_root = "models/adapters"
+runs_root = "runs/rl/tree/train"
+device = "cuda:0"
+learning_rate = 0.00001
+max_length = 12288
+max_grad_norm = 1.0
+logits_chunk_size = 128
+seed = 20260830
+clip = 0.2
+kl_beta = 0.02
