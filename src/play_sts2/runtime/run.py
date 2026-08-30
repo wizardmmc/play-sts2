@@ -80,6 +80,7 @@ class RunRunner:
         max_retries: int = _DEFAULT_MAX_RETRIES,
         max_strategic_steps: int = _DEFAULT_MAX_STRATEGIC_STEPS,
         state_timeout: float = _DEFAULT_STATE_TIMEOUT,
+        constrain_actions: bool = False,
     ) -> None:
         """初始化不拥有游戏与模型连接生命周期的整局 Runner。
 
@@ -91,6 +92,8 @@ class RunRunner:
             max_retries (int): 每个动作首次失败后允许的重试次数。
             max_strategic_steps (int): 单局允许执行的最大战略动作数。
             state_timeout (float): 单次等待可处理状态的最长秒数。
+            constrain_actions (bool): 是否把每个战斗与战略状态的完整合法动作行
+                交给推理服务约束。
 
         Returns:
             None: 此方法只组合整局闭环需要的依赖与边界。
@@ -103,6 +106,7 @@ class RunRunner:
             temperature=temperature,
             max_retries=max_retries,
             state_timeout=state_timeout,
+            constrain_actions=constrain_actions,
         )
         self._strategic = StrategicRunner(
             game,
@@ -110,6 +114,7 @@ class RunRunner:
             max_tokens=max_tokens,
             temperature=temperature,
             max_retries=max_retries,
+            constrain_actions=constrain_actions,
         )
         self._max_retries = max_retries
         self._max_strategic_steps = max_strategic_steps

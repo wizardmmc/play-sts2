@@ -49,6 +49,87 @@ def test_select_dagger_candidates_balances_death_uncertainty_and_ordinary(
     assert uncertain.uncertainty == 2.0
 
 
+def test_select_dagger_candidates_uses_quarter_half_quarter_budget(
+    tmp_path: Path,
+) -> None:
+    """正式八标签预算应按 2/4/2 分给尾部、不确定和普通状态。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 普通状态仍只保留一个或三类配比偏离合同。
+
+    Returns:
+        None: 此测试用八条独立 arm 固定配额。
+    """
+    source = rl.load_dagger_rollout_source(_write_rollout_group(tmp_path))
+    template = source.candidates[0]
+    candidates = tuple(
+        replace(
+            template,
+            label_id=f"group-test:{index}:0",
+            arm_index=index,
+            step_index=0,
+            outcome="died" if index < 4 else "cleared",
+            uncertainty=float(8 - index),
+        )
+        for index in range(8)
+    )
+
+    selected = rl.select_dagger_candidates(
+        replace(source, candidates=candidates),
+        max_labels=8,
+        seed=7,
+    )
+
+    reasons = [candidate.reason for candidate in selected]
+    assert reasons.count("death_tail") == 2
+    assert reasons.count("uncertainty") == 4
+    assert reasons.count("ordinary") == 2
+
+
+def test_select_dagger_candidates_includes_cleared_high_loss_arms(
+    tmp_path: Path,
+) -> None:
+    """通关但损失至少两成最大生命的 arm 也应进入尾部配额。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 尾部池只识别死亡而遗漏高战损通关。
+
+    Returns:
+        None: 此测试固定死亡/高战损共用的四分之一配额。
+    """
+    source = rl.load_dagger_rollout_source(_write_rollout_group(tmp_path))
+    template = source.candidates[0]
+    candidates = tuple(
+        replace(
+            template,
+            label_id=f"group-test:{index}:0",
+            arm_index=index,
+            step_index=0,
+            outcome="cleared",
+            hp_loss_ratio=(0.5, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1)[index],
+            uncertainty=float(8 - index),
+        )
+        for index in range(8)
+    )
+
+    selected = rl.select_dagger_candidates(
+        replace(source, candidates=candidates),
+        max_labels=8,
+        seed=7,
+    )
+
+    reasons = [candidate.reason for candidate in selected]
+    assert reasons.count("high_loss_tail") == 2
+    assert reasons.count("uncertainty") == 4
+    assert reasons.count("ordinary") == 2
+
+
 def test_build_dagger_label_keeps_only_visible_training_facts(
     tmp_path: Path,
 ) -> None:
@@ -61,7 +142,10 @@ def test_build_dagger_label_keeps_only_visible_training_facts(
         None: 此测试阻止牌序、RNG、搜索分数或 GRPO 字段进入标签。
     """
     source = rl.load_dagger_rollout_source(_write_rollout_group(tmp_path))
-    candidate = rl.select_dagger_candidates(source, max_labels=1, seed=7)[0]
+    candidate = replace(
+        rl.select_dagger_candidates(source, max_labels=1, seed=7)[0],
+        reason="high_loss_tail",
+    )
 
     label = rl.build_dagger_label(
         candidate,
@@ -313,7 +397,10 @@ def test_dagger_label_file_loads_as_supervised_battle_rows(tmp_path: Path) -> No
         None: 此测试固定标签文件到 SFT 构建输入的边界。
     """
     source = rl.load_dagger_rollout_source(_write_rollout_group(tmp_path))
-    candidate = rl.select_dagger_candidates(source, max_labels=1, seed=7)[0]
+    candidate = replace(
+        rl.select_dagger_candidates(source, max_labels=1, seed=7)[0],
+        reason="high_loss_tail",
+    )
     label = rl.build_dagger_label(
         candidate,
         SolverSuggestion(
@@ -348,6 +435,7 @@ def test_dagger_label_file_loads_as_supervised_battle_rows(tmp_path: Path) -> No
     assert rows[0]["sample_id"] == "dagger/group-test:0:1"
     assert rows[0]["source"] == "human_play"
     assert rows[0]["training_role"] == "dagger_label"
+    assert "dagger:high_loss_tail" in rows[0]["tags"]
     assert rows[0]["behavior_origin"] == "dagger"
     assert rows[0]["action_source"] == "combat_solver"
     assert rows[0]["action"] == "play_card"
@@ -585,6 +673,12 @@ def _write_rollout_group(tmp_path: Path) -> Path:
                 "policy_version": "policy-test",
                 "outcome": outcome,
                 "steps": steps,
+                "final_state": {
+                    "run": {
+                        "current_hp": 0 if outcome == "died" else 30,
+                        "max_hp": 70,
+                    }
+                },
             }
         )
     path = tmp_path / "group.json"

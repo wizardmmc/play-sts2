@@ -48,6 +48,7 @@ class StrategicProvider:
         """
         self._replies = iter(replies)
         self.requests: list[tuple[ChatMessage, ...]] = []
+        self.response_choices: list[tuple[str, ...] | None] = []
 
     def chat(
         self,
@@ -55,6 +56,7 @@ class StrategicProvider:
         *,
         max_tokens: int = 128,
         temperature: float = 0.0,
+        response_choices: Sequence[str] | None = None,
     ) -> ModelReply:
         """记录本页完整消息并返回下一条动作。
 
@@ -62,11 +64,15 @@ class StrategicProvider:
             messages (Sequence[ChatMessage]): 当前页面发送给模型的消息。
             max_tokens (int): 本次回复的最大 token 数。
             temperature (float): 本次回复的采样温度。
+            response_choices (Sequence[str] | None): 当前状态的完整合法动作行。
 
         Returns:
             ModelReply: 下一条预设模型回复。
         """
         self.requests.append(tuple(messages))
+        self.response_choices.append(
+            tuple(response_choices) if response_choices is not None else None
+        )
         return ModelReply(next(self._replies))
 
 
@@ -132,6 +138,27 @@ def test_strategic_runner_rejects_battle_state() -> None:
         )
 
     assert provider.requests == []
+
+
+def test_strategic_runner_can_constrain_model_to_legal_actions() -> None:
+    """显式启用约束时把当前页面的完整动作域交给 Provider。
+
+    Raises:
+        AssertionError: 约束开关没有传递合法动作候选。
+
+    Returns:
+        None: 此测试验证远端 xgrammar 所需的战略契约。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = StrategicProvider(["ACTION: choose_map_node 0"])
+
+    runtime.StrategicRunner(
+        StrategicGame(),
+        provider,
+        constrain_actions=True,
+    ).step(_map_state())
+
+    assert provider.response_choices == [("ACTION: choose_map_node 0",)]
 
 
 def _map_state() -> dict[str, Any]:

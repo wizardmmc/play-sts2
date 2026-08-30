@@ -24,6 +24,7 @@ class WholeRunProvider:
         """
         self._replies = iter(replies)
         self.requests: list[tuple[ChatMessage, ...]] = []
+        self.response_choices: list[tuple[str, ...] | None] = []
 
     def chat(
         self,
@@ -31,6 +32,7 @@ class WholeRunProvider:
         *,
         max_tokens: int = 128,
         temperature: float = 0.0,
+        response_choices: Sequence[str] | None = None,
     ) -> ModelReply:
         """保存模型输入并返回下一条动作。
 
@@ -38,11 +40,15 @@ class WholeRunProvider:
             messages (Sequence[ChatMessage]): 当前决策的完整消息。
             max_tokens (int): 本次回复的最大 token 数。
             temperature (float): 本次回复的采样温度。
+            response_choices (Sequence[str] | None): 当前状态的完整合法动作行。
 
         Returns:
             ModelReply: 下一条预设回复。
         """
         self.requests.append(tuple(messages))
+        self.response_choices.append(
+            tuple(response_choices) if response_choices is not None else None
+        )
         return ModelReply(next(self._replies))
 
 
@@ -430,6 +436,44 @@ def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
         tuple(message.role for message in provider.requests[index])
         == ("system", "user")
         for index in (0, 2, 3)
+    )
+
+
+def test_run_runner_can_constrain_battle_and_strategy_actions() -> None:
+    """整局约束开关同时覆盖战略页和战斗页。
+
+    Raises:
+        AssertionError: 任一模型决策没有收到完整合法动作行。
+
+    Returns:
+        None: 此测试验证远端 xgrammar 整局评测合同。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    provider = WholeRunProvider(
+        [
+            "ACTION: choose_map_node 0",
+            "ACTION: end_turn",
+            "ACTION: claim_reward 0",
+            "ACTION: choose_map_node 0",
+        ]
+    )
+
+    runtime.RunRunner(
+        WholeRunGame(),
+        provider,
+        state_timeout=1,
+        constrain_actions=True,
+    ).run(_map_state())
+
+    assert len(provider.response_choices) == 4
+    assert all(choices is not None for choices in provider.response_choices)
+    assert tuple(
+        replies[0] for replies in provider.response_choices if replies is not None
+    ) == (
+        "ACTION: choose_map_node 0",
+        "ACTION: end_turn",
+        "ACTION: claim_reward 0",
+        "ACTION: choose_map_node 0",
     )
 
 

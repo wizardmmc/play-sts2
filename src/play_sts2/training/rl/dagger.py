@@ -16,6 +16,8 @@ from ...inference import ChatMessage, ModelReply
 from ...runtime import BattleRunner
 from ...scenario import BattleScenario, ScenarioResetResult
 
+_HIGH_LOSS_RATIO = 0.2
+
 
 class DaggerContractError(ValueError):
     """表示学生状态、教师动作或标签文件不满足 DAgger 契约。"""
@@ -54,7 +56,9 @@ class DaggerCandidate:
             不允许写入最终标签。
         behavior_logprobs (tuple[float, ...]): 仅用于候选不确定性排序的学生概率。
         uncertainty (float): assistant token 平均负 log-prob。
-        reason (str): ``death_tail``、``uncertainty`` 或 ``ordinary``。
+        hp_loss_ratio (float): 相对场景入口损失的最大生命比例。
+        reason (str): ``death_tail``、``high_loss_tail``、``uncertainty`` 或
+            ``ordinary``。
     """
 
     label_id: str
@@ -69,6 +73,7 @@ class DaggerCandidate:
     before_state: Mapping[str, Any]
     behavior_logprobs: tuple[float, ...]
     uncertainty: float
+    hp_loss_ratio: float = 0.0
     reason: str = "unselected"
 
 
@@ -532,7 +537,12 @@ def _dagger_sft_row(
             f"expected={expected_policy_version}, actual={student_policy}"
         )
     selection_reason = _text(value, "selection_reason")
-    if selection_reason not in {"death_tail", "uncertainty", "ordinary"}:
+    if selection_reason not in {
+        "death_tail",
+        "high_loss_tail",
+        "uncertainty",
+        "ordinary",
+    }:
         raise DaggerContractError(f"DAgger selection_reason 无效: {location}")
     legal = value.get("legal_actions")
     if (
@@ -632,6 +642,7 @@ def load_dagger_rollout_source(path: Path) -> DaggerRolloutSource:
         if rollout_policy != policy_version:
             raise DaggerContractError("DAgger rollout group 混入不同学生 policy")
         outcome = _text(raw_rollout, "outcome")
+        hp_loss_ratio = _rollout_hp_loss_ratio(raw_rollout, scenario)
         raw_steps = raw_rollout.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps:
             raise DaggerContractError("DAgger rollout arm 没有学生步骤")
@@ -641,6 +652,7 @@ def load_dagger_rollout_source(path: Path) -> DaggerRolloutSource:
                     group_id,
                     arm_index,
                     outcome,
+                    hp_loss_ratio,
                     policy_version,
                     raw_step,
                 )
@@ -691,23 +703,38 @@ def select_dagger_candidates(
     for candidate in eligible:
         by_arm.setdefault(candidate.arm_index, []).append(candidate)
 
-    death_pool = [
-        arm[-1] for arm in by_arm.values() if arm and arm[-1].outcome == "died"
+    tail_pool = [
+        arm[-1]
+        for arm in by_arm.values()
+        if arm
+        and (arm[-1].outcome == "died" or arm[-1].hp_loss_ratio >= _HIGH_LOSS_RATIO)
     ]
-    death_count = min(len(death_pool), max(1, budget // 4)) if death_pool else 0
+    tail_count = min(len(tail_pool), max(1, budget // 4)) if tail_pool else 0
     selected = [
-        replace(candidate, reason="death_tail")
+        replace(
+            candidate,
+            reason=("death_tail" if candidate.outcome == "died" else "high_loss_tail"),
+        )
         for candidate in sorted(
-            death_pool,
-            key=lambda item: (-item.uncertainty, item.arm_index),
-        )[:death_count]
+            tail_pool,
+            key=lambda item: (
+                item.outcome != "died",
+                -item.hp_loss_ratio,
+                -item.uncertainty,
+                item.arm_index,
+            ),
+        )[:tail_count]
     ]
     selected_ids = {candidate.label_id for candidate in selected}
 
     remaining = [
         candidate for candidate in eligible if candidate.label_id not in selected_ids
     ]
-    ordinary_count = 1 if remaining and len(selected) < budget else 0
+    ordinary_count = (
+        min(len(remaining), max(1, budget // 4))
+        if remaining and len(selected) < budget
+        else 0
+    )
     uncertainty_count = min(len(remaining), budget - len(selected) - ordinary_count)
     uncertainty = sorted(
         remaining,
@@ -830,6 +857,7 @@ def _candidate(
     group_id: str,
     arm_index: int,
     outcome: str,
+    hp_loss_ratio: float,
     policy_version: str,
     value: object,
 ) -> DaggerCandidate:
@@ -839,6 +867,7 @@ def _candidate(
         group_id (str): 来源 group。
         arm_index (int): 来源 arm。
         outcome (str): 来源战斗结果。
+        hp_loss_ratio (float): 相对入口损失的最大生命比例。
         policy_version (str): 来源学生 policy。
         value (object): 尚未校验的 step 对象。
 
@@ -889,7 +918,41 @@ def _candidate(
         before_state=dict(raw_state),
         behavior_logprobs=behavior_logprobs,
         uncertainty=-statistics.fmean(behavior_logprobs),
+        hp_loss_ratio=hp_loss_ratio,
     )
+
+
+def _rollout_hp_loss_ratio(
+    value: Mapping[str, Any],
+    scenario: BattleScenario,
+) -> float:
+    """计算一条 arm 相对场景入口的战损比例。
+
+    战损以最大生命为分母，避免不同场景最大生命不同时直接比较绝对 HP。战后回复
+    可能因恢复效果高于入口生命，此时战损按零处理。
+
+    Args:
+        value (Mapping[str, Any]): 完整 rollout arm 对象。
+        scenario (BattleScenario): 提供确定性入口生命的场景。
+
+    Raises:
+        DaggerContractError: 终局生命字段缺失或超出场景边界。
+
+    Returns:
+        float: 限制在零到一之间的入口战损比例。
+    """
+    final_state = value.get("final_state")
+    final_run = final_state.get("run") if isinstance(final_state, Mapping) else None
+    current_hp = final_run.get("current_hp") if isinstance(final_run, Mapping) else None
+    if (
+        isinstance(current_hp, bool)
+        or not isinstance(current_hp, int)
+        or current_hp < 0
+        or scenario.current_hp is None
+        or scenario.max_hp is None
+    ):
+        raise DaggerContractError("DAgger rollout arm 缺少有效终局生命")
+    return min(1.0, max(0.0, (scenario.current_hp - current_hp) / scenario.max_hp))
 
 
 def _scenario(value: object) -> BattleScenario:

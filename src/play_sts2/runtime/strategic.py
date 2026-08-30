@@ -26,6 +26,7 @@ class StrategicRunner:
         max_tokens: int = 128,
         temperature: float = 0.0,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        constrain_actions: bool = False,
     ) -> None:
         """初始化不拥有游戏与模型连接生命周期的战略 Runner。
 
@@ -35,6 +36,7 @@ class StrategicRunner:
             max_tokens (int): 每次模型回复允许生成的最大 token 数。
             temperature (float): 每次模型回复使用的采样温度。
             max_retries (int): 首次输出失败后允许的重试次数。
+            constrain_actions (bool): 是否把当前完整合法动作行交给推理服务约束。
 
         Returns:
             None: 此方法只组合单步战略闭环需要的依赖。
@@ -44,6 +46,7 @@ class StrategicRunner:
             provider,
             max_tokens=max_tokens,
             temperature=temperature,
+            constrain_actions=constrain_actions,
         )
         self._max_retries = max_retries
 
