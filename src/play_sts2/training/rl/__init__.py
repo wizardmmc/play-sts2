@@ -8,6 +8,7 @@ from .collector import (
     RolloutModelError,
 )
 from .contracts import (
+    ACTION_CONSTRAINT_MODE,
     BEHAVIOR_LOGPROBS_MODE,
     BattleGroupRejected,
     BattleReward,
@@ -20,12 +21,20 @@ from .contracts import (
 )
 from .entrypoint import collect_battle_rollout_group
 from .io import load_battle_scenario, write_battle_rollout_group
-from .rollout import build_battle_rollout, score_battle_reward_v0
+from .metrics import (
+    BattleEvaluationAttempt,
+    BattleRegressionMetrics,
+    evaluate_battle_regression_metrics,
+)
+from .rollout import build_battle_rollout, score_battle_reward
 
 __all__ = [
+    "ACTION_CONSTRAINT_MODE",
     "BEHAVIOR_LOGPROBS_MODE",
+    "BattleEvaluationAttempt",
     "BattleGroupCollector",
     "BattleGroupRejected",
+    "BattleRegressionMetrics",
     "BattleReward",
     "BattleRollout",
     "BattleRolloutGroup",
@@ -39,7 +48,8 @@ __all__ = [
     "build_battle_rollout",
     "build_battle_rollout_group",
     "collect_battle_rollout_group",
+    "evaluate_battle_regression_metrics",
     "load_battle_scenario",
-    "score_battle_reward_v0",
+    "score_battle_reward",
     "write_battle_rollout_group",
 ]

@@ -12,6 +12,10 @@ uv run ruff check .
 uv run pytest
 ```
 
+`configs/` 保存每台机器自己的真实配置并完全排除在 Git 之外；可提交示例位于
+`configs-template/`，目录结构与真实配置一致。首次运行前复制需要的模板并填写
+本机路径、端口和训练参数，程序不会静默回退读取模板。
+
 真实游戏 E2E 默认使用无头模式和隔离测试存档：
 
 ```bash
@@ -145,7 +149,7 @@ uv run play-sts2-knowledge review \
 
 安装 PyTorch、Transformers 与 PEFT 后，可以用本地 Qwen3.5-4B 训练 LoRA：
 
-当前 E4 数据使用 `configs/sft-e4-mix.toml` 定向混合：远古者不进入训练或验证，
+当前 E4 数据使用 `configs/sft/sft-e4-mix.toml` 定向混合：远古者不进入训练或验证，
 其余正式知识实体和事实全部保留；高频常规动作按上限抽样，未列出的低频动作全部
 保留。
 重新构建命令为：
@@ -153,13 +157,13 @@ uv run play-sts2-knowledge review \
 ```bash
 uv run play-sts2-train build-sft \
   --knowledge-root data/game_knowledge/generated-v0.111.0 \
-  --mix configs/sft-e4-mix.toml
+  --mix configs/sft/sft-e4-mix.toml
 ```
 
 ```bash
 uv sync --group training
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-e4-cuda-lr5e5.toml \
+  --config configs/sft/sft-e4-cuda-lr5e5.toml \
   --name 20260829-sft-e4-knowledge-r16-lr5e5
 ```
 
@@ -183,7 +187,7 @@ PyTorch 随机状态，约占 180～200 MB。基座在 MPS 上使用 BF16，所�
 
 ```bash
 uv run --group training play-sts2-train sft \
-  --config configs/sft.toml \
+  --config configs/sft/sft.toml \
   --name 20260828-sft-clean-native-r16-e3 \
   --resume
 ```
@@ -223,7 +227,7 @@ uv run --group training play-sts2-train merge-sft \
   --adapter models/adapters/20260828-sft-clean-native-r16-e3
 ```
 
-基座模型从 `configs/sft.toml` 读取，默认输出为
+基座模型从 `configs/sft/sft.toml` 读取，默认输出为
 `models/merged/20260828-sft-clean-native-r16-e3-merged/`。命令拒绝覆盖已有目录，
 通过同盘暂存目录排他原子发布；发布前会核对 adapter 的基座血缘并确认输入没有
 变化。`merge_manifest.json` 记录全部基座权重、adapter 与实际 tokenizer 来源的
@@ -266,7 +270,7 @@ LoRA adapter 是训练权重，不是另一套 Provider 实现。
 
 在 Apple Silicon Mac 上先安装独立的本地推理依赖，并把合并后的 Transformers
 BF16 模型一次性转换为 MLX 8-bit。模型身份、目录、服务端口和生成 profile
-统一由 `configs/inference.toml` 管理；完成新一轮训练时先更新其中的
+统一由 `configs/inference/inference.toml` 管理；完成新一轮训练时先更新其中的
 `artifact_id`、`merged_model` 与 `serving_model`，再执行：
 
 ```bash

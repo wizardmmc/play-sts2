@@ -5,10 +5,11 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from ...harness import format_action
+from ...harness import format_action, legal_action_lines
 from ...runtime import BattleOutcome, BattleResult
 from ...scenario import BattleSnapshot
 from .contracts import (
+    ACTION_CONSTRAINT_MODE,
     BattleReward,
     BattleRollout,
     BattleRolloutStep,
@@ -52,10 +53,17 @@ def build_battle_rollout(
         raise RolloutContractError("战斗结果没有任何模型动作")
 
     policy_versions: set[str] = set()
+    generation_profiles = {step.generation_profile for step in result.steps}
+    if None in generation_profiles or len(generation_profiles) != 1:
+        raise RolloutContractError("训练 rollout 缺少统一的实际生成参数记录")
+    generation_profile = generation_profiles.pop()
     rollout_steps: list[BattleRolloutStep] = []
     for index, step in enumerate(result.steps):
         if step.retry_errors or len(step.replies) != 1:
             raise RolloutContractError("训练 rollout 不允许混入动作内模型重试")
+        expected_choices = legal_action_lines(step.before_state)
+        if not step.response_choices or step.response_choices != expected_choices:
+            raise RolloutContractError("训练 rollout 缺少实际结构化动作约束记录")
         reply = step.reply
         if not reply.model:
             raise RolloutContractError("模型响应缺少可绑定的 policy version")
@@ -63,6 +71,8 @@ def build_battle_rollout(
             raise RolloutContractError("模型响应缺少对齐的 token ID 与 log-prob")
         if any(not math.isfinite(value) for value in reply.behavior_logprobs):
             raise RolloutContractError("模型响应包含非有限 behavior log-prob")
+        if not reply.finish_reason:
+            raise RolloutContractError("模型响应缺少 finish reason")
         policy_versions.add(reply.model)
         raw_after_state = step.action_result.get("state")
         after_state = (
@@ -80,6 +90,8 @@ def build_battle_rollout(
                 action=format_action(step.action),
                 token_ids=reply.token_ids,
                 behavior_logprobs=reply.behavior_logprobs,
+                response_choices=step.response_choices,
+                finish_reason=reply.finish_reason,
             )
         )
     if len(policy_versions) != 1:
@@ -90,22 +102,24 @@ def build_battle_rollout(
         worker_id=worker_id,
         policy_version=policy_versions.pop(),
         behavior_logprobs_mode=behavior_logprobs_mode,
+        action_constraint_mode=ACTION_CONSTRAINT_MODE,
+        generation_profile=generation_profile,
         entry_snapshot=entry_snapshot,
         steps=tuple(rollout_steps),
         outcome=result.outcome.value,
         final_state=copy.deepcopy(result.final_state),
-        reward=score_battle_reward_v0(entry_state, result),
+        reward=score_battle_reward(entry_state, result),
     )
 
 
-def score_battle_reward_v0(
+def score_battle_reward(
     entry_state: Mapping[str, Any],
     result: BattleResult,
 ) -> BattleReward:
-    """计算不含药水项的首轮可审计战斗奖励。
+    """计算不含药水项的可审计战斗奖励。
 
-    该奖励只用于验证同入口 group 数据链可以产生方差；正式训练仍需与前人
-    v2 药水项做消融，不能把这里的权重当作最终结论。
+    该奖励只用于验证同入口 group 数据链可以产生方差；正式训练仍需与旧药水项
+    做消融，不能把这里的权重当作最终结论。
 
     Args:
         entry_state (Mapping[str, Any]): reset 后的战斗入口状态。
@@ -134,7 +148,7 @@ def score_battle_reward_v0(
         RewardComponent(name="turns", value=_TURN_PENALTY * turns),
     )
     return BattleReward(
-        scheme="battle-v0",
+        scheme="battle",
         total=sum(component.value for component in components),
         components=components,
     )

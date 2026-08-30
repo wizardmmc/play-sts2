@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "policy_model": "policy-rl-dev",
+  "group_size": 8,
+  "primary_metrics": [
+    "clear_rate",
+    "final_hp_ratio"
+  ],
+  "guardrail_metrics": [
+    "mean_turns",
+    "potion_use_rate",
+    "invalid_output_rate"
+  ],
+  "metric_contract": {
+    "name": "battle-regression",
+    "scenario_attempts": 8,
+    "split_aggregation": "micro_after_equal_attempts_per_scenario",
+    "infrastructure_failures": "resample_and_exclude",
+    "model_errors": "include_as_policy_attempt",
+    "definitions": {
+      "clear_rate": {
+        "numerator": "cleared_attempts",
+        "denominator": "all_policy_attempts"
+      },
+      "final_hp_ratio": {
+        "value": "final_hp/max_hp_per_attempt; model_error=0",
+        "aggregation": "mean_over_all_policy_attempts"
+      },
+      "mean_turns": {
+        "value": "terminal_turn",
+        "aggregation": "mean_over_cleared_or_died_attempts"
+      },
+      "potion_use_rate": {
+        "numerator": "use_potion_actions",
+        "denominator": "all_valid_actions"
+      },
+      "invalid_output_rate": {
+        "numerator": "invalid_model_replies",
+        "denominator": "valid_action_replies_plus_invalid_model_replies"
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "id": "battle-train",
+      "split": "train",
+      "path": "battle.json"
+    },
+    {
+      "id": "battle-validation",
+      "split": "validation",
+      "path": "battle-validation.json"
+    },
+    {
+      "id": "battle-fresh-seed",
+      "split": "fresh_seed",
+      "path": "battle-fresh-seed.json"
+    }
+  ]
+}

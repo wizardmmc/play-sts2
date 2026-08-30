@@ -73,13 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--validation-run", dest="dev_run", action="append", default=[])
     build.add_argument("--eval-run", dest="test_run", action="append", default=[])
     build.add_argument(
+        "--run-splits",
+        type=Path,
+        help="覆盖所有 human raw 根默认名册的独立 splits.json",
+    )
+    build.add_argument(
         "--mix",
         type=Path,
-        help="可选的 E3 训练高频人类动作上限 TOML",
+        help="可选的训练高频人类动作上限 TOML",
     )
 
     train = subparsers.add_parser("sft", help="训练 Qwen LoRA adapter")
-    train.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
+    train.add_argument("--config", type=Path, default=Path("configs/sft/sft.toml"))
     train.add_argument("--name", required=True, help="adapter 与 run 的目录名称")
     train.add_argument("--max-steps", type=int, help="限制优化步数，用于真实冒烟")
     train.add_argument(
@@ -92,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_cuda.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/sft-cuda.toml"),
+        default=Path("configs/sft/sft-cuda.toml"),
     )
     train_cuda.add_argument("--name", required=True, help="adapter 与 run 的目录名称")
     train_cuda.add_argument("--max-steps", type=int, help="限制优化步数，用于真实冒烟")
@@ -103,12 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     merge = subparsers.add_parser("merge-sft", help="把 LoRA 合并为独立 HF 模型")
-    merge.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
+    merge.add_argument("--config", type=Path, default=Path("configs/sft/sft.toml"))
     merge.add_argument("--adapter", type=Path, required=True)
     merge.add_argument("--output", type=Path)
 
     evaluate = subparsers.add_parser("eval-sft", help="生成式验证 LoRA adapter")
-    evaluate.add_argument("--config", type=Path, default=Path("configs/sft.toml"))
+    evaluate.add_argument("--config", type=Path, default=Path("configs/sft/sft.toml"))
     evaluate.add_argument("--adapter", type=Path, required=True)
     evaluate.add_argument(
         "--split",
@@ -126,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_loss.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/sft.toml"),
+        default=Path("configs/sft/sft.toml"),
     )
     evaluate_loss.add_argument("--adapter", type=Path, required=True)
     evaluate_loss.add_argument(
@@ -167,7 +172,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         int: 所选命令成功完成时返回 ``0``。
     """
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if (
+        args.command == "build-sft"
+        and args.run_splits is not None
+        and any((args.train_run, args.dev_run, args.test_run))
+    ):
+        parser.error("--run-splits 不能与 --train-run/--validation-run/--eval-run 混用")
     if args.command == "collect-rl-battle":
         output = collect_battle_rollout_group(
             scenario_path=args.scenario,
@@ -191,6 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             train_run_ids=args.train_run,
             dev_run_ids=args.dev_run,
             test_run_ids=args.test_run,
+            run_splits_path=args.run_splits,
             mix_config_path=args.mix,
         )
         output = {

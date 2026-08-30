@@ -1,0 +1,18 @@
+seed = 20260830
+
+[human]
+
+[human.train_max_per_action]
+play_card = 600
+end_turn = 160
+claim_reward = 100
+choose_map_node = 100
+proceed = 80
+
+[arithmetic.train_per_kind]
+block_math = 70
+energy_math = 40
+lethal = 70
+multihit = 90
+orb_focus = 130
+status_math = 100

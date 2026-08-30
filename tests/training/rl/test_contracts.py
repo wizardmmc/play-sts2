@@ -7,7 +7,12 @@ import pytest
 
 from play_sts2.harness import HarnessAction, HarnessLayer, Observation
 from play_sts2.inference import ChatMessage, ModelReply
-from play_sts2.runtime import BattleOutcome, BattleResult, DecisionStep
+from play_sts2.runtime import (
+    BattleOutcome,
+    BattleResult,
+    DecisionGenerationProfile,
+    DecisionStep,
+)
 from play_sts2.scenario import BattleScenario, BattleSnapshot, ModelInputSnapshot
 
 
@@ -40,15 +45,17 @@ def test_build_battle_group_computes_population_relative_advantages() -> None:
         expected_size=8,
     )
 
-    assert group.policy_version == "policy-e3-r1"
+    assert group.policy_version == "policy-test"
     assert group.behavior_logprobs_mode == "processed_logprobs"
+    assert group.action_constraint_mode == "vllm_structured_choice"
+    assert group.generation_profile == _generation_profile()
     assert group.entry_snapshot == snapshot
     assert group.reward_mean == 2.0
     assert group.reward_std == 1.0
     assert group.advantages == (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
 
 
-def test_build_battle_rollout_preserves_policy_facts_and_scores_v0_reward() -> None:
+def test_build_battle_rollout_preserves_policy_facts_and_scores_reward() -> None:
     """Runtime 结果转换为含动作前后状态和行为概率的训练 arm。
 
     Raises:
@@ -59,6 +66,9 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_v0_reward() -> N
     """
     rl = importlib.import_module("play_sts2.training.rl")
     before_state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
         "turn": 1,
         "run": {"current_hp": 40, "max_hp": 70},
     }
@@ -77,7 +87,8 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_v0_reward() -> N
         replies=(
             ModelReply(
                 text="ACTION: end_turn",
-                model="policy-e3-r1",
+                model="policy-test",
+                finish_reason="stop",
                 token_ids=(741, 25, 1289),
                 behavior_logprobs=(-0.1, -0.2, -0.3),
             ),
@@ -85,6 +96,8 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_v0_reward() -> N
         retry_errors=(),
         action=HarnessAction(name="end_turn", parameters={}),
         action_result={"state": after_state, "stable": True},
+        response_choices=("ACTION: end_turn",),
+        generation_profile=_generation_profile(),
     )
     result = BattleResult(
         outcome=BattleOutcome.CLEARED,
@@ -101,14 +114,18 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_v0_reward() -> N
         behavior_logprobs_mode="processed_logprobs",
     )
 
-    assert rollout.policy_version == "policy-e3-r1"
+    assert rollout.policy_version == "policy-test"
     assert rollout.behavior_logprobs_mode == "processed_logprobs"
+    assert rollout.action_constraint_mode == "vllm_structured_choice"
+    assert rollout.generation_profile == _generation_profile()
     assert rollout.steps[0].action == "ACTION: end_turn"
+    assert rollout.steps[0].finish_reason == "stop"
+    assert rollout.steps[0].response_choices == ("ACTION: end_turn",)
     assert rollout.steps[0].token_ids == (741, 25, 1289)
     assert rollout.steps[0].behavior_logprobs == (-0.1, -0.2, -0.3)
     assert rollout.steps[0].before_state == before_state
     assert rollout.steps[0].after_state == after_state
-    assert rollout.reward.scheme == "battle-v0"
+    assert rollout.reward.scheme == "battle"
     assert rollout.reward.total == 1.45
     assert tuple(
         (component.name, component.value) for component in rollout.reward.components
@@ -118,6 +135,109 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_v0_reward() -> N
         ("death", 0.0),
         ("turns", -0.05),
     )
+
+
+def test_build_battle_rollout_rejects_missing_constraint_provenance() -> None:
+    """没有实际约束请求记录的 Runtime 结果不能冒充正式 RL rollout。
+
+    Returns:
+        None: 此测试防止 rollout builder 无条件补写结构化约束标签。
+    """
+    rl = importlib.import_module("play_sts2.training.rl")
+    before_state = {
+        "turn": 1,
+        "run": {"current_hp": 40, "max_hp": 70},
+    }
+    step = DecisionStep(
+        observation=Observation(
+            layer=HarnessLayer.BATTLE,
+            text="当前战斗状态",
+            available_actions=("end_turn",),
+        ),
+        before_state=before_state,
+        messages=(ChatMessage(role="user", content="当前战斗状态"),),
+        replies=(
+            ModelReply(
+                text="ACTION: end_turn",
+                model="policy-test",
+                finish_reason="stop",
+                token_ids=(741,),
+                behavior_logprobs=(-0.1,),
+            ),
+        ),
+        retry_errors=(),
+        action=HarnessAction(name="end_turn", parameters={}),
+        action_result={"state": before_state, "stable": True},
+        generation_profile=_generation_profile(),
+    )
+    result = BattleResult(
+        outcome=BattleOutcome.CLEARED,
+        steps=(step,),
+        final_state={"run": {"current_hp": 40, "max_hp": 70}},
+    )
+
+    with pytest.raises(rl.RolloutContractError, match="动作约束"):
+        rl.build_battle_rollout(
+            arm_index=0,
+            worker_id="worker-0",
+            entry_snapshot=_snapshot(),
+            entry_state=before_state,
+            result=result,
+            behavior_logprobs_mode="processed_logprobs",
+        )
+
+
+def test_build_battle_rollout_rejects_missing_generation_profile() -> None:
+    """没有实际生成参数记录的 Runtime 结果不能进入正式 RL rollout。
+
+    Returns:
+        None: 此测试防止同一 policy 的不同采样配置被混为一谈。
+    """
+    rl = importlib.import_module("play_sts2.training.rl")
+    before_state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
+        "turn": 1,
+        "run": {"current_hp": 40, "max_hp": 70},
+    }
+    step = DecisionStep(
+        observation=Observation(
+            layer=HarnessLayer.BATTLE,
+            text="当前战斗状态",
+            available_actions=("end_turn",),
+        ),
+        before_state=before_state,
+        messages=(ChatMessage(role="user", content="当前战斗状态"),),
+        replies=(
+            ModelReply(
+                text="ACTION: end_turn",
+                model="policy-test",
+                finish_reason="stop",
+                token_ids=(741,),
+                behavior_logprobs=(-0.1,),
+            ),
+        ),
+        retry_errors=(),
+        action=HarnessAction(name="end_turn", parameters={}),
+        action_result={"state": before_state, "stable": True},
+        response_choices=("ACTION: end_turn",),
+    )
+    result = BattleResult(
+        outcome=BattleOutcome.CLEARED,
+        steps=(step,),
+        final_state={"run": {"current_hp": 40, "max_hp": 70}},
+    )
+
+    with pytest.raises(rl.RolloutContractError, match="生成参数"):
+        rl.build_battle_rollout(
+            arm_index=0,
+            worker_id="worker-0",
+            entry_snapshot=_snapshot(),
+            entry_state=before_state,
+            result=result,
+            behavior_logprobs_mode="processed_logprobs",
+        )
 
 
 def test_build_battle_group_rejects_different_entry_snapshot() -> None:
@@ -146,6 +266,81 @@ def test_build_battle_group_rejects_different_entry_snapshot() -> None:
     with pytest.raises(rl.BattleGroupRejected, match="入口快照不一致"):
         rl.build_battle_rollout_group(
             group_id="different-entry",
+            scenario=_scenario(),
+            rollouts=rollouts,
+            expected_size=8,
+        )
+
+
+def test_build_battle_group_rejects_unconstrained_rollout() -> None:
+    """任一 arm 未使用结构化合法动作约束时必须拒绝整组。
+
+    Returns:
+        None: 此测试阻止未约束采样冒充正式 rollout。
+    """
+    rl = importlib.import_module("play_sts2.training.rl")
+    snapshot = _snapshot()
+    rollouts = tuple(
+        replace(
+            _rollout(
+                rl,
+                arm_index=index,
+                snapshot=snapshot,
+                action=(
+                    "ACTION: end_turn" if index % 2 == 0 else "ACTION: play_card 0"
+                ),
+                reward=float(index),
+            ),
+            action_constraint_mode=("none" if index == 7 else "vllm_structured_choice"),
+        )
+        for index in range(8)
+    )
+
+    with pytest.raises(rl.BattleGroupRejected, match="结构化合法动作约束"):
+        rl.build_battle_rollout_group(
+            group_id="unconstrained-arm",
+            scenario=_scenario(),
+            rollouts=rollouts,
+            expected_size=8,
+        )
+
+
+def test_build_battle_group_rejects_mixed_generation_profile() -> None:
+    """同一 group 混入不同采样温度时必须整体拒绝。
+
+    Returns:
+        None: 此测试防止同名 policy 的不同生成分布共用相对优势。
+    """
+    rl = importlib.import_module("play_sts2.training.rl")
+    snapshot = _snapshot()
+    rollouts = tuple(
+        replace(
+            _rollout(
+                rl,
+                arm_index=index,
+                snapshot=snapshot,
+                action=(
+                    "ACTION: end_turn" if index % 2 == 0 else "ACTION: play_card 0"
+                ),
+                reward=float(index),
+            ),
+            generation_profile=(
+                DecisionGenerationProfile(
+                    max_tokens=128,
+                    temperature=0.5,
+                    max_retries=0,
+                    thinking_enabled=False,
+                )
+                if index == 7
+                else _generation_profile()
+            ),
+        )
+        for index in range(8)
+    )
+
+    with pytest.raises(rl.BattleGroupRejected, match="不同的生成参数"):
+        rl.build_battle_rollout_group(
+            group_id="mixed-generation-profile",
             scenario=_scenario(),
             rollouts=rollouts,
             expected_size=8,
@@ -237,12 +432,16 @@ def _rollout(
         action=action,
         token_ids=(101, 102),
         behavior_logprobs=(-0.1, -0.2),
+        response_choices=(action,),
+        finish_reason="stop",
     )
     return rl.BattleRollout(
         arm_index=arm_index,
         worker_id=f"worker-{arm_index % 2}",
-        policy_version="policy-e3-r1",
+        policy_version="policy-test",
         behavior_logprobs_mode="processed_logprobs",
+        action_constraint_mode="vllm_structured_choice",
+        generation_profile=_generation_profile(),
         entry_snapshot=snapshot,
         steps=(step,),
         outcome="cleared",
@@ -252,6 +451,20 @@ def _rollout(
             total=reward,
             components=(rl.RewardComponent(name="terminal", value=reward),),
         ),
+    )
+
+
+def _generation_profile() -> DecisionGenerationProfile:
+    """返回所有 group 测试共用的实际生成参数。
+
+    Returns:
+        DecisionGenerationProfile: 无思考 rollout 使用的最小生成配置。
+    """
+    return DecisionGenerationProfile(
+        max_tokens=128,
+        temperature=0.8,
+        max_retries=0,
+        thinking_enabled=False,
     )
 
 

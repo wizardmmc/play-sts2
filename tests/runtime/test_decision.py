@@ -44,6 +44,9 @@ def test_decision_engine_executes_model_action() -> None:
         body = json.loads(request.content)
         assert body["max_tokens"] == 128
         assert body["temperature"] == 0.0
+        assert body["structured_outputs"] == {
+            "choice": ["ACTION: play_card 0 1", "ACTION: end_turn"]
+        }
         assert body["messages"][0]["role"] == "system"
         assert "战斗决策模型" in body["messages"][0]["content"]
         assert (
@@ -93,14 +96,29 @@ def test_decision_engine_executes_model_action() -> None:
         ) as game,
         OpenAICompatibleProvider(
             "http://127.0.0.1:8900",
+            enable_thinking=False,
             transport=httpx.MockTransport(respond_model),
         ) as provider,
     ):
-        step = runtime.DecisionEngine(game, provider).step(state)
+        step = runtime.DecisionEngine(
+            game,
+            provider,
+            constrain_actions=True,
+        ).step(state)
 
     assert tuple(message.role for message in step.messages) == ("system", "user")
     assert step.observation.available_actions == ("play_card", "end_turn")
     assert step.reply.text == "ACTION: play_card 0 1"
+    assert step.response_choices == (
+        "ACTION: play_card 0 1",
+        "ACTION: end_turn",
+    )
+    assert step.generation_profile == runtime.DecisionGenerationProfile(
+        max_tokens=128,
+        temperature=0.0,
+        max_retries=0,
+        thinking_enabled=False,
+    )
     assert step.action.name == "play_card"
     assert step.action.parameters == {"card_index": 0, "target_index": 1}
     assert step.action_result == action_result

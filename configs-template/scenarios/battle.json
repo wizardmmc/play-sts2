@@ -1,6 +1,6 @@
 {
   "character_id": "DEFECT",
-  "seed": "ABCDEF1234",
+  "seed": "EXAMPLE001",
   "floor": 7,
   "encounter_id": "CULTISTS_NORMAL",
   "deck": [

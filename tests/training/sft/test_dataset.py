@@ -515,6 +515,189 @@ def test_build_sft_dataset_combines_human_and_solver_roots_without_losing_source
     assert train_audit["action_sources"] == {"human_ui": 1}
 
 
+def test_build_sft_dataset_uses_independent_cross_root_split_manifest(
+    tmp_path: Path,
+) -> None:
+    """独立实验名册应覆盖各 raw 根默认分卷且保持整局隔离。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 独立名册没有接管两个 raw 根或漏记来源路径。
+
+    Returns:
+        None: 此测试使用三个真实目录形状的最小整局。
+    """
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    human = tmp_path / "raw/human"
+    teacher = tmp_path / "raw/human_combat_solver"
+    _write_minimal_map_run(
+        human,
+        run_id="HUMAN-RUN",
+        source="human",
+        split="dev",
+    )
+    _write_minimal_map_run(
+        teacher,
+        run_id="TEACHER-TRAIN",
+        source="human_combat_solver",
+        split="dev",
+        action_source="human_ui",
+    )
+    _write_minimal_map_run(
+        teacher,
+        run_id="TEACHER-EVAL",
+        source="human_combat_solver",
+        split="train",
+        action_source="human_ui",
+    )
+    _write_minimal_map_run(
+        teacher,
+        run_id="FUTURE-RUN",
+        source="human_combat_solver",
+        split="train",
+        action_source="human_ui",
+    )
+    split_manifest = tmp_path / "experiment-splits.json"
+    split_manifest.write_text(
+        json.dumps(
+            {
+                "train": ["HUMAN-RUN", "TEACHER-TRAIN"],
+                "dev": [],
+                "test": ["TEACHER-EVAL"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = build_sft_dataset(
+        knowledge_root=knowledge,
+        human_root=human,
+        additional_human_roots=(teacher,),
+        run_splits_path=split_manifest,
+        output_root=tmp_path / "dataset",
+    )
+
+    assert sorted(row["run_id"] for row in _directory_rows(result.train_path)) == [
+        "HUMAN-RUN",
+        "TEACHER-TRAIN",
+    ]
+    assert _directory_rows(result.dev_path) == []
+    assert [row["run_id"] for row in _directory_rows(result.test_path)] == [
+        "TEACHER-EVAL"
+    ]
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["human"]["split_manifest"] == str(split_manifest)
+    assert manifest["human"]["roots"][1]["splits"] == {
+        "train": ["TEACHER-TRAIN"],
+        "validation": [],
+        "eval": ["TEACHER-EVAL"],
+    }
+
+
+@pytest.mark.parametrize("content", (None, {"train": [], "dev": [], "test": []}))
+def test_build_sft_dataset_rejects_missing_or_empty_explicit_split_manifest(
+    tmp_path: Path,
+    content: dict[str, list[str]] | None,
+) -> None:
+    """显式实验名册必须真实存在且至少选择一局。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+        content (dict[str, list[str]] | None): 空名册或不存在文件。
+
+    Raises:
+        AssertionError: 缺失或空名册被当成合法的可选默认值。
+
+    Returns:
+        None: 此测试不需要任何行为样本。
+    """
+    knowledge = tmp_path / "knowledge"
+    human = tmp_path / "human"
+    knowledge.mkdir()
+    human.mkdir()
+    split_manifest = tmp_path / "experiment-splits.json"
+    if content is not None:
+        split_manifest.write_text(json.dumps(content), encoding="utf-8")
+
+    with pytest.raises(DatasetBuildError, match="显式人类分卷.*(?:不存在|为空)"):
+        build_sft_dataset(
+            knowledge_root=knowledge,
+            human_root=human,
+            run_splits_path=split_manifest,
+            output_root=tmp_path / "dataset",
+        )
+
+
+def test_build_sft_dataset_rejects_explicit_run_without_eligible_samples(
+    tmp_path: Path,
+) -> None:
+    """显式名册列出的每一局都必须产生可训练行为样本。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 不存在或不合格的 run 仍被写进顶层 manifest。
+
+    Returns:
+        None: 此测试使用一个不存在的稳定 run ID。
+    """
+    knowledge = tmp_path / "knowledge"
+    human = tmp_path / "human"
+    knowledge.mkdir()
+    human.mkdir()
+    split_manifest = tmp_path / "experiment-splits.json"
+    split_manifest.write_text(
+        json.dumps({"train": ["MISSING-RUN"], "dev": [], "test": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DatasetBuildError, match="名册.*MISSING-RUN.*不存在或不可训练"):
+        build_sft_dataset(
+            knowledge_root=knowledge,
+            human_root=human,
+            run_splits_path=split_manifest,
+            output_root=tmp_path / "dataset",
+        )
+
+
+def test_build_sft_dataset_rejects_split_manifest_mixed_with_run_flags(
+    tmp_path: Path,
+) -> None:
+    """文件名册与逐局参数不能同时声明两套冲突语义。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离数据目录。
+
+    Raises:
+        AssertionError: 其中一套分卷输入被静默忽略。
+
+    Returns:
+        None: 此测试只检查构建入口的参数契约。
+    """
+    knowledge = tmp_path / "knowledge"
+    human = tmp_path / "human"
+    knowledge.mkdir()
+    human.mkdir()
+    split_manifest = tmp_path / "experiment-splits.json"
+    split_manifest.write_text(
+        json.dumps({"train": ["FILE-RUN"], "dev": [], "test": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DatasetBuildError, match="不能同时使用.*run_splits"):
+        build_sft_dataset(
+            knowledge_root=knowledge,
+            human_root=human,
+            train_run_ids=("FLAG-RUN",),
+            run_splits_path=split_manifest,
+            output_root=tmp_path / "dataset",
+        )
+
+
 def test_behavior_audit_captures_explicit_decision_contrasts() -> None:
     """行为标签和审计应区分有真实选择条件的关键战略对照。
 

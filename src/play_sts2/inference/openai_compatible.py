@@ -79,6 +79,16 @@ class OpenAICompatibleProvider:
         self._enable_thinking = enable_thinking
         self._capture_token_metadata = capture_token_metadata
 
+    @property
+    def thinking_enabled(self) -> bool | None:
+        """返回当前 Provider 实际发送的 thinking 配置。
+
+        Returns:
+            bool | None: 显式启用或禁用时返回对应布尔值，未指定时返回
+            ``None``。
+        """
+        return self._enable_thinking
+
     def __enter__(self) -> Self:
         """进入持有底层 HTTP 会话的上下文。
 
@@ -119,6 +129,7 @@ class OpenAICompatibleProvider:
         *,
         max_tokens: int = 128,
         temperature: float = 0.0,
+        response_choices: Sequence[str] | None = None,
     ) -> ModelReply:
         """请求一次非流式 chat completion。
 
@@ -126,6 +137,8 @@ class OpenAICompatibleProvider:
             messages (Sequence[ChatMessage]): 按时间顺序排列的完整对话。
             max_tokens (int): 本次生成允许使用的最大输出 token 数。
             temperature (float): 本次生成使用的采样温度。
+            response_choices (Sequence[str] | None): 可选的完整回复候选；设置后
+                使用 vLLM ``structured_outputs.choice`` 约束生成。
 
         Raises:
             httpx.HTTPStatusError: 推理服务返回非成功 HTTP 状态码。
@@ -159,6 +172,10 @@ class OpenAICompatibleProvider:
                     "return_token_ids": True,
                 }
             )
+        if response_choices is not None:
+            if not response_choices:
+                raise ValueError("结构化回复候选不能为空")
+            body["structured_outputs"] = {"choice": list(response_choices)}
 
         response = self._http.post(_CHAT_PATH, json=body)
         response.raise_for_status()

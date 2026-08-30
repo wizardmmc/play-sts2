@@ -13,7 +13,12 @@ from play_sts2.inference import (
     InferenceGenerationTruncated,
     ModelReply,
 )
-from play_sts2.runtime import BattleOutcome, BattleResult, DecisionStep
+from play_sts2.runtime import (
+    BattleOutcome,
+    BattleResult,
+    DecisionGenerationProfile,
+    DecisionStep,
+)
 from play_sts2.scenario import (
     BattleScenario,
     BattleSnapshot,
@@ -81,12 +86,16 @@ class FakeBattleWorker:
             action=action,
             token_ids=(101,),
             behavior_logprobs=(-0.1,),
+            response_choices=(action,),
+            finish_reason="stop",
         )
         return self._rl.BattleRollout(
             arm_index=arm_index,
             worker_id=self.worker_id,
-            policy_version="policy-e3-r1",
+            policy_version="policy-test",
             behavior_logprobs_mode="processed_logprobs",
+            action_constraint_mode="vllm_structured_choice",
+            generation_profile=_generation_profile(),
             entry_snapshot=self._snapshot,
             steps=(step,),
             outcome="cleared",
@@ -152,6 +161,9 @@ def test_game_worker_resets_scenario_and_projects_runtime_result() -> None:
     rl = importlib.import_module("play_sts2.training.rl")
     snapshot = _snapshot()
     entry_state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
         "turn": 1,
         "run": {"current_hp": 40, "max_hp": 70},
     }
@@ -167,7 +179,8 @@ def test_game_worker_resets_scenario_and_projects_runtime_result() -> None:
         replies=(
             ModelReply(
                 text="ACTION: end_turn",
-                model="policy-e3-r1",
+                model="policy-test",
+                finish_reason="stop",
                 token_ids=(101,),
                 behavior_logprobs=(-0.1,),
             ),
@@ -175,6 +188,8 @@ def test_game_worker_resets_scenario_and_projects_runtime_result() -> None:
         retry_errors=(),
         action=HarnessAction(name="end_turn", parameters={}),
         action_result={"state": after_state, "stable": True},
+        response_choices=("ACTION: end_turn",),
+        generation_profile=_generation_profile(),
     )
     resetter = RecordingResetter(
         ScenarioResetResult(state=entry_state, snapshot=snapshot)
@@ -203,7 +218,7 @@ def test_game_worker_resets_scenario_and_projects_runtime_result() -> None:
     assert runner.initial_states == [entry_state]
     assert rollout.arm_index == 3
     assert rollout.worker_id == "worker-0"
-    assert rollout.policy_version == "policy-e3-r1"
+    assert rollout.policy_version == "policy-test"
 
 
 def test_game_worker_classifies_network_failure_for_resampling() -> None:
@@ -273,7 +288,7 @@ def test_game_worker_does_not_reclassify_truncated_model_output_as_infrastructur
                 text="",
                 reasoning="尚未完成",
                 finish_reason="length",
-                model="policy-e3-r1",
+                model="policy-test",
             )
         )
     )
@@ -615,6 +630,20 @@ class FailingRunner:
             BattleResult: 此测试路径不会返回。
         """
         raise self._error
+
+
+def _generation_profile() -> DecisionGenerationProfile:
+    """返回 collector 测试共用的实际生成参数。
+
+    Returns:
+        DecisionGenerationProfile: 原提示 RL 采样配置。
+    """
+    return DecisionGenerationProfile(
+        max_tokens=128,
+        temperature=0.8,
+        max_retries=0,
+        thinking_enabled=False,
+    )
 
 
 def _scenario() -> BattleScenario:

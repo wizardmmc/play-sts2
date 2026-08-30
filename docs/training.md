@@ -2,6 +2,8 @@
 
 ## 目录边界
 
+- `configs/`：每台机器的真实配置，整体忽略；可提交示例位于同构的
+  `configs-template/`，运行时不会回退读取模板。
 - `data/game_knowledge/`：Web Wiki、Mod 实测导出与已核验问法。
 - `data/raw/human/`：按局、战斗和战略分片的精确人类动作事实。
 - `data/transcripts/{agent,human,human_combat_solver}/`：按录制来源隔离的可覆盖
@@ -25,7 +27,7 @@ SSE 精确人类动作 ─→ combat/strategy ─→ Harness ┘
 ```bash
 uv run play-sts2-train build-sft \
   --knowledge-root data/game_knowledge/generated-v0.111.0 \
-  --mix configs/sft-e4-mix.toml
+  --mix configs/sft/sft-e4-mix.toml
 ```
 
 CLI 的兼容默认值仍是 `generated-v0.107.1`；E4 必须显式选择
@@ -144,7 +146,7 @@ SHA-256；聊天模板和 tokenizer 由基础模型目录加载，不作为父 a
 
 ## 训练
 
-当前落盘数据已按 `configs/sft-e4-mix.toml` 从 `generated-v0.111.0` 构建。修改
+当前落盘数据已按 `configs/sft/sft-e4-mix.toml` 从 `generated-v0.111.0` 构建。修改
 候选数据或配比后，应重新生成知识与算术候选并运行同一混合命令。构建器会逐事实
 检查五轮训练与两套留出问法，并拒绝知识题面或算术案例跨用途泄漏。
 
@@ -157,8 +159,25 @@ uv run play-sts2-train build-sft \
   --human-root data/raw/human \
   --additional-human-root data/raw/human_combat_solver \
   --output-root data/datasets/e5/sft \
-  --mix configs/sft-e5-mix.toml
+  --mix configs/sft/sft-e5-mix.toml
 ```
+
+后续实验不能为了换分卷而覆盖冻结 E5 的 raw 名册。E6 使用一个跨所有 human root
+的独立权威名册：
+
+```bash
+uv run play-sts2-train build-sft \
+  --knowledge-root data/game_knowledge/generated-v0.111.0 \
+  --human-root data/raw/human \
+  --additional-human-root data/raw/human_combat_solver \
+  --run-splits data/raw/human_combat_solver/splits-e6.json \
+  --output-root data/datasets/e6/sft \
+  --mix configs/sft/sft-e6-mix.toml
+```
+
+显式 `--run-splits` 必须存在、非空，并且其中每个 run 都能产生合格样本；未列出的
+未来录制会被忽略。该参数不能与 `--train-run`、`--validation-run` 或 `--eval-run`
+混用，避免一套输入被另一套静默覆盖。
 
 行为 JSONL 保留 `behavior_origin`、`action_source`、胜负与录制 gap，但这些字段不
 进入模型 messages。混合器的旧行为上限不裁剪 `human_combat_solver` 来源；算术可
@@ -170,7 +189,7 @@ root、split、胜负、录制完整性、gap、样本数和动作来源计数�
 ```bash
 uv sync --group training
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-e4-cuda-lr5e5.toml \
+  --config configs/sft/sft-e4-cuda-lr5e5.toml \
   --name 20260829-sft-e4-knowledge-r16-lr5e5
 ```
 
@@ -178,7 +197,7 @@ uv run --group training play-sts2-train sft-cuda \
 
 ```bash
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-e4-cuda-lr1e4.toml \
+  --config configs/sft/sft-e4-cuda-lr1e4.toml \
   --name 20260829-sft-e4-knowledge-r16-lr1e4
 ```
 
@@ -189,7 +208,7 @@ E4 运行”，不是恢复中断的同一运行，所以 manifest 仍记录
 
 ```bash
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-e4-cuda-lr5e5.toml \
+  --config configs/sft/sft-e4-cuda-lr5e5.toml \
   --name 20260829-sft-e4-knowledge-r16-lr5e5 \
   --resume
 ```
@@ -198,7 +217,7 @@ CUDA 续训使用同一名称和独立子命令：
 
 ```bash
 uv run --group training play-sts2-train sft-cuda \
-  --config configs/sft-e4-cuda-lr5e5.toml \
+  --config configs/sft/sft-e4-cuda-lr5e5.toml \
   --name 20260829-sft-e4-knowledge-r16-lr5e5 \
   --resume
 ```
@@ -270,7 +289,7 @@ uv run --group training play-sts2-train eval-sft-knowledge \
 
 ## MLX 服务件
 
-先把 `configs/inference.toml` 的 `artifact_id`、`merged_model` 与
+先把 `configs/inference/inference.toml` 的 `artifact_id`、`merged_model` 与
 `serving_model` 更新为同一轮不可变产物，再把新合并模型转换到独立目录：
 
 ```bash

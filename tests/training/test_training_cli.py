@@ -2,7 +2,29 @@
 
 from pathlib import Path
 
+import pytest
+
 from play_sts2.training import cli
+
+
+def test_training_commands_use_grouped_config_defaults() -> None:
+    """训练与评测命令默认读取 ``configs/sft`` 下的本地配置。
+
+    Returns:
+        None: 此测试防止目录重构后 CLI 继续访问旧扁平路径。
+    """
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["sft", "--name", "20260830-demo"]).config == Path(
+        "configs/sft/sft.toml"
+    )
+    assert parser.parse_args(["sft-cuda", "--name", "20260830-demo"]).config == Path(
+        "configs/sft/sft-cuda.toml"
+    )
+    for command in ("merge-sft", "eval-sft", "eval-sft-loss"):
+        assert parser.parse_args(
+            [command, "--adapter", "models/adapters/demo"]
+        ).config == Path("configs/sft/sft.toml")
 
 
 def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
@@ -49,7 +71,7 @@ def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
             "--model-url",
             "http://127.0.0.1:8900",
             "--policy-model",
-            "policy-e3-r1",
+            "policy-test",
             "--vllm-logprobs-mode",
             "processed_logprobs",
             "--group-id",
@@ -70,7 +92,7 @@ def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
                 "http://127.0.0.1:8081",
             ),
             "model_url": "http://127.0.0.1:8900",
-            "policy_model": "policy-e3-r1",
+            "policy_model": "policy-test",
             "vllm_logprobs_mode": "processed_logprobs",
             "group_id": "battle-demo-001",
             "output_path": Path("runs/rl/battle-demo-001.json"),
@@ -87,7 +109,7 @@ def test_build_sft_command_passes_explicit_mix_recipe(
     monkeypatch: object,
     capsys: object,
 ) -> None:
-    """数据构建命令应把 E3 混合配方传给构建器。
+    """数据构建命令应把显式混合配方传给构建器。
 
     Args:
         monkeypatch (object): Pytest 提供的属性替换工具。
@@ -123,11 +145,87 @@ def test_build_sft_command_passes_explicit_mix_recipe(
 
     monkeypatch.setattr(cli, "build_sft_dataset", build)
 
-    result = cli.main(["build-sft", "--mix", "configs/sft-e3-mix.toml"])
+    result = cli.main(["build-sft", "--mix", "configs/sft/mix.toml"])
 
     assert result == 0
-    assert calls == [Path("configs/sft-e3-mix.toml")]
+    assert calls == [Path("configs/sft/mix.toml")]
     assert '"train": 10' in capsys.readouterr().out
+
+
+def test_build_sft_command_passes_independent_run_splits(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """数据构建命令应把跨 raw 根实验名册传给构建器。
+
+    Args:
+        monkeypatch (object): Pytest 提供的属性替换工具。
+        capsys (object): Pytest 提供的标准输出捕获工具。
+
+    Raises:
+        AssertionError: CLI 未解析或未传递独立分卷文件。
+
+    Returns:
+        None: 此测试不读取真实训练数据。
+    """
+    calls: list[Path | None] = []
+
+    class Result:
+        """提供 CLI 输出需要的最小构建结果。"""
+
+        output_root = Path("data/datasets/experiment/sft")
+        train_count = 12
+        dev_count = 3
+        test_count = 2
+
+    def build(**kwargs: object) -> Result:
+        """记录 CLI 传入的分卷文件。
+
+        Args:
+            **kwargs (object): 数据构建关键字参数。
+
+        Returns:
+            Result: 最小构建结果。
+        """
+        calls.append(kwargs.get("run_splits_path"))
+        return Result()
+
+    monkeypatch.setattr(cli, "build_sft_dataset", build)
+
+    result = cli.main(
+        [
+            "build-sft",
+            "--run-splits",
+            "data/raw/human_combat_solver/experiment-splits.json",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [Path("data/raw/human_combat_solver/experiment-splits.json")]
+    assert '"train": 12' in capsys.readouterr().out
+
+
+def test_build_sft_command_rejects_split_file_mixed_with_run_flags() -> None:
+    """CLI 应在调用构建器前拒绝两套分卷输入同时出现。
+
+    Raises:
+        AssertionError: 冲突参数没有触发 argparse 失败。
+
+    Returns:
+        None: 此测试只检查命令行参数边界。
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(
+            [
+                "build-sft",
+                "--run-splits",
+                "data/raw/human_combat_solver/experiment-splits.json",
+                "--train-run",
+                "FLAG-RUN",
+            ]
+        )
+
+    assert exc_info.value.code == 2
 
 
 def test_merge_sft_command_uses_config_and_optional_output(
@@ -161,9 +259,9 @@ def test_merge_sft_command_uses_config_and_optional_output(
         [
             "merge-sft",
             "--adapter",
-            "models/adapters/e3",
+            "models/adapters/parent",
             "--output",
-            "models/merged/e3-merged",
+            "models/merged/parent-merged",
         ]
     )
 
@@ -171,11 +269,11 @@ def test_merge_sft_command_uses_config_and_optional_output(
     assert calls == [
         (
             config,
-            Path("models/adapters/e3"),
-            Path("models/merged/e3-merged"),
+            Path("models/adapters/parent"),
+            Path("models/merged/parent-merged"),
         )
     ]
-    assert '"output": "models/merged/e3-merged"' in capsys.readouterr().out
+    assert '"output": "models/merged/parent-merged"' in capsys.readouterr().out
 
 
 def test_train_sft_command_passes_config_name_and_step_limit(
@@ -210,7 +308,7 @@ def test_train_sft_command_passes_config_name_and_step_limit(
         [
             "sft",
             "--config",
-            "configs/sft.toml",
+            "configs/sft/sft.toml",
             "--name",
             "20260828-smoke",
             "--max-steps",
@@ -256,7 +354,7 @@ def test_train_sft_cuda_command_uses_separate_backend(
         [
             "sft-cuda",
             "--config",
-            "configs/sft-cuda.toml",
+            "configs/sft/sft-cuda.toml",
             "--name",
             "20260828-cuda-smoke",
             "--max-steps",
@@ -302,7 +400,7 @@ def test_eval_sft_command_uses_named_split(
         [
             "eval-sft",
             "--config",
-            "configs/sft.toml",
+            "configs/sft/sft.toml",
             "--adapter",
             "models/adapters/demo",
             "--split",

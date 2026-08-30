@@ -1,0 +1,19 @@
+artifact_id = "my-sft-model"
+merged_model = "models/merged/my-sft-model-merged"
+serving_model = "models/serving/my-sft-model-mlx-8bit"
+default_profile = "no-think"
+
+[server]
+base_url = "http://127.0.0.1:8900"
+port = 8900
+prompt_cache_size = 10
+
+[profiles.no-think]
+enable_thinking = false
+max_tokens = 128
+temperature = 0.0
+
+[profiles.think]
+enable_thinking = true
+max_tokens = 512
+temperature = 0.0

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-DEFAULT_INFERENCE_CONFIG = Path("configs/inference.toml")
+DEFAULT_INFERENCE_CONFIG = Path("configs/inference/inference.toml")
 
 
 class InferenceConfigError(ValueError):

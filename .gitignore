@@ -19,4 +19,6 @@ htmlcov/
 /mod/**/obj/
 /mod/**/local.props
 
-/configs/**/*.toml
+/configs/
+
+reference

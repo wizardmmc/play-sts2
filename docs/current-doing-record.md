@@ -2,11 +2,9 @@
 
 最后更新：2026-08-29
 
-- 状态：A5 已通关并转录；952 条已收到样本均可训练，但日志发现 1 次
-  `SCAVENGE` 隐式单候选 Hand 选择漏录，因此该局不是无缺口连续轨迹。对应捕获边界
-  已修复并通过隔离实机回归，磁盘运行时等待重启加载。
-- 下一步：重启教师游戏，以 High 档录制 A6；首战部署前确认游戏内档位与 recorder
-  的 `--solver-preset high` 一致。
+- 状态：A9 首盘在第 35 层知识恶魔 Boss 战败；404 条动作通过日志、raw 与 Harness
+  三方验收，技术录制完整。
+- 下一步：沿用 High 档继续下一难度录制；每局继续逐项对账 Solver 日志和 raw。
 
 ## 当前目标
 
@@ -217,6 +215,199 @@ A0、A1、A2 的胜负本身可以从各自游戏日志中的明确 `WON/LOST` �
 日志有 `NATIVE_CHOICE_SELECTED`，事件流只有 `play_card`；修复后无人测试通过，事件
 流新增且仅新增 1 条 `select_deck_card`，状态为 `CARD_SELECTION / combat_hand_select`、
 候选 `[WITHER]`、索引 0、来源 `combat_solver`，并且没有 `capture_gap`。
+
+## 已确认完整：A6 High
+
+目录：`data/raw/human_combat_solver/20260829-a6-f48-11MPY1N5GNCF`
+
+故障机器人 A6 在 48 层击败 `QUEEN_BOSS` 通关：
+
+- 23 场战斗、571 条 Solver 战斗动作、230 条人工战略动作，共 801 条；801 个
+  event ID 全部唯一，来源没有混淆，元数据为 `victory=true`、
+  `training_eligible=true`、`recording_complete=true`、`recording_gaps=[]`；
+- 日志 465 次部署动作与 raw 的 `460 play_card + 5 use_potion` 身份及顺序逐项一致，
+  90 次 `end_turn=true` 与 raw 的 90 条结束回合逐项一致；
+- 日志 16 次 `NATIVE_CHOICE_SELECTED` 与 raw 的 16 条 Solver
+  `select_deck_card` 身份及顺序逐项一致，包括 13 次全息影像 CombatPile 和 3 次
+  ChooseCard。42 层全息影像只有 `BEAM_CELL` 一个候选，日志为
+  `surface=CombatPile visible=False options=1`，raw 正确保存同一候选、索引和来源；
+- 日志没有搜索初始化失败、capture gap、人工战斗动作或重复动作。机甲骑士战第 5
+  回合有一次 `DEPLOY_REPLAN`：计划中的适应打击在执行前变为能量不足，Solver 没有
+  提交非法动作，而是从当时真实状态重新搜索并继续执行；重搜前后的全部实际动作仍与
+  raw 对齐，因此这是一条有效的安全重搜，不是录制缺口；
+- 游戏启动默认仍为 Medium；首战第一次自动搜索使用 5 秒/60 秒预算。用户在任何实际
+  部署前切换到 High 并主动重算；此后 36 次搜索全部为 8 秒/120 秒、18/45 beam、
+  8 GB no-GC 预算，实际部署没有使用 Medium 路线。Recorder 的
+  `--solver-preset high` 与实际教师动作一致；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a6-f48-11MPY1N5GNCF/`，包含 23 个
+  战斗文件和 1 个战略文件。801 条参考动作全部位于对应完整合法动作域；已知脏文本、
+  隐藏字段与资源路径计数均为零，system/user/assistant/`ACTION:` 都是 801 条；正式
+  Qwen3.5 tokenizer P99 2,034、最大 2,204，没有样本超过 12,288。
+
+## 已确认完整：A7 High
+
+目录：`data/raw/human_combat_solver/20260829-a7-f48-KTFGDDRB868S`
+
+故障机器人 A7 在 48 层击败 `TEST_SUBJECT_BOSS` 通关：
+
+- 20 场战斗、583 条战斗样本、228 条战略样本，共 811 条；来源计数为
+  `combat_solver=581`、`human_ui=230`。两条额外人工战斗动作分别是 8 层第 1 回合的
+  敏捷药水和 33 层第 4 回合的易伤药水，均明确保存为 `human_ui`；
+- 日志 462 次 Solver 部署与 raw 的 `459 play_card + 3 use_potion` 身份及顺序逐项
+  一致；99 次 `end_turn=true` 与 raw 逐项一致；811 个 event ID 全部唯一；
+- 日志 20 次 `NATIVE_CHOICE_SELECTED` 与 raw 的 20 条 Solver
+  `select_deck_card` 身份及顺序逐项一致，其中 16 次为 `SCAVENGE` 的 Hand 选择，
+  4 次为 ChooseCard；
+- 28 层第 3 回合的 `SCAVENGE` 只有 `GREED` 一个合格候选。日志明确为
+  `surface=Hand visible=False options=1`，raw 正确保存
+  `CARD_SELECTION / combat_hand_select`、候选数 1、索引 0、`GREED` 和
+  `combat_solver` 来源。这是 A5 缺口修复后第一次正式生产覆盖同一路径；
+- 日志没有搜索初始化失败、capture gap、unexpected replan、deployment drift、
+  continuation missing 或动作重复；本局 25 次搜索全部使用 High 的 8 秒/120 秒预算，
+  与 recorder 元数据一致；
+- 元数据为 `victory=true`、`training_eligible=true`、
+  `recording_complete=true`、`recording_gaps=[]`；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a7-f48-KTFGDDRB868S/`，包含 20 个
+  战斗文件和 1 个战略文件。811 条参考动作全部位于对应完整合法动作域；已知脏文本、
+  隐藏字段与资源路径计数均为零，system/user/assistant/`ACTION:` 都是 811 条；正式
+  Qwen3.5 tokenizer P99 1,993、最大 2,056，没有样本超过 12,288。
+
+## 已确认完整：A8 High 战败
+
+目录：`data/raw/human_combat_solver/20260829-a8-f48-YL1PEYDY72PF`
+
+故障机器人 A8 在 48 层 `AEONGLASS_BOSS` 第 5 回合战败；最后一条动作前为 5 HP、
+11 格挡，Boss 仍有 409/535 HP：
+
+- 23 场战斗、579 条 Solver 战斗动作、214 条人工战略动作，共 793 条；793 个
+  event ID 全部唯一，来源没有混淆；
+- 日志 446 次 Solver 部署与 raw 的 `441 play_card + 5 use_potion` 身份及顺序逐项
+  一致；107 次 `end_turn=true` 与 raw 的 107 条结束回合逐项一致；
+- 日志 26 次 `NATIVE_CHOICE_SELECTED` 与 raw 的 26 条 Solver
+  `select_deck_card` 身份及顺序逐项一致，其中 17 次 ChooseCard、9 次全息影像
+  CombatPile。46 层全息影像只有 `MOMENTUM_STRIKE` 一个候选，raw 正确保存候选数 1、
+  索引和来源；
+- 日志没有搜索初始化失败、capture gap、unexpected replan、deployment drift、
+  continuation missing、人工战斗动作或动作重复；本局 31 次搜索全部使用 High 的
+  8 秒/120 秒预算；
+- 元数据正确保存 `victory=false`，同时保持 `training_eligible=true`、
+  `recording_complete=true`、`recording_gaps=[]`。579 条战斗单步状态与标签可以直接
+  保留；214 条战略样本属于真实战败路线，不能未经筛选当作战略正例；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a8-f48-YL1PEYDY72PF/`，包含 23 个
+  战斗文件和 1 个战略文件。793 条参考动作全部位于对应完整合法动作域；已知脏文本、
+  隐藏字段与资源路径计数均为零，system/user/assistant/`ACTION:` 都是 793 条；正式
+  Qwen3.5 tokenizer P99 1,850、最大 1,931，没有样本超过 12,288。
+
+本盘也验证了微型帐篷的多选休息处。raw 中该遗物在 `act_id=2` 的 38 层商店购入；
+Harness 使用玩家幕号，因此 transcript 显示为第 3 幕：
+
+- 遗物上下文明确显示“你可以在休息处选择任意数量的选项”；
+- 40 层完整序列为“锻造 → 选择压缩升级 → 仅剩休息且同时可 proceed → 休息 →
+  proceed”；
+- 47 层完整序列为“休息 → 仅剩锻造且同时可 proceed → 锻造 → 选择富足升级 →
+  proceed”；
+- 每一步都按 raw 当前剩余的真实选项重新编号并生成合法动作，没有假定休息处只能选择
+  一次，也没有丢失中间的选牌状态。因此现有通用休息处投影已经适配，无需特殊代码。
+
+## 已确认完整：A8 High 早夭重试
+
+目录：`data/raw/human_combat_solver/20260829-a8-f7-X48CA7QL0QXL`
+
+故障机器人第二盘 A8 在第 7 层 `PHROG_PARASITE_ELITE` 第 7 回合战败；最后一条动作
+前为 8 HP、0 格挡，场上仍有 4 只 `WRIGGLER`：
+
+- 5 场战斗、98 条 Solver 战斗动作、28 条人工战略动作，共 126 条；126 个 event ID
+  全部唯一，来源没有混淆；
+- 日志 74 次 Solver 部署与 raw 的 `71 play_card + 3 use_potion` 身份及顺序逐项
+  一致；23 次 `end_turn=true` 与 raw 逐项一致；唯一一次 Hand 选牌也与 raw 的
+  `STRIKE_DEFECT`、候选数 4 和来源一致；
+- 日志没有搜索初始化失败、capture gap、unexpected replan、deployment drift、
+  continuation missing、人工战斗动作或动作重复；20 次搜索全部使用 High。最终精英战
+  从首轮即为 `only_death_routes=true`，用户多次主动重算只产生新搜索，没有重复动作；
+- 元数据正确保存 `victory=false`、`training_eligible=true`、
+  `recording_complete=true`、`recording_gaps=[]`。98 条战斗样本可以保留，28 条战略
+  样本保留早期战败标签；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a8-f7-X48CA7QL0QXL/`，包含 5 个战斗
+  文件和 1 个战略文件。126 条参考动作全部位于对应完整合法动作域；已知脏文本、隐藏
+  字段与资源路径计数均为零；正式 Qwen3.5 tokenizer P99 1,697、最大 1,791。
+
+## 已确认完整：A8 High 第三盘战败
+
+目录：`data/raw/human_combat_solver/20260829-a8-f33-6JKFJZRTVD4Q`
+
+故障机器人第三盘 A8 在第 33 层 `KAISER_CRAB_BOSS` 第 12 回合战败；最后一条动作前
+为 16 HP、0 格挡，`CRUSHER` 与 `ROCKET` 分别仍有 124/219、38/209 HP：
+
+- 16 场战斗、444 条战斗样本、151 条战略样本，共 595 条；来源计数为
+  `combat_solver=439`、`human_ui=156`。5 条额外人工战斗动作均为药水，分别在 15、
+  22、27 和 33 层执行，来源标记正确；
+- 日志 332 次 Solver 部署与 raw 的 332 条 Solver `play_card` 身份及顺序逐项一致；
+  90 次 `end_turn=true` 与 raw 逐项一致；17 次 `NATIVE_CHOICE_SELECTED` 与 raw
+  逐项一致，其中包含 13 次 CombatPile、4 次 Hand 选择；
+- 3 次全息影像只有一个候选，分别选择 `DEFEND_DEFECT`、`DARKNESS`、
+  `DUALCAST`，均正确保存候选数 1、索引和来源；
+- 日志没有搜索初始化失败、capture gap、unexpected replan、deployment drift、
+  continuation missing 或动作重复；30 次搜索全部使用 High。Boss 战从首轮即为
+  `only_death_routes=true`，后续重搜和人工用药没有产生录制缺口；
+- 元数据正确保存 `victory=false`、`training_eligible=true`、
+  `recording_complete=true`、`recording_gaps=[]`。444 条战斗样本可保留；151 条战略
+  样本保留中期 Boss 战败标签；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a8-f33-6JKFJZRTVD4Q/`，包含 16 个
+  战斗文件和 1 个战略文件。595 条参考动作全部位于对应完整合法动作域；已知脏文本、
+  隐藏字段与资源路径计数均为零；正式 Qwen3.5 tokenizer P99 1,798、最大 1,921。
+
+## 已确认完整：A8 High 第四盘通关
+
+目录：`data/raw/human_combat_solver/20260829-a8-f48-WB3S4HHN9DCG`
+
+故障机器人第四盘 A8 在 48 层击败 `AEONGLASS_BOSS`，随后进入
+`THE_ARCHITECT` 终局事件并通关：
+
+- 23 场战斗、435 条战斗样本、234 条战略样本，共 669 条；来源计数为
+  `combat_solver=432`、`human_ui=237`。3 条额外人工战斗动作分别是 37 层的果汁和
+  48 层首回合的集中、虚弱药水，均明确保存为 `human_ui`；
+- 日志 331 次 Solver 部署与 raw 的 `324 play_card + 7 use_potion` 身份及顺序逐项
+  一致；83 次 `end_turn=true` 与 raw 逐项一致；18 次原生选牌与 raw 逐项一致，
+  包含 13 次 CombatPile、3 次 ChooseCard 和 2 次 Hand 选择；
+- 4 次全息影像只有一个候选，分别选择 `COOLHEADED`、`DUALCAST`、
+  `ULTIMATE_STRIKE`、`SQUASH`，均正确保存候选数 1、索引和来源；
+- 日志没有搜索初始化失败、capture gap、unexpected replan、deployment drift、
+  continuation missing 或动作重复；33 次搜索全部使用 High；
+- 元数据正确保存 `victory=true`、`training_eligible=true`、
+  `recording_complete=true`、`recording_gaps=[]`；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a8-f48-WB3S4HHN9DCG/`，包含 23 个
+  战斗文件和 1 个战略文件。669 条参考动作全部位于对应完整合法动作域；已知脏文本、
+  隐藏字段与资源路径计数均为零；正式 Qwen3.5 tokenizer P99 2,084、最大 2,191。
+
+## 已确认完整：A9 High 首盘战败
+
+目录：`data/raw/human_combat_solver/20260829-a9-f35-QAFQ6J4JFUBB`
+
+故障机器人首盘 A9 在第 35 层 `KNOWLEDGE_DEMON_BOSS` 第 3 回合战败；最后一条动作
+前为 18 HP、0 格挡，Boss 仍有 270/399 HP：
+
+- 14 场战斗、252 条战斗样本、152 条战略样本，共 404 条；来源计数为
+  `combat_solver=250`、`human_ui=154`。两条额外人工战斗动作分别是 23 层的爆裂安瓿
+  和 35 层首回合的集中药水，均明确保存为 `human_ui`；
+- 日志 186 次 Solver 部署与 raw 的 `185 play_card + 1 use_potion` 身份及顺序逐项
+  一致；57 次 `end_turn=true` 与 raw 逐项一致；7 次原生选牌与 raw 逐项一致，包含
+  2 次 ChooseCard 和 5 次 Hand 选择；
+- 日志没有搜索初始化失败、capture gap、unexpected replan、deployment drift、
+  continuation missing 或动作重复；20 次搜索全部使用 High。知识恶魔战从首轮即为
+  `only_death_routes=true`，人工集中药水和主动重算没有产生录制缺口；
+- 元数据正确保存 `victory=false`、`training_eligible=true`、
+  `recording_complete=true`、`recording_gaps=[]`。252 条战斗样本可以保留；152 条战略
+  样本保留第二幕 Boss 战败标签；
+- transcript 位于
+  `data/transcripts/human_combat_solver/20260829-a9-f35-QAFQ6J4JFUBB/`，包含 14 个
+  战斗文件和 1 个战略文件。404 条参考动作全部位于对应完整合法动作域；已知脏文本、
+  隐藏字段与资源路径计数均为零；正式 Qwen3.5 tokenizer P99 1,646、最大 1,729。
 
 ## 已修复：Harness 训练前样式
 

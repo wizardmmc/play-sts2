@@ -74,6 +74,7 @@ class BattleRunner:
         max_conflict_retries: int | None = None,
         max_steps: int = _DEFAULT_MAX_STEPS,
         state_timeout: float = _DEFAULT_STATE_TIMEOUT,
+        constrain_actions: bool = False,
     ) -> None:
         """初始化不拥有游戏与模型连接生命周期的战斗 Runner。
 
@@ -87,6 +88,7 @@ class BattleRunner:
                 省略时沿用 `max_retries`。
             max_steps (int): 单场战斗允许执行的最大动作数。
             state_timeout (float): 单次动作后等待稳定状态的最长秒数。
+            constrain_actions (bool): 是否把当前完整合法动作行交给推理服务约束。
 
         Returns:
             None: 此方法只组合战斗闭环所需依赖。
@@ -97,6 +99,7 @@ class BattleRunner:
             provider,
             max_tokens=max_tokens,
             temperature=temperature,
+            constrain_actions=constrain_actions,
         )
         self._max_retries = max_retries
         self._max_conflict_retries = (

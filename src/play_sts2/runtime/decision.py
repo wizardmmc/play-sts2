@@ -13,6 +13,7 @@ from ..harness import (
     HarnessAction,
     Observation,
     build_observation,
+    legal_action_lines,
     parse_action,
     system_prompt,
 )
@@ -47,6 +48,23 @@ class DecisionRetriesExhausted(ActionParseError):
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionGenerationProfile:
+    """保存一次 Runtime 决策实际采用的生成参数。
+
+    Args:
+        max_tokens (int): 本次请求允许生成的最大 token 数。
+        temperature (float): 本次请求的采样温度。
+        max_retries (int): 首次输出失败后允许的动作内模型重试次数。
+        thinking_enabled (bool | None): Provider 实际发送的 thinking 配置。
+    """
+
+    max_tokens: int
+    temperature: float
+    max_retries: int
+    thinking_enabled: bool | None
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionStep:
     """表示一次在线决策留下的完整可重放产物。
 
@@ -58,6 +76,10 @@ class DecisionStep:
         retry_errors (tuple[str, ...]): 成功前各次动作失败或拒绝原因。
         action (HarnessAction): 通过 Harness 校验的结构化动作。
         action_result (dict[str, Any]): Mod 返回的原始动作结果。
+        response_choices (tuple[str, ...] | None): 本步骤实际交给 Provider 的
+            完整候选动作；未启用约束时为 ``None``。
+        generation_profile (DecisionGenerationProfile | None): 本步骤实际使用的
+            生成参数；旧调用方未记录时为 ``None``。
     """
 
     observation: Observation
@@ -67,6 +89,8 @@ class DecisionStep:
     retry_errors: tuple[str, ...]
     action: HarnessAction
     action_result: dict[str, Any]
+    response_choices: tuple[str, ...] | None = None
+    generation_profile: DecisionGenerationProfile | None = None
 
     @property
     def reply(self) -> ModelReply:
@@ -88,6 +112,7 @@ class DecisionEngine:
         *,
         max_tokens: int = 128,
         temperature: float = 0.0,
+        constrain_actions: bool = False,
     ) -> None:
         """初始化不拥有外部资源生命周期的单步决策引擎。
 
@@ -96,6 +121,7 @@ class DecisionEngine:
             provider (DecisionProvider): 为 Harness 消息生成原始回复的提供者。
             max_tokens (int): 每次模型生成允许使用的最大输出 token 数。
             temperature (float): 每次模型生成使用的采样温度。
+            constrain_actions (bool): 是否把当前完整合法动作行交给推理服务约束。
 
         Returns:
             None: 此方法只保存闭环所需的依赖与生成参数。
@@ -104,6 +130,8 @@ class DecisionEngine:
         self._provider = provider
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._constrain_actions = constrain_actions
+        self._thinking_enabled = getattr(provider, "thinking_enabled", None)
 
     def step(
         self,
@@ -147,12 +175,23 @@ class DecisionEngine:
         ]
         replies: list[ModelReply] = []
         errors: list[str] = []
+        response_choices = (
+            legal_action_lines(state) if self._constrain_actions else None
+        )
         for attempt in range(max_retries + 1):
-            reply = self._provider.chat(
-                messages,
-                max_tokens=self._max_tokens,
-                temperature=self._temperature,
-            )
+            if response_choices is not None:
+                reply = self._provider.chat(
+                    messages,
+                    max_tokens=self._max_tokens,
+                    temperature=self._temperature,
+                    response_choices=response_choices,
+                )
+            else:
+                reply = self._provider.chat(
+                    messages,
+                    max_tokens=self._max_tokens,
+                    temperature=self._temperature,
+                )
             replies.append(reply)
             try:
                 action = parse_action(
@@ -203,6 +242,13 @@ class DecisionEngine:
                 retry_errors=tuple(errors),
                 action=action,
                 action_result=action_result,
+                response_choices=response_choices,
+                generation_profile=DecisionGenerationProfile(
+                    max_tokens=self._max_tokens,
+                    temperature=self._temperature,
+                    max_retries=max_retries,
+                    thinking_enabled=self._thinking_enabled,
+                ),
             )
 
         raise RuntimeError("模型动作循环意外结束")

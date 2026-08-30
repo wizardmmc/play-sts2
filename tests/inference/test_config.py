@@ -5,6 +5,17 @@ from pathlib import Path
 import pytest
 
 
+def test_default_inference_config_uses_grouped_directory() -> None:
+    """默认推理配置应位于被 Git 忽略的同类配置子目录。
+
+    Returns:
+        None: 此测试防止 CLI 回退到重构前的扁平路径。
+    """
+    from play_sts2.inference.config import DEFAULT_INFERENCE_CONFIG
+
+    assert DEFAULT_INFERENCE_CONFIG == Path("configs/inference/inference.toml")
+
+
 def test_local_inference_config_preserves_canonical_evaluation_profiles() -> None:
     """已配置的本地推理文件以 no-think 对齐 SFT，并保留 think 对照组。"""
     from play_sts2.inference.config import (

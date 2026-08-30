@@ -33,7 +33,7 @@ def test_openai_provider_posts_messages_and_reads_reply() -> None:
         assert request.url.path == "/v1/chat/completions"
         assert request.extensions["timeout"]["read"] == 45.0
         assert json.loads(request.content) == {
-            "model": "/models/serving/demo-e3-mlx-8bit",
+            "model": "/models/serving/demo-model-mlx-8bit",
             "messages": [
                 {"role": "system", "content": "只输出 ACTION。"},
                 {"role": "user", "content": "可执行动作:\n- end_turn"},
@@ -63,7 +63,7 @@ def test_openai_provider_posts_messages_and_reads_reply() -> None:
                     "completion_tokens": 4,
                     "prompt_tokens_details": {"cached_tokens": 256},
                 },
-                "model": "/models/serving/demo-e3-mlx-8bit",
+                "model": "/models/serving/demo-model-mlx-8bit",
             },
         )
 
@@ -78,7 +78,7 @@ def test_openai_provider_posts_messages_and_reads_reply() -> None:
 
     with inference.OpenAICompatibleProvider(
         "http://127.0.0.1:8900",
-        model="/models/serving/demo-e3-mlx-8bit",
+        model="/models/serving/demo-model-mlx-8bit",
         enable_thinking=False,
         timeout=45.0,
         transport=httpx.MockTransport(respond),
@@ -92,7 +92,7 @@ def test_openai_provider_posts_messages_and_reads_reply() -> None:
         cached_tokens=256,
         reasoning="先确认唯一合法动作。",
         finish_reason="stop",
-        model="/models/serving/demo-e3-mlx-8bit",
+        model="/models/serving/demo-model-mlx-8bit",
     )
 
 
@@ -122,7 +122,7 @@ def test_openai_provider_requests_and_reads_rollout_token_metadata() -> None:
         return httpx.Response(
             200,
             json={
-                "model": "policy-e3-r1",
+                "model": "policy-test",
                 "choices": [
                     {
                         "message": {"content": "ACTION: end_turn"},
@@ -143,7 +143,7 @@ def test_openai_provider_requests_and_reads_rollout_token_metadata() -> None:
     inference = importlib.import_module("play_sts2.inference")
     provider = inference.OpenAICompatibleProvider(
         "http://127.0.0.1:8900",
-        model="policy-e3-r1",
+        model="policy-test",
         capture_token_metadata=True,
         transport=httpx.MockTransport(respond),
     )
@@ -152,6 +152,67 @@ def test_openai_provider_requests_and_reads_rollout_token_metadata() -> None:
         reply = provider.chat((inference.ChatMessage(role="user", content="状态"),))
 
     assert reply.token_ids == (741, 25, 1289)
+    assert reply.behavior_logprobs == (-0.1, -0.2, -0.3)
+
+
+def test_openai_provider_constrains_rollout_to_complete_action_lines() -> None:
+    """RL 采样应把完整合法动作行作为 vLLM 结构化 choice 发送。
+
+    Raises:
+        AssertionError: 请求缺少完整动作约束或错误改变 token 元数据契约。
+
+    Returns:
+        None: 此测试钉住约束后 processed log-prob 的请求前提。
+    """
+    choices = ("ACTION: play_card 0 1", "ACTION: end_turn")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """核对结构化动作集合并返回带 token 元数据的合法回复。
+
+        Args:
+            request (httpx.Request): Provider 发出的约束生成请求。
+
+        Returns:
+            httpx.Response: 与 vLLM 扩展一致的成功响应。
+        """
+        body = json.loads(request.content)
+        assert body["structured_outputs"] == {"choice": list(choices)}
+        assert body["logprobs"] is True
+        assert body["return_token_ids"] is True
+        return httpx.Response(
+            200,
+            json={
+                "model": "policy-rl-dev",
+                "choices": [
+                    {
+                        "message": {"content": "ACTION: end_turn"},
+                        "finish_reason": "stop",
+                        "token_ids": [741, 25, 1289],
+                        "logprobs": {
+                            "content": [
+                                {"token": "ACTION", "logprob": -0.1},
+                                {"token": ":", "logprob": -0.2},
+                                {"token": " end_turn", "logprob": -0.3},
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+
+    inference = importlib.import_module("play_sts2.inference")
+    with inference.OpenAICompatibleProvider(
+        "http://127.0.0.1:8900",
+        model="policy-rl-dev",
+        capture_token_metadata=True,
+        transport=httpx.MockTransport(respond),
+    ) as provider:
+        reply = provider.chat(
+            (inference.ChatMessage(role="user", content="状态"),),
+            response_choices=choices,
+        )
+
+    assert reply.text == "ACTION: end_turn"
     assert reply.behavior_logprobs == (-0.1, -0.2, -0.3)
 
 
@@ -192,7 +253,7 @@ def test_openai_provider_rejects_unbound_response_model(
     inference = importlib.import_module("play_sts2.inference")
     provider = inference.OpenAICompatibleProvider(
         "http://127.0.0.1:8900",
-        model="/models/serving/demo-e3-mlx-8bit",
+        model="/models/serving/demo-model-mlx-8bit",
         transport=httpx.MockTransport(respond),
     )
 
@@ -232,7 +293,7 @@ def test_openai_provider_checks_model_identity_before_length_classification() ->
     inference = importlib.import_module("play_sts2.inference")
     provider = inference.OpenAICompatibleProvider(
         "http://127.0.0.1:8900",
-        model="/models/serving/demo-e3-mlx-8bit",
+        model="/models/serving/demo-model-mlx-8bit",
         transport=httpx.MockTransport(respond),
     )
 
@@ -314,7 +375,7 @@ def test_openai_provider_classifies_generation_truncated_during_thinking() -> No
         return httpx.Response(
             200,
             json={
-                "model": "demo-e3",
+                "model": "demo-model",
                 "choices": [
                     {
                         "message": {
@@ -344,7 +405,7 @@ def test_openai_provider_classifies_generation_truncated_during_thinking() -> No
     assert error.value.reply.text == ""
     assert error.value.reply.reasoning == "尚未完成的分析"
     assert error.value.reply.finish_reason == "length"
-    assert error.value.reply.model == "demo-e3"
+    assert error.value.reply.model == "demo-model"
     assert error.value.reply.completion_tokens == 512
 
 

@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...inference import ChatMessage
+from ...runtime import DecisionGenerationProfile
 from ...scenario import BattleScenario, BattleSnapshot
 
 BEHAVIOR_LOGPROBS_MODE = "processed_logprobs"
+ACTION_CONSTRAINT_MODE = "vllm_structured_choice"
 
 
 class RolloutContractError(ValueError):
@@ -62,6 +64,8 @@ class BattleRolloutStep:
         token_ids (tuple[int, ...]): assistant 生成 token ID。
         behavior_logprobs (tuple[float, ...]): 与 token ID 对齐的行为策略
             log-prob。
+        response_choices (tuple[str, ...]): 实际交给 Provider 的完整动作候选。
+        finish_reason (str): 服务端报告的生成停止原因。
     """
 
     index: int
@@ -72,6 +76,8 @@ class BattleRolloutStep:
     action: str
     token_ids: tuple[int, ...]
     behavior_logprobs: tuple[float, ...]
+    response_choices: tuple[str, ...]
+    finish_reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +94,16 @@ class BattleRollout:
         outcome (str): 战斗正常离场结果。
         final_state (Mapping[str, Any]): 离开战斗后的第一份稳定状态。
         reward (BattleReward): 本条 arm 的终局奖励。
+        action_constraint_mode (str): rollout 使用的动作约束协议。
+        generation_profile (DecisionGenerationProfile): 本条 arm 实际使用的生成参数。
     """
 
     arm_index: int
     worker_id: str
     policy_version: str
     behavior_logprobs_mode: str
+    action_constraint_mode: str
+    generation_profile: DecisionGenerationProfile
     entry_snapshot: BattleSnapshot
     steps: tuple[BattleRolloutStep, ...]
     outcome: str
@@ -129,12 +139,16 @@ class BattleRolloutGroup:
         reward_mean (float): 组内奖励均值。
         reward_std (float): 组内奖励总体标准差。
         advantages (tuple[float, ...]): 每条 arm 的标准化相对优势。
+        action_constraint_mode (str): 所有 arm 共享的动作约束协议。
+        generation_profile (DecisionGenerationProfile): 所有 arm 共享的生成参数。
     """
 
     group_id: str
     scenario: BattleScenario
     policy_version: str
     behavior_logprobs_mode: str
+    action_constraint_mode: str
+    generation_profile: DecisionGenerationProfile
     entry_snapshot: BattleSnapshot
     rollouts: tuple[BattleRollout, ...]
     reward_mean: float
@@ -179,6 +193,12 @@ def build_battle_rollout_group(
     logprobs_modes = {rollout.behavior_logprobs_mode for rollout in ordered}
     if logprobs_modes != {BEHAVIOR_LOGPROBS_MODE}:
         raise BattleGroupRejected("战斗 group 必须统一使用 processed_logprobs 行为概率")
+    constraint_modes = {rollout.action_constraint_mode for rollout in ordered}
+    if constraint_modes != {ACTION_CONSTRAINT_MODE}:
+        raise BattleGroupRejected("战斗 group 必须统一使用结构化合法动作约束")
+    generation_profiles = {rollout.generation_profile for rollout in ordered}
+    if len(generation_profiles) != 1:
+        raise BattleGroupRejected("战斗 group 混入了不同的生成参数")
     if any(rollout.entry_snapshot != baseline.entry_snapshot for rollout in ordered):
         raise BattleGroupRejected("战斗 group 的入口快照不一致")
 
@@ -198,11 +218,13 @@ def build_battle_rollout_group(
         scenario=scenario,
         policy_version=baseline.policy_version,
         behavior_logprobs_mode=baseline.behavior_logprobs_mode,
+        generation_profile=baseline.generation_profile,
         entry_snapshot=baseline.entry_snapshot,
         rollouts=ordered,
         reward_mean=reward_mean,
         reward_std=reward_std,
         advantages=advantages,
+        action_constraint_mode=baseline.action_constraint_mode,
     )
 
 

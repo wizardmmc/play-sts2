@@ -133,6 +133,7 @@ def build_sft_dataset(
     train_run_ids: Collection[str] = (),
     dev_run_ids: Collection[str] = (),
     test_run_ids: Collection[str] = (),
+    run_splits_path: Path | None = None,
     mix_config_path: Path | None = None,
 ) -> SftDatasetResult:
     """构建三棵同构且可逐实体审查的 SFT 数据目录。
@@ -149,6 +150,7 @@ def build_sft_dataset(
         train_run_ids (Collection[str]): 整局进入训练集的 run ID。
         dev_run_ids (Collection[str]): 整局进入 validation 的 run ID。
         test_run_ids (Collection[str]): 整局进入 eval 的 run ID。
+        run_splits_path (Path | None): 可选的跨 raw 根独立整局分卷名册。
         mix_config_path (Path | None): 可选的训练高频行为上限配方。
 
     Raises:
@@ -160,6 +162,11 @@ def build_sft_dataset(
         SftDatasetResult: 三个分卷目录、清单路径与样本计数。
     """
     human_roots = (Path(human_root), *(Path(root) for root in additional_human_roots))
+    explicit_ids = any((train_run_ids, dev_run_ids, test_run_ids))
+    if run_splits_path is not None and explicit_ids:
+        raise DatasetBuildError(
+            "不能同时使用 run_splits_path 与逐局 train/dev/test 参数"
+        )
     declared_splits = {"train": [], "dev": [], "test": []}
     root_declared_splits: list[dict[str, list[str]]] = []
     for root in human_roots:
@@ -167,13 +174,25 @@ def build_sft_dataset(
         root_declared_splits.append(root_splits)
         for name, runs in declared_splits.items():
             runs.extend(root_splits[name])
-    explicit = any((train_run_ids, dev_run_ids, test_run_ids))
-    run_splits = {
-        "train": set(train_run_ids) if explicit else set(declared_splits["train"]),
-        "dev": set(dev_run_ids) if explicit else set(declared_splits["dev"]),
-        "test": set(test_run_ids) if explicit else set(declared_splits["test"]),
-    }
+    explicit = run_splits_path is not None or explicit_ids
+    if run_splits_path is not None:
+        split_path = Path(run_splits_path)
+        if not split_path.is_file():
+            raise DatasetBuildError(f"显式人类分卷不存在: {split_path}")
+        selected_splits = _read_run_splits(split_path)
+        if not set().union(*selected_splits.values()):
+            raise DatasetBuildError(f"显式人类分卷为空: {split_path}")
+    elif explicit_ids:
+        selected_splits = {
+            "train": list(train_run_ids),
+            "dev": list(dev_run_ids),
+            "test": list(test_run_ids),
+        }
+    else:
+        selected_splits = declared_splits
+    run_splits = {name: set(selected_splits[name]) for name in ("train", "dev", "test")}
     _validate_run_split_sets(run_splits)
+    assigned_runs = set().union(*run_splits.values())
 
     knowledge_rows = _deduplicate_knowledge_rows(
         list(_knowledge_rows(Path(knowledge_root)))
@@ -184,7 +203,11 @@ def build_sft_dataset(
         "test": [row for row in knowledge_rows if row.get("dataset_split") == "test"],
     }
     if explicit:
-        human_rows = [row for root in human_roots for row in _human_rows(root)]
+        human_rows = [
+            row
+            for root in human_roots
+            for row in _human_rows(root, included_run_ids=assigned_runs)
+        ]
     else:
         human_rows = list(_human_rows(human_roots[0]))
         for root, root_splits in zip(
@@ -195,7 +218,11 @@ def build_sft_dataset(
             selected_runs = set().union(*root_splits.values())
             human_rows.extend(_human_rows(root, included_run_ids=selected_runs))
     observed_runs = {str(row["run_id"]) for row in human_rows}
-    assigned_runs = set().union(*run_splits.values())
+    missing_runs = assigned_runs - observed_runs
+    if missing_runs:
+        raise DatasetBuildError(
+            f"名册中的人类局 {sorted(missing_runs)} 不存在或不可训练"
+        )
     unassigned = observed_runs - assigned_runs
     if unassigned:
         raise DatasetBuildError(f"可训练人类局未分配到名册: {sorted(unassigned)}")
@@ -272,6 +299,11 @@ def build_sft_dataset(
         "human": {
             "root": str(human_root),
             "additional_roots": [str(root) for root in human_roots[1:]],
+            **(
+                {"split_manifest": str(run_splits_path)}
+                if run_splits_path is not None
+                else {}
+            ),
             "train_runs": sorted(run_splits["train"]),
             "validation_runs": sorted(run_splits["dev"]),
             "eval_runs": sorted(run_splits["test"]),

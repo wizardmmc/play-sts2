@@ -1,6 +1,7 @@
 """连接本地游戏 workers 与远程冻结策略收集一个战斗 group。"""
 
 from contextlib import ExitStack
+from dataclasses import asdict
 from pathlib import Path
 
 from ...client import GameClient
@@ -83,6 +84,7 @@ def collect_battle_rollout_group(
                         temperature=temperature,
                         max_retries=0,
                         max_conflict_retries=3,
+                        constrain_actions=True,
                     ),
                 )
             )
@@ -96,6 +98,8 @@ def collect_battle_rollout_group(
         "group_id": group.group_id,
         "policy_version": group.policy_version,
         "behavior_logprobs_mode": group.behavior_logprobs_mode,
+        "action_constraint_mode": group.action_constraint_mode,
+        "generation_profile": asdict(group.generation_profile),
         "arms": len(group.rollouts),
         "reward_mean": group.reward_mean,
         "reward_std": group.reward_std,
