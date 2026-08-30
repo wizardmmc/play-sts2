@@ -276,6 +276,15 @@ class RunRunner:
                     timeout=remaining,
                 )
             except TimeoutError as exc:
+                latest = self._game.state()
+                latest_revision = state_revision(latest)
+                latest_route = classify_run_state(latest)
+                if (
+                    latest_revision is not None
+                    and latest_revision > revision
+                    and latest_route not in {RunRoute.TRANSIENT, RunRoute.UNKNOWN}
+                ):
+                    return latest
                 raise RunError("等待下一可处理状态超时") from exc
             revision = state_revision(state)
 

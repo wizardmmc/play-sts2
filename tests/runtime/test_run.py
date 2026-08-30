@@ -148,6 +148,55 @@ class StaticGame:
         raise AssertionError(f"不应执行动作: {action}")
 
 
+class MissedEventGame:
+    """模拟 SSE 漏失但只读状态已经推进的游戏。"""
+
+    def __init__(self, latest_state: dict[str, Any]) -> None:
+        """保存超时后 `/state` 能取得的最新快照。
+
+        Args:
+            latest_state (dict[str, Any]): SSE 未交付但 Mod 已持有的状态。
+
+        Returns:
+            None: 此方法只初始化测试计数。
+        """
+        self._latest_state = latest_state
+        self.wait_calls = 0
+        self.state_calls = 0
+
+    def state(self) -> dict[str, Any]:
+        """返回当前 Mod 的只读最新状态。
+
+        Returns:
+            dict[str, Any]: 最新状态副本。
+        """
+        self.state_calls += 1
+        return dict(self._latest_state)
+
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """模拟 SSE 在新 revision 已发生后仍超时。
+
+        Args:
+            after_revision (int): Runtime 已处理的状态 revision。
+            timeout (float): SSE 等待预算。
+
+        Raises:
+            TimeoutError: 固定模拟漏失事件。
+
+        Returns:
+            dict[str, Any]: 此方法不会正常返回。
+        """
+        assert after_revision >= 0
+        assert timeout > 0
+        self.wait_calls += 1
+        raise TimeoutError("missed state event")
+
+
 class ConflictingStrategicGame:
     """模拟战略动作窗口短暂关闭后重新开放的游戏。"""
 
@@ -472,6 +521,57 @@ def test_run_runner_times_out_while_state_stays_transient() -> None:
             state_timeout=0,
         ).run(state)
 
+    assert provider.requests == []
+
+
+def test_run_runner_recovers_newer_routable_state_after_missed_event() -> None:
+    """SSE 超时后应只读补取已经推进的可路由状态。
+
+    Raises:
+        AssertionError: 更高 revision 的终局仍被误报为等待超时。
+
+    Returns:
+        None: 此测试复现宝箱自动领取落在订阅窗口中的竞态。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    initial = _map_state(
+        available_actions=["save_and_quit"],
+        state_revision=10,
+    )
+    game = MissedEventGame(_game_over_state(True, state_revision=11))
+    provider = WholeRunProvider([])
+
+    result = runtime.RunRunner(game, provider, state_timeout=1).run(initial)
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert result.decisions == ()
+    assert game.wait_calls == 1
+    assert game.state_calls == 1
+    assert provider.requests == []
+
+
+def test_run_runner_rejects_fallback_without_newer_revision() -> None:
+    """SSE 超时后的同 revision 快照不能被当成状态推进。
+
+    Raises:
+        AssertionError: 未推进状态绕过原有超时错误。
+
+    Returns:
+        None: 此测试固定补取逻辑的严格 revision 边界。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    initial = _map_state(
+        available_actions=["save_and_quit"],
+        state_revision=10,
+    )
+    game = MissedEventGame(initial)
+    provider = WholeRunProvider([])
+
+    with pytest.raises(runtime.RunError, match="等待下一可处理状态超时"):
+        runtime.RunRunner(game, provider, state_timeout=1).run(initial)
+
+    assert game.wait_calls == 1
+    assert game.state_calls == 1
     assert provider.requests == []
 
 
