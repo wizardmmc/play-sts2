@@ -2,6 +2,7 @@
 
 from .battle import (
     BattleOutcome,
+    BattlePolicyFailure,
     BattleResult,
     BattleRunError,
     BattleRunner,
@@ -19,6 +20,7 @@ from .strategic import StrategicRunError, StrategicRunner
 
 __all__ = [
     "BattleOutcome",
+    "BattlePolicyFailure",
     "BattleResult",
     "BattleRunError",
     "BattleRunner",

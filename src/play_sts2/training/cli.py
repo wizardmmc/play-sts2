@@ -5,7 +5,14 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from .rl import collect_battle_rollout_group, label_dagger_rollout_group
+from .rl import (
+    collect_battle_rollout_group,
+    evaluate_battle_rollout_file,
+    label_dagger_rollout_group,
+    load_battle_grpo_config,
+    train_battle_grpo,
+    write_battle_reward_comparison,
+)
 from .sft import (
     build_sft_dataset,
     evaluate_sft,
@@ -40,6 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="确认 vLLM 已用 --logprobs-mode processed_logprobs 启动",
     )
+    collect_rl.add_argument(
+        "--structured-output-backend",
+        choices=("xgrammar",),
+        required=True,
+        help="确认 vLLM 当前 structured choice 使用 xgrammar backend",
+    )
+    collect_rl.add_argument(
+        "--structured-output-version",
+        required=True,
+        help="确认服务端 xgrammar 精确包版本，例如 0.1.33",
+    )
     collect_rl.add_argument("--group-id", required=True)
     collect_rl.add_argument("--output", type=Path, required=True)
     collect_rl.add_argument("--group-size", type=int, default=8)
@@ -56,6 +74,48 @@ def build_parser() -> argparse.ArgumentParser:
     label_dagger.add_argument("--max-labels", type=int, default=8)
     label_dagger.add_argument("--selection-seed", type=int, default=0)
     label_dagger.add_argument("--search-timeout", type=float, default=135.0)
+    train_grpo = subparsers.add_parser(
+        "battle-grpo",
+        help="用八臂 rollout 和独立 DAgger loss 训练战斗 LoRA",
+    )
+    train_grpo.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/rl/battle-grpo.toml"),
+    )
+    train_grpo.add_argument("--name", required=True)
+    train_grpo.add_argument(
+        "--max-groups",
+        type=int,
+        help="限制本次新增优化 group 数，用于工程冒烟或中断恢复验证",
+    )
+    train_grpo.add_argument(
+        "--resume",
+        action="store_true",
+        help="从同名运行的 checkpoint-last 精确恢复",
+    )
+    compare_rewards = subparsers.add_parser(
+        "compare-rl-rewards",
+        help="在相同八臂 rollout 上离线比较第三阶段奖励方案",
+    )
+    compare_rewards.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/rl/battle-grpo.toml"),
+    )
+    compare_rewards.add_argument("--output", type=Path, required=True)
+    compare_rewards.add_argument(
+        "--rollout",
+        type=Path,
+        action="append",
+        help="显式指定一个 group JSON；可重复，省略时使用配置 rollout_root",
+    )
+    evaluate_rollout = subparsers.add_parser(
+        "eval-rl-rollout",
+        help="从一个落盘 battle group 复算固定五项回归指标",
+    )
+    evaluate_rollout.add_argument("--rollout", type=Path, required=True)
+    evaluate_rollout.add_argument("--output", type=Path, required=True)
     build = subparsers.add_parser("build-sft", help="构建可读 SFT messages")
     build.add_argument(
         "--knowledge-root",
@@ -210,6 +270,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_url=args.model_url,
             policy_model=args.policy_model,
             vllm_logprobs_mode=args.vllm_logprobs_mode,
+            structured_output_backend=args.structured_output_backend,
+            structured_output_version=args.structured_output_version,
             group_id=args.group_id,
             output_path=args.output,
             group_size=args.group_size,
@@ -225,6 +287,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_labels=args.max_labels,
             selection_seed=args.selection_seed,
             search_timeout=args.search_timeout,
+        )
+    elif args.command == "battle-grpo":
+        config = load_battle_grpo_config(args.config)
+        output = train_battle_grpo(
+            config,
+            args.name,
+            max_groups=args.max_groups,
+            exact_resume=args.resume,
+        )
+    elif args.command == "compare-rl-rewards":
+        config = load_battle_grpo_config(args.config)
+        output = write_battle_reward_comparison(
+            config,
+            args.output,
+            rollout_paths=args.rollout,
+        )
+    elif args.command == "eval-rl-rollout":
+        output = evaluate_battle_rollout_file(args.rollout)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
     elif args.command == "build-sft":
         result = build_sft_dataset(

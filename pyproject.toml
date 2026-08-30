@@ -29,6 +29,7 @@ training = [
     "peft>=0.20.0",
     "torch>=2.9.0",
     "transformers>=5.2.0",
+    "xgrammar==0.1.33",
 ]
 
 [tool.pytest.ini_options]

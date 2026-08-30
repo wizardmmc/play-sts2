@@ -6,12 +6,16 @@ from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
 
-from ...client import GameClient
+from ...client import GameClient, Health
 from ...inference import OpenAICompatibleProvider
 from ...runtime import BattleRunner
 from ...scenario import BattleResetter
 from .collector import BattleGroupCollector, GameBattleRolloutWorker
-from .contracts import BEHAVIOR_LOGPROBS_MODE
+from .contracts import (
+    BEHAVIOR_LOGPROBS_MODE,
+    RL_GAME_VERSION,
+    STRUCTURED_OUTPUT_BACKEND,
+)
 from .dagger import (
     DaggerReplayLabeler,
     load_dagger_rollout_source,
@@ -29,6 +33,8 @@ def collect_battle_rollout_group(
     model_url: str,
     policy_model: str,
     vllm_logprobs_mode: str,
+    structured_output_backend: str,
+    structured_output_version: str,
     group_id: str,
     output_path: Path,
     group_size: int = 8,
@@ -44,6 +50,8 @@ def collect_battle_rollout_group(
         model_url (str): A100 上的 vLLM-compatible 服务地址。
         policy_model (str): 请求和响应共同绑定的冻结模型版本。
         vllm_logprobs_mode (str): vLLM 启动时使用的 log-prob 模式声明。
+        structured_output_backend (str): vLLM 实际选择的 grammar backend。
+        structured_output_version (str): grammar backend 的精确包版本。
         group_id (str): 当前 group 的稳定标识。
         output_path (Path): 完整 group JSON 输出路径。
         group_size (int): 同状态 arm 数，默认 8。
@@ -68,11 +76,18 @@ def collect_battle_rollout_group(
         raise ValueError("游戏 worker 地址不能重复")
     if vllm_logprobs_mode != BEHAVIOR_LOGPROBS_MODE:
         raise ValueError("战斗 RL 要求 vLLM 使用 --logprobs-mode processed_logprobs")
+    if (
+        structured_output_backend != STRUCTURED_OUTPUT_BACKEND
+        or not structured_output_version.strip()
+    ):
+        raise ValueError("战斗 RL 要求显式声明 xgrammar backend 与精确版本")
     scenario = load_battle_scenario(scenario_path)
     with ExitStack() as stack:
         workers: list[GameBattleRolloutWorker] = []
+        healths: list[Health] = []
         for index, game_url in enumerate(normalized_game_urls):
             game = stack.enter_context(GameClient(game_url))
+            healths.append(game.health())
             provider = stack.enter_context(
                 OpenAICompatibleProvider(
                     model_url,
@@ -97,12 +112,21 @@ def collect_battle_rollout_group(
                     ),
                 )
             )
+        environment = {
+            **validate_rl_game_health(healths),
+            "structured_output_backend": structured_output_backend,
+            "structured_output_version": structured_output_version,
+        }
         group = BattleGroupCollector(
             workers,
             group_size=group_size,
             infrastructure_attempts=infrastructure_attempts,
         ).collect(scenario, group_id=group_id)
-    output = write_battle_rollout_group(output_path, group)
+    output = write_battle_rollout_group(
+        output_path,
+        group,
+        environment=environment,
+    )
     return {
         "group_id": group.group_id,
         "policy_version": group.policy_version,
@@ -112,7 +136,40 @@ def collect_battle_rollout_group(
         "arms": len(group.rollouts),
         "reward_mean": group.reward_mean,
         "reward_std": group.reward_std,
+        "environment": environment,
         "output": str(output),
+    }
+
+
+def validate_rl_game_health(
+    healths: tuple[Health, ...] | list[Health],
+) -> dict[str, str]:
+    """确认所有本地 worker 都是同一套固定 RL 游戏运行时。
+
+    Args:
+        healths (tuple[Health, ...] | list[Health]): 每个游戏 worker 的健康收据。
+
+    Raises:
+        ValueError: worker 为空、不是 v0.111.0 或 Mod/协议版本不一致。
+
+    Returns:
+        dict[str, str]: 可写入 rollout group 的统一环境版本。
+    """
+    if not healths:
+        raise ValueError("战斗 RL 缺少游戏运行时收据")
+    versions = {
+        (health.game_version, health.mod_version, health.protocol_version)
+        for health in healths
+    }
+    if len(versions) != 1:
+        raise ValueError("战斗 RL worker 的游戏、Mod 或协议版本不一致")
+    game_version, mod_version, protocol_version = versions.pop()
+    if game_version != RL_GAME_VERSION:
+        raise ValueError(f"战斗 RL 只允许 {RL_GAME_VERSION}，实际为 {game_version}")
+    return {
+        "game_version": game_version,
+        "mod_version": mod_version,
+        "protocol_version": protocol_version,
     }
 
 

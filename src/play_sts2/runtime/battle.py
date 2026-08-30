@@ -15,9 +15,11 @@ from ..harness import (
     build_observation,
     state_layer,
 )
-from ..inference import DecisionProvider
+from ..inference import DecisionProvider, InferenceGenerationTruncated, ModelReply
 from .decision import (
     DecisionEngine,
+    DecisionGenerationProfile,
+    DecisionRetriesExhausted,
     DecisionStep,
     is_action_window_conflict,
     stale_state_from_conflict,
@@ -34,8 +36,65 @@ class BattleRunError(RuntimeError):
     """表示当前战斗无法继续形成可靠的模型决策闭环。"""
 
 
-class BattleStepLimitExceeded(BattleRunError):
+class BattlePolicyFailure(BattleRunError):
+    """保存可归因于策略的中止轨迹，供 RL 作为最差回报保留。"""
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        steps: tuple[DecisionStep, ...],
+        failure_state: Mapping[str, Any],
+        replies: tuple[ModelReply, ...] = (),
+        errors: tuple[str, ...] = (),
+        generation_profile: DecisionGenerationProfile | None = None,
+    ) -> None:
+        """保存失败前已执行动作、当前状态与失败回复。
+
+        Args:
+            kind (str): ``invalid_action``、``truncated`` 或 ``step_limit``。
+            steps (tuple[DecisionStep, ...]): 失败前已经成功执行的步骤。
+            failure_state (Mapping[str, Any]): 失败发生时的完整游戏状态。
+            replies (tuple[ModelReply, ...]): 未执行的失败模型回复。
+            errors (tuple[str, ...]): 解析、动作域或终止诊断。
+            generation_profile (DecisionGenerationProfile | None): 失败请求的生成参数。
+        """
+        self.kind = kind
+        self.steps = steps
+        self.failure_state = dict(failure_state)
+        self.replies = replies
+        self.errors = errors
+        self.generation_profile = generation_profile
+        super().__init__(f"战斗策略失败: {kind}")
+
+
+class BattleStepLimitExceeded(BattlePolicyFailure):
     """表示策略未能在动作预算内结束战斗。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        steps: tuple[DecisionStep, ...] = (),
+        failure_state: Mapping[str, Any] | None = None,
+        generation_profile: DecisionGenerationProfile | None = None,
+    ) -> None:
+        """保存动作上限诊断及可选的已执行轨迹。
+
+        Args:
+            message (str): 动作上限诊断。
+            steps (tuple[DecisionStep, ...]): 达到上限前的成功步骤。
+            failure_state (Mapping[str, Any] | None): 达到上限时的游戏状态。
+            generation_profile (DecisionGenerationProfile | None): 当前生成参数。
+        """
+        super().__init__(
+            kind="step_limit",
+            steps=steps,
+            failure_state=failure_state or {},
+            errors=(message,),
+            generation_profile=generation_profile,
+        )
+        self.args = (message,)
 
 
 class BattleOutcome(str, Enum):
@@ -107,6 +166,12 @@ class BattleRunner:
         )
         self._max_steps = max_steps
         self._state_timeout = state_timeout
+        self._generation_profile = DecisionGenerationProfile(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_retries=max_retries,
+            thinking_enabled=getattr(provider, "thinking_enabled", None),
+        )
 
     def run(self, initial_state: Mapping[str, Any] | None = None) -> BattleResult:
         """从当前战斗状态开始循环，直到战斗胜利或角色死亡。
@@ -133,12 +198,35 @@ class BattleRunner:
 
         while _fight_ongoing(state):
             if len(steps) >= self._max_steps:
-                raise BattleStepLimitExceeded(f"战斗动作数超过上限: {self._max_steps}")
+                raise BattleStepLimitExceeded(
+                    f"战斗动作数超过上限: {self._max_steps}",
+                    steps=tuple(steps),
+                    failure_state=state,
+                    generation_profile=self._generation_profile,
+                )
             try:
                 step = self._engine.step(
                     state,
                     max_retries=self._max_retries,
                 )
+            except DecisionRetriesExhausted as exc:
+                raise BattlePolicyFailure(
+                    kind="invalid_action",
+                    steps=tuple(steps),
+                    failure_state=state,
+                    replies=exc.replies,
+                    errors=exc.errors,
+                    generation_profile=self._generation_profile,
+                ) from exc
+            except InferenceGenerationTruncated as exc:
+                raise BattlePolicyFailure(
+                    kind="truncated",
+                    steps=tuple(steps),
+                    failure_state=state,
+                    replies=(exc.reply,),
+                    errors=("generation truncated",),
+                    generation_profile=self._generation_profile,
+                ) from exc
             except httpx.HTTPStatusError as exc:
                 latest = stale_state_from_conflict(exc)
                 if latest is None and not is_action_window_conflict(exc):

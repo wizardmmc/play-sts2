@@ -9,6 +9,7 @@ import httpx
 from ... import RunStartError
 from ...inference import InferenceGenerationTruncated
 from ...runtime import (
+    BattlePolicyFailure,
     BattleRunError,
     BattleRunner,
     BattleStepLimitExceeded,
@@ -26,9 +27,10 @@ from .contracts import (
     BattleGroupRejected,
     BattleRollout,
     BattleRolloutGroup,
+    RolloutContractError,
     build_battle_rollout_group,
 )
-from .rollout import build_battle_rollout
+from .rollout import build_battle_failure_rollout, build_battle_rollout
 
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
@@ -126,6 +128,20 @@ class GameBattleRolloutWorker:
                 expected_snapshot=expected_snapshot,
             )
             result = self._runner.run(reset.state)
+        except BattlePolicyFailure as exc:
+            try:
+                return build_battle_failure_rollout(
+                    arm_index=arm_index,
+                    worker_id=self.worker_id,
+                    entry_snapshot=reset.snapshot,
+                    entry_state=reset.state,
+                    failure=exc,
+                    behavior_logprobs_mode=self._behavior_logprobs_mode,
+                )
+            except RolloutContractError as build_error:
+                raise RolloutModelError(
+                    f"{self.worker_id} 的模型失败没有可训练 token"
+                ) from build_error
         except (
             DecisionRetriesExhausted,
             InferenceGenerationTruncated,

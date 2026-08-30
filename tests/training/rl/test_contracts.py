@@ -125,7 +125,7 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_reward() -> None
     assert rollout.steps[0].behavior_logprobs == (-0.1, -0.2, -0.3)
     assert rollout.steps[0].before_state == before_state
     assert rollout.steps[0].after_state == after_state
-    assert rollout.reward.scheme == "battle"
+    assert rollout.reward.scheme == "core"
     assert rollout.reward.total == 1.45
     assert tuple(
         (component.name, component.value) for component in rollout.reward.components
@@ -134,7 +134,76 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_reward() -> None
         ("hp_delta", -1.5),
         ("death", 0.0),
         ("turns", -0.05),
+        ("model_error", 0.0),
+        ("potions", 0.0),
     )
+
+
+def test_build_battle_failure_rollout_keeps_prefix_and_death_credit() -> None:
+    """动作上限等模型失败必须保留已访问 token 并作为死亡等价 arm。
+
+    Returns:
+        None: 失败不会按基础设施故障重采，也不会伪造 Solver 或成功轨迹。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    rl = importlib.import_module("play_sts2.training.rl")
+    before_state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
+        "turn": 1,
+        "run": {"current_hp": 40, "max_hp": 70, "potions": []},
+    }
+    after_state = {
+        "screen": "COMBAT",
+        "in_combat": True,
+        "available_actions": ["end_turn"],
+        "turn": 2,
+        "run": {"current_hp": 35, "max_hp": 70, "potions": []},
+    }
+    step = DecisionStep(
+        observation=Observation(
+            layer=HarnessLayer.BATTLE,
+            text="当前战斗状态",
+            available_actions=("end_turn",),
+        ),
+        before_state=before_state,
+        messages=(ChatMessage(role="user", content="当前战斗状态"),),
+        replies=(
+            ModelReply(
+                text="ACTION: end_turn",
+                model="policy-test",
+                finish_reason="stop",
+                token_ids=(741,),
+                behavior_logprobs=(-0.1,),
+            ),
+        ),
+        retry_errors=(),
+        action=HarnessAction(name="end_turn", parameters={}),
+        action_result={"state": after_state, "stable": True},
+        response_choices=("ACTION: end_turn",),
+        generation_profile=_generation_profile(),
+    )
+    failure = runtime.BattleStepLimitExceeded(
+        "动作数超限",
+        steps=(step,),
+        failure_state=after_state,
+        generation_profile=_generation_profile(),
+    )
+
+    rollout = rl.build_battle_failure_rollout(
+        arm_index=0,
+        worker_id="worker-0",
+        entry_snapshot=_snapshot(),
+        entry_state=before_state,
+        failure=failure,
+        behavior_logprobs_mode="processed_logprobs",
+    )
+
+    assert rollout.outcome == "model_error"
+    assert rollout.invalid_replies == 0
+    assert rollout.steps[0].action == "ACTION: end_turn"
+    assert rollout.reward.total == pytest.approx(-25.0)
 
 
 def test_build_battle_rollout_rejects_missing_constraint_provenance() -> None:

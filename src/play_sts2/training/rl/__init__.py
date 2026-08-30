@@ -1,5 +1,13 @@
 """提供战斗 rollout 收集、奖励投影与同入口组准入。"""
 
+from .battle_trainer import (
+    BattleGrpoCheckpoint,
+    BattleGrpoConfig,
+    FrozenAnchor,
+    load_battle_grpo_config,
+    train_battle_grpo,
+    write_battle_reward_comparison,
+)
 from .collector import (
     BattleGroupCollector,
     BattleRolloutWorker,
@@ -10,6 +18,8 @@ from .collector import (
 from .contracts import (
     ACTION_CONSTRAINT_MODE,
     BEHAVIOR_LOGPROBS_MODE,
+    RL_GAME_VERSION,
+    STRUCTURED_OUTPUT_BACKEND,
     BattleGroupRejected,
     BattleReward,
     BattleRollout,
@@ -34,21 +44,44 @@ from .dagger import (
 )
 from .entrypoint import collect_battle_rollout_group, label_dagger_rollout_group
 from .io import load_battle_scenario, write_battle_rollout_group
+from .learner import (
+    GrpoArm,
+    GrpoLossResult,
+    GrpoSequence,
+    GrpoTrainingError,
+    GrpoTrainingGroup,
+    compare_battle_reward_schemes,
+    constrained_completion_logprobs,
+    grpo_sequence_loss,
+    load_grpo_training_group,
+)
 from .metrics import (
     BattleEvaluationAttempt,
     BattleRegressionMetrics,
     evaluate_battle_regression_metrics,
+    evaluate_battle_rollout_file,
 )
-from .rollout import build_battle_rollout, score_battle_reward
+from .reward import BattleRewardInput, BattleRewardScheme, score_battle_reward
+from .rollout import (
+    build_battle_failure_rollout,
+    build_battle_rollout,
+    score_battle_result,
+)
 
 __all__ = [
     "ACTION_CONSTRAINT_MODE",
     "BEHAVIOR_LOGPROBS_MODE",
+    "RL_GAME_VERSION",
+    "STRUCTURED_OUTPUT_BACKEND",
     "BattleEvaluationAttempt",
     "BattleGroupCollector",
     "BattleGroupRejected",
+    "BattleGrpoCheckpoint",
+    "BattleGrpoConfig",
     "BattleRegressionMetrics",
     "BattleReward",
+    "BattleRewardInput",
+    "BattleRewardScheme",
     "BattleRollout",
     "BattleRolloutGroup",
     "BattleRolloutStep",
@@ -58,23 +91,39 @@ __all__ = [
     "DaggerLabel",
     "DaggerReplayLabeler",
     "DaggerRolloutSource",
+    "FrozenAnchor",
     "GameBattleRolloutWorker",
+    "GrpoArm",
+    "GrpoLossResult",
+    "GrpoSequence",
+    "GrpoTrainingError",
+    "GrpoTrainingGroup",
     "RewardComponent",
     "RolloutContractError",
     "RolloutInfrastructureError",
     "RolloutModelError",
+    "build_battle_failure_rollout",
     "build_battle_rollout",
     "build_battle_rollout_group",
     "build_dagger_label",
     "collect_battle_rollout_group",
+    "compare_battle_reward_schemes",
+    "constrained_completion_logprobs",
     "evaluate_battle_regression_metrics",
+    "evaluate_battle_rollout_file",
+    "grpo_sequence_loss",
     "label_dagger_rollout_group",
+    "load_battle_grpo_config",
     "load_battle_scenario",
     "load_dagger_rollout_source",
     "load_dagger_sft_rows",
+    "load_grpo_training_group",
+    "score_battle_result",
     "score_battle_reward",
     "select_dagger_candidates",
     "summarize_dagger_unsupported",
+    "train_battle_grpo",
+    "write_battle_reward_comparison",
     "write_battle_rollout_group",
     "write_dagger_labels",
 ]

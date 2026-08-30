@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from play_sts2.client import Health
 from play_sts2.training.rl import collect_battle_rollout_group
+from play_sts2.training.rl.entrypoint import validate_rl_game_health
 
 
 def test_entrypoint_rejects_duplicate_game_urls() -> None:
@@ -23,6 +25,8 @@ def test_entrypoint_rejects_duplicate_game_urls() -> None:
             model_url="http://127.0.0.1:8900",
             policy_model="policy-test",
             vllm_logprobs_mode="processed_logprobs",
+            structured_output_backend="xgrammar",
+            structured_output_version="0.1.33",
             group_id="duplicate-workers",
             output_path=Path("not-written.json"),
         )
@@ -41,6 +45,26 @@ def test_entrypoint_rejects_raw_vllm_logprobs() -> None:
             model_url="http://127.0.0.1:8900",
             policy_model="policy-test",
             vllm_logprobs_mode="raw_logprobs",
+            structured_output_backend="xgrammar",
+            structured_output_version="0.1.33",
             group_id="raw-logprobs",
             output_path=Path("not-written.json"),
         )
+
+
+def test_entrypoint_rejects_non_rl_game_version() -> None:
+    """RL collector 必须在连接后立刻拒绝非 0.111.0 游戏实例。
+
+    Returns:
+        None: 旧兼容副本不能产生看似有效的正式 rollout。
+    """
+    health = Health(
+        service="sts2-ai-agent",
+        mod_version="mod-test",
+        protocol_version="protocol-test",
+        game_version="v0.107.1",
+        status="ready",
+    )
+
+    with pytest.raises(ValueError, match="v0.111.0"):
+        validate_rl_game_health([health])

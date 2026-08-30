@@ -1,6 +1,7 @@
 """读取战斗场景配置并持久化可审计 rollout group。"""
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -43,20 +44,26 @@ def load_battle_scenario(path: Path) -> BattleScenario:
 def write_battle_rollout_group(
     path: Path,
     group: BattleRolloutGroup,
+    *,
+    environment: Mapping[str, str] | None = None,
 ) -> Path:
     """把完整 group 以可读 JSON 写入指定路径。
 
     Args:
         path (Path): 输出 JSON 路径。
         group (BattleRolloutGroup): 已通过准入的完整 rollout group。
+        environment (Mapping[str, str] | None): 可选的游戏、Mod 与协议版本收据。
 
     Returns:
         Path: 实际写入的输出路径。
     """
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    payload = asdict(group)
+    if environment is not None:
+        payload["environment"] = dict(environment)
     output.write_text(
-        json.dumps(asdict(group), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return output

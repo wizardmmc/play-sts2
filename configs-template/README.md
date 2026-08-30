@@ -9,6 +9,7 @@ configs/
 ├── inference/
 │   └── inference.toml
 ├── rl/
+│   └── battle-grpo.toml
 ├── scenarios/
 │   ├── battle.json
 │   ├── battle-validation.json
@@ -20,6 +21,5 @@ configs/
     └── mix.toml
 ```
 
-推理和 SFT 命令默认读取上述 `configs/inference/` 与 `configs/sft/` 路径。RL 战斗
-collector 当前仍通过 CLI 显式接收场景、模型服务和采样参数；`rl/` 目录暂不提供
-尚未被代码读取的伪配置。
+推理、SFT 与 battle-GRPO 命令默认读取上述同构配置路径。RL 战斗 collector 仍通过
+CLI 显式接收场景、模型服务和采样参数。

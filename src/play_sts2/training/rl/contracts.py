@@ -12,6 +12,8 @@ from ...scenario import BattleScenario, BattleSnapshot
 
 BEHAVIOR_LOGPROBS_MODE = "processed_logprobs"
 ACTION_CONSTRAINT_MODE = "vllm_structured_choice"
+RL_GAME_VERSION = "v0.111.0"
+STRUCTURED_OUTPUT_BACKEND = "xgrammar"
 
 
 class RolloutContractError(ValueError):
@@ -66,6 +68,7 @@ class BattleRolloutStep:
             log-prob。
         response_choices (tuple[str, ...]): 实际交给 Provider 的完整动作候选。
         finish_reason (str): 服务端报告的生成停止原因。
+        is_model_failure (bool): 当前回复是否未执行并导致策略中止。
     """
 
     index: int
@@ -78,6 +81,7 @@ class BattleRolloutStep:
     behavior_logprobs: tuple[float, ...]
     response_choices: tuple[str, ...]
     finish_reason: str
+    is_model_failure: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +100,7 @@ class BattleRollout:
         reward (BattleReward): 本条 arm 的终局奖励。
         action_constraint_mode (str): rollout 使用的动作约束协议。
         generation_profile (DecisionGenerationProfile): 本条 arm 实际使用的生成参数。
+        invalid_replies (int): 导致中止的模型失败回复数。
     """
 
     arm_index: int
@@ -109,6 +114,7 @@ class BattleRollout:
     outcome: str
     final_state: Mapping[str, Any]
     reward: BattleReward
+    invalid_replies: int = 0
 
     @property
     def first_action(self) -> str:
@@ -122,7 +128,7 @@ class BattleRollout:
         """
         if not self.steps:
             raise RolloutContractError("战斗 rollout 没有任何已执行动作")
-        return self.steps[0].action
+        return "MODEL_ERROR" if self.steps[0].is_model_failure else self.steps[0].action
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,8 +250,12 @@ def _validate_rollout(rollout: BattleRollout) -> None:
         raise RolloutContractError("战斗 rollout 奖励必须是有限值")
     if not rollout.steps:
         raise RolloutContractError("战斗 rollout 没有任何已执行动作")
+    if rollout.invalid_replies < 0:
+        raise RolloutContractError("战斗 rollout 非法回复数不能为负数")
     for step in rollout.steps:
         if not step.token_ids or len(step.token_ids) != len(step.behavior_logprobs):
             raise RolloutContractError("战斗步骤的 token ID 与 log-prob 不对齐")
         if any(not math.isfinite(value) for value in step.behavior_logprobs):
             raise RolloutContractError("战斗步骤包含非有限 behavior log-prob")
+        if step.is_model_failure and step.action:
+            raise RolloutContractError("模型失败步骤不能声明已执行动作")
