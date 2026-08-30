@@ -192,6 +192,25 @@ class GameClient:
             raise ProtocolError("invalid /state response")
         return dict(data)
 
+    def checkpoint_audit(self) -> dict[str, Any]:
+        """读取仅供环境确定性验证的隐藏 checkpoint 审计状态。
+
+        该端点只在游戏启用开发动作时开放，返回内容不得进入 Harness、Recorder
+        或模型消息。
+
+        Raises:
+            httpx.HTTPStatusError: Mod 未启用开发审计或返回非成功状态码。
+            ProtocolError: 响应体违反通用协议，或审计数据不是 JSON 对象。
+
+        Returns:
+            dict[str, Any]: Mod 返回的 RNG、房间和完整战斗牌堆审计对象。
+        """
+        path = "/checkpoint/audit"
+        data = self._request_data(path)
+        if not isinstance(data, Mapping):
+            raise ProtocolError(f"invalid {path} response")
+        return dict(data)
+
     def solver_suggestion(
         self,
         *,

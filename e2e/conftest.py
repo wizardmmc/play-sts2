@@ -82,6 +82,40 @@ def running_game(
 
 
 @pytest.fixture
+def running_game_without_debug(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> Iterator[RunningGame]:
+    """提供未开放开发动作和隐藏审计端点的隔离游戏实例。
+
+    Args:
+        request (pytest.FixtureRequest): 当前 Pytest 请求与 E2E 开关。
+        tmp_path (Path): 当前测试独占的临时目录。
+
+    Yields:
+        RunningGame: 到达可操作主菜单且未启用开发动作的实例。
+    """
+    if not request.config.getoption("--run-e2e"):
+        pytest.skip("使用 --run-e2e 才会启动真实游戏")
+    if sys.platform != "darwin":
+        pytest.skip("当前 E2E 启动器仅支持 macOS")
+
+    app_path = Path(os.environ.get("STS2_APP_PATH", _DEFAULT_APP))
+    executable = app_path / "Contents/MacOS/Slay the Spire 2"
+    port = int(os.environ.get("STS2_E2E_PORT", _DEFAULT_PORT))
+    mode = request.config.getoption("--sts2-mode")
+    with launch_game(
+        executable,
+        port=port,
+        home=tmp_path / "home-no-debug",
+        profile=_DEFAULT_PROFILE,
+        mode=mode,
+        enable_debug_actions=False,
+    ) as game:
+        yield game
+
+
+@pytest.fixture
 def running_games(
     request: pytest.FixtureRequest,
     tmp_path: Path,

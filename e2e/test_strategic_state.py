@@ -47,7 +47,7 @@ def test_rest_state_keeps_map_card_instances_and_dynamic_relic_options(
 
     assert state["screen"] == "REST"
     assert health.game_version == "v0.111.0"
-    assert health.mod_version == "0.8.0-rlsts2.49"
+    assert health.mod_version == "0.8.0-rlsts2.50"
     assert state["map"]["current_node"] is not None
     assert len(state["map"]["nodes"]) == 59
     assert state["map"]["available_nodes"] == []

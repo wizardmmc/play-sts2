@@ -206,8 +206,8 @@ def test_isolated_mod_configuration_requires_disabled_unified_save_path(
         game_launcher._verify_isolated_mod_configuration(log_path)
 
 
-def test_main_menu_readiness_requires_expected_action() -> None:
-    """只有主菜单已经暴露开角色选择动作时才视为就绪。
+def test_main_menu_readiness_accepts_new_or_saved_run_actions() -> None:
+    """主菜单可开始新局或续玩 checkpoint 时都应视为就绪。
 
     Raises:
         AssertionError: 启动器错误接受过渡状态或拒绝可操作主菜单。
@@ -224,7 +224,7 @@ def test_main_menu_readiness_requires_expected_action() -> None:
             },
         }
     )
-    assert not game_launcher._main_menu_is_ready(
+    assert game_launcher._main_menu_is_ready(
         {
             "ok": True,
             "data": {

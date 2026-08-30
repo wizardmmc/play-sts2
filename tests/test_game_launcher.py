@@ -177,6 +177,35 @@ def test_stage_profile_copies_only_isolated_non_steam_files(tmp_path: Path) -> N
         assert path.read_bytes() == expected
 
 
+def test_stage_profile_copies_explicit_run_checkpoint(tmp_path: Path) -> None:
+    """隔离 HOME 应只在调用方显式提供时装入原生整局存档。
+
+    Args:
+        tmp_path (Path): Pytest 提供的临时目录。
+
+    Returns:
+        None: checkpoint 被复制到游戏原生非 Steam 存档路径。
+    """
+    launcher = importlib.import_module("play_sts2.game_launcher")
+    profile = tmp_path / "profile"
+    _write_profile(profile)
+    checkpoint = tmp_path / "current_run.save"
+    checkpoint.write_bytes(b'{"seed":"RESTORE-ME"}')
+    isolated_home = tmp_path / "home"
+
+    launcher.stage_profile(profile, isolated_home, run_save=checkpoint)
+
+    restored = (
+        isolated_home
+        / "Library/Application Support/SlayTheSpire2"
+        / "default/1/modded/profile1/saves/current_run.save"
+    )
+    assert restored.read_bytes() == b'{"seed":"RESTORE-ME"}'
+    assert not (
+        isolated_home / "Library/Application Support/SlayTheSpire2/steam"
+    ).exists()
+
+
 def test_stage_profile_accepts_exact_combat_solver_teacher_mods(
     tmp_path: Path,
 ) -> None:

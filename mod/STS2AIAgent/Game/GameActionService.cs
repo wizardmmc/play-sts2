@@ -3934,7 +3934,11 @@ internal static class GameActionService
         return field?.GetValue(console) as DevConsole;
     }
 
-    private static bool AreDebugActionsEnabled()
+    /// <summary>
+    /// 判断开发动作与隐藏 checkpoint 审计是否显式启用。
+    /// </summary>
+    /// <returns>环境变量明确为真值时返回 <c>true</c>。</returns>
+    internal static bool AreDebugActionsEnabled()
     {
         var raw = ReadEnvironmentVariable("STS2_ENABLE_DEBUG_ACTIONS");
         if (string.IsNullOrWhiteSpace(raw))

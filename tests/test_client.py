@@ -156,6 +156,49 @@ def test_state_returns_complete_mod_payload() -> None:
     assert state == state_data
 
 
+def test_checkpoint_audit_returns_hidden_state_without_rewriting_it() -> None:
+    """Checkpoint 审计端点应原样返回 RNG 与完整战斗牌堆。
+
+    Returns:
+        None: Python 客户端只校验对象外壳，不把隐藏审计混入普通状态。
+    """
+    audit = {
+        "screen": "COMBAT",
+        "run_id": "AUDIT-SEED",
+        "run_rng": {"Shuffle": {"counter": 4, "state0": 10}},
+        "players": [
+            {
+                "player_id": "1",
+                "piles": [{"pile_type": "Draw", "cards": ["ZAP", "DUALCAST"]}],
+            }
+        ],
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """返回与 Mod 隐藏审计端点一致的成功响应。
+
+        Args:
+            request (httpx.Request): 游戏客户端发出的请求。
+
+        Returns:
+            httpx.Response: 包含完整审计对象的响应。
+        """
+        assert request.method == "GET"
+        assert request.url.path == "/checkpoint/audit"
+        return httpx.Response(
+            200,
+            json={"ok": True, "request_id": "req_audit", "data": audit},
+        )
+
+    with GameClient(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        result = client.checkpoint_audit()
+
+    assert result == audit
+
+
 def test_solver_suggestion_posts_revision_and_reads_action() -> None:
     """只读教师端点应绑定当前 revision 并返回规范动作。
 

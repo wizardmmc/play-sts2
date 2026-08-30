@@ -60,6 +60,7 @@ def launch_game(
     profile: Path,
     mode: str,
     enable_debug_actions: bool = False,
+    run_save: Path | None = None,
 ) -> Iterator[RunningGame]:
     """启动并在离开上下文时清理一个隔离游戏实例。
 
@@ -70,6 +71,7 @@ def launch_game(
         profile (Path): 只包含安全设置、偏好与进度的存档模板目录。
         mode (str): ``headless`` 或 ``headed`` 启动模式。
         enable_debug_actions (bool): 是否开放场景重置使用的调试动作。
+        run_save (Path | None): 可选的原生 ``current_run.save`` checkpoint。
 
     Raises:
         FileNotFoundError: 游戏文件或隔离存档模板不存在。
@@ -87,7 +89,7 @@ def launch_game(
     if _port_is_open(port):
         raise RuntimeError(f"Agent Mod 端口已被占用: {port}")
 
-    enabled_mods = stage_profile(profile, home)
+    enabled_mods = stage_profile(profile, home, run_save=run_save)
     base_url = f"http://127.0.0.1:{port}"
     log_path = home / f"{mode}.log"
     environment = os.environ.copy()
@@ -135,12 +137,18 @@ def game_command(executable: Path, mode: str) -> list[str]:
     raise ValueError(f"未知的 STS2 启动模式: {mode}")
 
 
-def stage_profile(profile: Path, home: Path) -> frozenset[str]:
+def stage_profile(
+    profile: Path,
+    home: Path,
+    *,
+    run_save: Path | None = None,
+) -> frozenset[str]:
     """把受控存档模板写入隔离 HOME 的非 Steam 路径。
 
     Args:
         profile (Path): 包含设置、偏好和进度文件的模板目录。
         home (Path): 当前游戏独占且必须为空的 HOME 目录。
+        run_save (Path | None): 可选的原生整局存档 checkpoint。
 
     Raises:
         FileNotFoundError: 存档模板缺少必需文件。
@@ -157,16 +165,25 @@ def stage_profile(profile: Path, home: Path) -> frozenset[str]:
     for path in (settings, preferences, progress):
         if not path.is_file():
             raise FileNotFoundError(f"隔离存档模板缺少文件: {path}")
+    if run_save is not None and not run_save.is_file():
+        raise FileNotFoundError(f"找不到整局 checkpoint: {run_save}")
     if home.exists() and any(home.iterdir()):
         raise ValueError(f"隔离 HOME 必须为空: {home}")
 
     enabled_mods = _validate_profile(settings)
     data_root = home / _DATA_ROOT
-    targets = (
+    targets = [
         (settings, data_root / "default/1/settings.save"),
         (progress, data_root / "default/1/modded/profile1/saves/progress.save"),
         (preferences, data_root / "default/1/modded/profile1/saves/prefs.save"),
-    )
+    ]
+    if run_save is not None:
+        targets.append(
+            (
+                run_save,
+                data_root / "default/1/modded/profile1/saves/current_run.save",
+            )
+        )
     for source, target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
@@ -286,7 +303,7 @@ def _main_menu_is_ready(payload: object) -> bool:
     return (
         data.get("screen") == "MAIN_MENU"
         and isinstance(actions, list)
-        and "open_character_select" in actions
+        and bool({"open_character_select", "continue_run"}.intersection(actions))
     )
 
 
