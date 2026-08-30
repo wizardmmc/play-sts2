@@ -7,7 +7,11 @@ from typing import Any
 
 from .actions import action_signature, model_actions
 from .ownership import HarnessLayer, state_layer
-from .strategic_observation import render_map, render_strategic_context
+from .strategic_observation import (
+    format_strategic_card,
+    render_map,
+    render_strategic_context,
+)
 from .text import (
     card_display_name,
     clean_game_text,
@@ -109,6 +113,10 @@ def build_observation(state: Mapping[str, Any]) -> Observation:
     sections = []
     if layer is HarnessLayer.STRATEGIC:
         sections.append(render_strategic_context(state))
+        if screen != "MAP" and actions != ("proceed",):
+            map_state = state.get("map")
+            if isinstance(map_state, Mapping) and map_state.get("nodes"):
+                sections.append(render_map(state))
     sections.extend((renderer(state), _render_actions(state, actions)))
     return Observation(
         layer=layer,
@@ -281,7 +289,10 @@ def _render_reward(state: Mapping[str, Any]) -> str:
     cards = reward.get("card_options") or []
     if cards:
         lines.append("卡牌候选:")
-        lines.extend(_format_card(card) for card in cards)
+        lines.extend(
+            format_strategic_card(card, fallback_index=index)
+            for index, card in enumerate(cards)
+        )
     alternatives = reward.get("alternatives") or []
     if alternatives:
         lines.append("其他选项:")
@@ -346,14 +357,16 @@ def _render_shop(state: Mapping[str, Any]) -> str:
 
     removal = shop.get("card_removal")
     if isinstance(removal, Mapping):
-        parts = [f"删牌: {removal.get('price', 0)} 金币"]
+        states = [f"{removal.get('price', 0)}金币"]
         if removal.get("used"):
-            parts.append("已使用")
+            states.append("已使用")
         elif removal.get("available") is False:
-            parts.append("不可用")
+            states.append("不可用")
         elif removal.get("enough_gold") is False:
-            parts.append("金币不足")
-        lines.append(" | ".join(parts))
+            states.append("金币不足")
+        else:
+            states.append("可用")
+        lines.append(f"删牌〔{'；'.join(states)}〕")
     if shop_purchase_available(shop) is False:
         message = "当前没有任何可购买项目；重新打开库存不会刷新商品。"
         if "proceed" in (state.get("available_actions") or []):
@@ -430,7 +443,10 @@ def _render_bundle_selection(state: Mapping[str, Any]) -> str:
     lines = ["=== 选择卡牌包 ==="]
     for bundle in state.get("bundles") or []:
         lines.append(f"卡牌包 [{bundle.get('index')}]:")
-        lines.extend(_format_card(card) for card in bundle.get("cards") or [])
+        lines.extend(
+            format_strategic_card(card, fallback_index=index)
+            for index, card in enumerate(bundle.get("cards") or [])
+        )
     return "\n".join(lines)
 
 
@@ -508,7 +524,14 @@ def _render_cards_view(state: Mapping[str, Any]) -> str:
     prompt = _clean_text(cards_view.get("prompt"))
     if prompt:
         lines.append(prompt)
-    lines.extend(_format_card(card) for card in cards_view.get("cards") or [])
+    cards = cards_view.get("cards") or []
+    if state_layer(state) is HarnessLayer.STRATEGIC:
+        lines.extend(
+            format_strategic_card(card, fallback_index=index)
+            for index, card in enumerate(cards)
+        )
+    else:
+        lines.extend(_format_card(card) for card in cards)
     return "\n".join(lines)
 
 
@@ -558,9 +581,51 @@ def _render_card_selection(state: Mapping[str, Any]) -> str:
         str: 当前层所需上下文、页面提示及全部卡牌候选。
     """
     selection = state.get("selection") or {}
-    lines = ["=== 选择卡牌 ==="]
     prompt = _clean_text(selection.get("prompt"))
     cards = selection.get("cards") or []
+    if state_layer(state) is HarnessLayer.STRATEGIC:
+        lines = ["=== 选择卡牌 ==="]
+        card_rules = {
+            _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
+            for card in cards
+            if isinstance(card, Mapping)
+        }
+        is_upgrade = selection.get("kind") == "deck_upgrade_select"
+        has_upgrade_previews = (
+            is_upgrade
+            and bool(cards)
+            and all(isinstance(card.get("upgrade_preview"), Mapping) for card in cards)
+        )
+        if prompt and (is_upgrade or prompt not in card_rules):
+            if has_upgrade_previews:
+                prompt_suffix = "以下展示升级后效果："
+            elif is_upgrade:
+                prompt_suffix = "旧录像未保存升级预览，以下展示当前效果："
+            else:
+                prompt_suffix = ""
+            lines.append(f"{prompt}{prompt_suffix}")
+        elif is_upgrade:
+            lines.append(
+                "以下展示升级后效果："
+                if has_upgrade_previews
+                else "旧录像未保存升级预览，以下展示当前效果："
+            )
+        for index, card in enumerate(cards):
+            rendered_card = card
+            if has_upgrade_previews:
+                preview = card.get("upgrade_preview")
+                rendered_card = dict(preview)
+                rendered_card["index"] = card.get("index", index)
+                rendered_card["selected"] = card.get("selected") is True
+            lines.append(
+                format_strategic_card(
+                    rendered_card,
+                    fallback_index=index,
+                )
+            )
+        return "\n".join(lines)
+
+    lines = ["=== 选择卡牌 ==="]
     card_rules = {
         _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
         for card in cards
@@ -970,12 +1035,12 @@ def _format_shop_card(card: Mapping[str, Any]) -> str:
         str: 可用于 ``buy_card`` 选择的卡牌文本。
     """
     if card.get("is_stocked") is False and not _clean_text(card.get("name")):
-        return f"[{card.get('index')}] 已售出"
-    parts = [_format_card(card), f"{card.get('price', 0)} 金币"]
+        return f"- [{card.get('index')}] 已售出"
+    states = [f"{card.get('price', 0)}金币"]
     status = _purchase_status(card)
     if status:
-        parts.append(status)
-    return " | ".join(parts)
+        states.append(status)
+    return format_strategic_card(card, extra_states=states)
 
 
 def _format_shop_relic(relic: Mapping[str, Any]) -> str:
@@ -988,18 +1053,15 @@ def _format_shop_relic(relic: Mapping[str, Any]) -> str:
         str: 可用于 ``buy_relic`` 选择的遗物文本。
     """
     if relic.get("is_stocked") is False and not _clean_text(relic.get("name")):
-        return f"[{relic.get('index')}] 已售出"
-    parts = [
-        f"[{relic.get('index')}] {_clean_text(relic.get('name'))}",
-        f"{relic.get('price', 0)} 金币",
-    ]
-    description = _clean_text(relic.get("description"))
-    if description:
-        parts.append(description)
+        return f"- [{relic.get('index')}] 已售出"
+    states = [f"{relic.get('price', 0)}金币"]
     status = _purchase_status(relic)
     if status:
-        parts.append(status)
-    return " | ".join(parts)
+        states.append(status)
+    state_text = f"〔{'；'.join(states)}〕"
+    prefix = f"- [{relic.get('index')}] {_clean_text(relic.get('name'))}{state_text}"
+    description = _clean_text(relic.get("description"))
+    return f"{prefix}：{description}" if description else prefix
 
 
 def _format_shop_potion(potion: Mapping[str, Any]) -> str:
@@ -1012,18 +1074,15 @@ def _format_shop_potion(potion: Mapping[str, Any]) -> str:
         str: 可用于 ``buy_potion`` 选择的药水文本。
     """
     if potion.get("is_stocked") is False and not _clean_text(potion.get("name")):
-        return f"[{potion.get('index')}] 已售出"
-    parts = [
-        f"[{potion.get('index')}] {_clean_text(potion.get('name'))}",
-        f"{potion.get('price', 0)} 金币",
-    ]
-    description = _clean_text(potion.get("description"))
-    if description:
-        parts.append(description)
+        return f"- [{potion.get('index')}] 已售出"
+    states = [f"{potion.get('price', 0)}金币"]
     status = _purchase_status(potion)
     if status:
-        parts.append(status)
-    return " | ".join(parts)
+        states.append(status)
+    state_text = f"〔{'；'.join(states)}〕"
+    prefix = f"- [{potion.get('index')}] {_clean_text(potion.get('name'))}{state_text}"
+    description = _clean_text(potion.get("description"))
+    return f"{prefix}：{description}" if description else prefix
 
 
 def _purchase_status(item: Mapping[str, Any]) -> str:

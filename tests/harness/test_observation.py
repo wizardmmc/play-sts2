@@ -54,9 +54,8 @@ import pytest
             },
             (
                 "=== 商店（库存已打开）===",
-                "[0]眼部攻击(0费)",
-                "45 金币",
-                "删牌: 75 金币",
+                "- [0] 眼部攻击（0费未知）〔45金币〕",
+                "删牌〔75金币；可用〕",
             ),
         ),
         (
@@ -125,7 +124,7 @@ import pytest
                     "cards": [{"index": 0, "name": "防御", "energy_cost": 1}],
                 },
             },
-            ("=== 查看牌组 ===", "查看牌组", "[0]防御(1费)"),
+            ("=== 查看牌组 ===", "查看牌组", "- [0] 防御（1费未知）"),
         ),
         (
             {
@@ -314,7 +313,7 @@ def test_card_selection_hides_prompt_copied_from_first_card_rules() -> None:
     observation = harness.build_observation(state)
 
     assert observation.text.count(duplicated_rules) == 1
-    assert "[0]白噪声(1费)" in observation.text
+    assert "- [0] 白噪声（1费未知）" in observation.text
 
 
 def test_combat_card_selection_keeps_current_combat_context() -> None:
@@ -807,9 +806,9 @@ def test_strategic_observation_uses_human_act_and_preserves_resource_icons() -> 
     observation = harness.build_observation(state)
 
     assert "【第1幕】" in observation.text
-    assert "痊愈药水（获得2点能量。抽2张牌。）" in observation.text
-    assert "灯笼（在第一回合获得1点能量。）" in observation.text
-    assert "- 电击+ x1（0费技能）" in observation.text
+    assert "- [0] 痊愈药水：获得2点能量。抽2张牌。" in observation.text
+    assert "- [0] 灯笼：在第一回合获得1点能量。" in observation.text
+    assert "- [0] 电击+（0费技能）" in observation.text
     assert "【第0幕】" not in observation.text
     assert "电击++" not in observation.text
     assert "res://" not in observation.text
@@ -1281,18 +1280,16 @@ def test_build_observation_renders_complete_strategic_map_context() -> None:
     observation = harness.build_observation(state)
 
     assert "【第1幕】" in observation.text
-    assert (
-        "本幕Boss: 同族小队 (THE_KIN_BOSS) | 组成: 同族信徒、同族神官"
-        in observation.text
-    )
-    assert "难度3: 精英蜂拥（精英敌人出现更加频繁。）" in observation.text
+    assert "本幕Boss: 同族小队 | 组成: 同族信徒、同族神官" in observation.text
+    assert "难度3:\n- 精英蜂拥：精英敌人出现更加频繁。" in observation.text
     assert "【当前状态】" in observation.text
     assert "HP 60/75 | 金币110 | 第2层" in observation.text
-    assert "药水栏 1/2: [0] - [1] 火焰药水（造成20点伤害。）" in observation.text
-    assert "遗物: 破损核心×2（生成1个闪电充能球。）" in observation.text
-    assert "牌组 3 张（升级1）" in observation.text
-    assert "- 打击 x2（1费攻击）" in observation.text
-    assert "- 电击+ x1（0费技能）" in observation.text
+    assert "药水栏 1/2:\n- [0] 空\n- [1] 火焰药水：造成20点伤害。" in observation.text
+    assert "遗物 1 件:\n- [0] 破损核心×2：生成1个闪电充能球。" in observation.text
+    assert "牌组 3 张（升级1，附魔0）" in observation.text
+    assert "- [0] 打击（1费攻击）" in observation.text
+    assert "- [1] 打击（1费攻击）" in observation.text
+    assert "- [2] 电击+（0费技能）" in observation.text
     assert "位置: 行1 列3 | 已走: 古(行0)→敌(行1)" in observation.text
     assert "[0] 行2列2 敌 | 距Boss 2步 | 后续: 火 → 王" in observation.text
     assert "[1] 行2列4 ? | 距Boss 2步 | 后续: 火 → 王" in observation.text
@@ -1504,7 +1501,7 @@ def test_build_observation_hides_unverified_historical_card_counters() -> None:
             (
                 "=== 选择卡牌 ===",
                 "选择1张牌。",
-                "[0]球状闪电+(1费) 造成7点伤害。生成1个闪电充能球。",
+                "- [0] 球状闪电+（1费未知）：造成7点伤害。生成1个闪电充能球。",
             ),
             ("choose_reward_card", "skip_reward_cards"),
         ),
@@ -1550,11 +1547,12 @@ def test_build_observation_renders_strategic_decisions(
 
     assert observation.layer is harness.HarnessLayer.STRATEGIC
     assert observation.available_actions == expected_actions
-    assert "遗物: 破损核心" in observation.text
-    assert "药水栏 0/1: [0] -" in observation.text
-    assert "牌组 3 张（升级1）" in observation.text
-    assert "- 打击 x2（未知）" in observation.text
-    assert "- 电击+ x1（未知）" in observation.text
+    assert "遗物 1 件:\n- [0] 破损核心" in observation.text
+    assert "药水栏 0/1:\n- [0] 空" in observation.text
+    assert "牌组 3 张（升级1，附魔0）" in observation.text
+    assert "- [0] 打击（未知）" in observation.text
+    assert "- [1] 打击（未知）" in observation.text
+    assert "- [2] 电击+（未知）" in observation.text
     assert "[font_size" not in observation.text
     for snippet in expected_snippets:
         assert snippet in observation.text

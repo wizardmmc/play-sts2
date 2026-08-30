@@ -12,7 +12,7 @@ internal static class Router
 {
     private const string ServiceName = "sts2-ai-agent";
     private const string ProtocolVersion = "2026-08-30-v3";
-    private const string ModVersion = "0.8.0-rlsts2.47";
+    private const string ModVersion = "0.8.0-rlsts2.49";
     private const string LogPrefix = "[STS2AIAgent.Router]";
     private const int MaxEventStreamTimeoutMs = 86_400_000;
 

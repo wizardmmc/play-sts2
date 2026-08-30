@@ -3141,7 +3141,7 @@ internal static class GameStateService
                     : $"{option.reward_type}: {option.name} — {option.effect_description}",
                 claimable = option.claimable
             }).ToArray(),
-            cards = reward.card_options.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, null, null, false, false, GetPreferredCardRulesText(card.rules_text, card.resolved_rules_text), glossaryTerms)).ToArray(),
+            cards = reward.card_options.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, card.energy_cost, card.star_cost, card.costs_x, card.star_costs_x, GetPreferredCardRulesText(card.rules_text, card.resolved_rules_text), glossaryTerms)).ToArray(),
             alternatives = reward.alternatives.Select(option => new
             {
                 i = option.index,
@@ -3164,7 +3164,7 @@ internal static class GameStateService
             cards = bundle.cards.Select(card =>
                 BuildAgentChoiceCardPayload(
                     card.index, card.name, card.upgraded,
-                    card.energy_cost, null, false, false,
+                    card.energy_cost, card.star_cost, card.costs_x, card.star_costs_x,
                     GetPreferredCardRulesText(card.rules_text, card.resolved_rules_text),
                     glossaryTerms)).ToArray()
         }).ToArray();
@@ -4042,20 +4042,24 @@ internal static class GameStateService
 
     private static MapPayload? BuildMapPayload(IScreenContext? currentScreen, RunState? runState)
     {
-        if (!TryGetMapScreen(currentScreen, runState, out var mapScreen))
+        if (runState == null)
         {
             return null;
         }
 
-        var visibleNodes = FindDescendants<NMapPoint>(mapScreen!)
-            .Where(node => GodotObject.IsInstanceValid(node))
-            .GroupBy(node => node.Point.coord)
-            .ToDictionary(
-                group => group.Key,
-                group => group
-                    .OrderBy(node => node.GlobalPosition.Y)
-                    .ThenBy(node => node.GlobalPosition.X)
-                    .First());
+        var hasOpenMap = TryGetMapScreen(currentScreen, runState, out var mapScreen);
+
+        var visibleNodes = hasOpenMap
+            ? FindDescendants<NMapPoint>(mapScreen!)
+                .Where(node => GodotObject.IsInstanceValid(node))
+                .GroupBy(node => node.Point.coord)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group
+                        .OrderBy(node => node.GlobalPosition.Y)
+                        .ThenBy(node => node.GlobalPosition.X)
+                        .First())
+            : new Dictionary<MapCoord, NMapPoint>();
 
         var availableNodes = visibleNodes.Values
             .Where(node => node.IsEnabled)
@@ -4063,7 +4067,7 @@ internal static class GameStateService
             .ThenBy(node => node.Point.coord.col)
             .ToArray();
         var availableCoords = new HashSet<MapCoord>(availableNodes.Select(node => node.Point.coord));
-        var visitedCoords = new HashSet<MapCoord>(runState!.VisitedMapCoords);
+        var visitedCoords = new HashSet<MapCoord>(runState.VisitedMapCoords);
         var allMapPoints = GetAllMapPoints(runState.Map);
         var playerVotes = BuildMapPlayerVotePayloads(runState);
         var localVote = playerVotes.FirstOrDefault(vote => vote.is_local)?.coord;
@@ -4074,9 +4078,9 @@ internal static class GameStateService
 
         return new MapPayload
         {
-            current_node = BuildMapCoordPayload(runState!.CurrentMapCoord),
-            is_travel_enabled = mapScreen!.IsTravelEnabled,
-            is_traveling = mapScreen.IsTraveling,
+            current_node = BuildMapCoordPayload(runState.CurrentMapCoord),
+            is_travel_enabled = hasOpenMap && mapScreen!.IsTravelEnabled,
+            is_traveling = hasOpenMap && mapScreen!.IsTraveling,
             map_generation_count = RunManager.Instance.MapSelectionSynchronizer.MapGenerationCount,
             rows = runState.Map.GetRowCount(),
             cols = runState.Map.GetColumnCount(),
@@ -4124,19 +4128,21 @@ internal static class GameStateService
         var canConfirm = hasGridSelection ? gridSelection.CanConfirm
             : hasCombatHandSelection && combatHandSelection.CanConfirm;
 
+        var selectionKind = currentScreen switch
+        {
+            NDeckUpgradeSelectScreen => "deck_upgrade_select",
+            NDeckTransformSelectScreen => "deck_transform_select",
+            NDeckEnchantSelectScreen => "deck_enchant_select",
+            NChooseACardSelectionScreen => "choose_card_select",
+            _ when TryGetCombatHandSelection(currentScreen, out var hand) => hand!.CurrentMode == NPlayerHand.Mode.UpgradeSelect
+                ? "combat_hand_upgrade_select"
+                : "combat_hand_select",
+            _ => "deck_card_select"
+        };
+
         return new SelectionPayload
         {
-            kind = currentScreen switch
-            {
-                NDeckUpgradeSelectScreen => "deck_upgrade_select",
-                NDeckTransformSelectScreen => "deck_transform_select",
-                NDeckEnchantSelectScreen => "deck_enchant_select",
-                NChooseACardSelectionScreen => "choose_card_select",
-                _ when TryGetCombatHandSelection(currentScreen, out var hand) => hand!.CurrentMode == NPlayerHand.Mode.UpgradeSelect
-                    ? "combat_hand_upgrade_select"
-                    : "combat_hand_select",
-                _ => "deck_card_select"
-            },
+            kind = selectionKind,
             prompt = GetDeckSelectionPrompt(currentScreen) ?? string.Empty,
             min_select = minSelect,
             max_select = maxSelect,
@@ -4146,7 +4152,8 @@ internal static class GameStateService
             cards = cards.Select((holder, index) => BuildSelectionCardPayload(
                 holder.CardModel!, index,
                 hasGridSelection && gridSelection.SelectedCards.Contains(
-                    holder.CardModel!))).ToArray()
+                    holder.CardModel!),
+                selectionKind == "deck_upgrade_select")).ToArray()
         };
     }
 
@@ -5010,7 +5017,10 @@ internal static class GameStateService
             upgraded = card?.IsUpgraded ?? false,
             card_type = card?.Type.ToString() ?? string.Empty,
             rarity = card?.Rarity.ToString() ?? string.Empty,
+            costs_x = card?.EnergyCost.CostsX ?? false,
+            star_costs_x = card?.HasStarCostX ?? false,
             energy_cost = card?.EnergyCost.GetWithModifiers(CostModifiers.All) ?? 0,
+            star_cost = card != null ? Math.Max(0, card.GetStarCostWithModifiers()) : 0,
             rules_text = GetCardRulesText(card),
             resolved_rules_text = resolvedRulesText,
             dynamic_values = dynamicValues
@@ -5444,7 +5454,9 @@ internal static class GameStateService
             upgraded = card.IsUpgraded,
             upgrade_level = card.CurrentUpgradeLevel,
             enchantment_id = card.Enchantment?.Id.Entry,
+            enchantment_name = card.Enchantment?.Title.GetFormattedText(),
             enchantment_amount = card.Enchantment?.Amount,
+            enchantment_description = card.Enchantment?.DynamicDescription.GetFormattedText(),
             card_type = card.Type.ToString(),
             rarity = card.Rarity.ToString(),
             costs_x = card.EnergyCost.CostsX,
@@ -5457,8 +5469,16 @@ internal static class GameStateService
         };
     }
 
+    /// <summary>
+    /// 导出一个选牌候选，并按需附带独立副本的一次真实升级预览。
+    /// </summary>
+    /// <param name="card">当前候选卡牌实例。</param>
+    /// <param name="index">当前页面使用的稳定候选索引。</param>
+    /// <param name="selected">卡牌当前是否已被玩家选中。</param>
+    /// <param name="includeUpgradePreview">是否为升级选择导出升级后实例。</param>
+    /// <returns>当前候选及可选的升级后玩家可见事实。</returns>
     private static SelectionCardPayload BuildSelectionCardPayload(
-        CardModel card, int index, bool selected)
+        CardModel card, int index, bool selected, bool includeUpgradePreview = false)
     {
         var resolvedRulesText = GetResolvedCardRulesText(card);
         var dynamicValues = BuildCardDynamicValuePayloads(card);
@@ -5469,6 +5489,11 @@ internal static class GameStateService
             card_id = card.Id.Entry,
             name = card.Title,
             upgraded = card.IsUpgraded,
+            upgrade_level = card.CurrentUpgradeLevel,
+            enchantment_id = card.Enchantment?.Id.Entry,
+            enchantment_name = card.Enchantment?.Title.GetFormattedText(),
+            enchantment_amount = card.Enchantment?.Amount,
+            enchantment_description = card.Enchantment?.DynamicDescription.GetFormattedText(),
             card_type = card.Type.ToString(),
             rarity = card.Rarity.ToString(),
             costs_x = card.EnergyCost.CostsX,
@@ -5477,8 +5502,29 @@ internal static class GameStateService
             star_cost = Math.Max(0, card.GetStarCostWithModifiers()),
             rules_text = GetCardRulesText(card),
             resolved_rules_text = resolvedRulesText,
-            dynamic_values = dynamicValues
+            dynamic_values = dynamicValues,
+            upgrade_preview = includeUpgradePreview
+                ? BuildSelectionUpgradePreview(card, index)
+                : null
         };
+    }
+
+    /// <summary>
+    /// 在不修改原卡的前提下生成一次升级后的完整选牌载荷。
+    /// </summary>
+    /// <param name="card">游戏当前展示的可升级卡牌实例。</param>
+    /// <param name="index">升级前后共同使用的候选索引。</param>
+    /// <returns>升级后载荷；卡牌已经无法继续升级时返回空值。</returns>
+    private static SelectionCardPayload? BuildSelectionUpgradePreview(CardModel card, int index)
+    {
+        if (!card.IsUpgradable)
+        {
+            return null;
+        }
+
+        var upgraded = (CardModel)card.MutableClone();
+        upgraded.UpgradeInternal();
+        return BuildSelectionCardPayload(upgraded, index, selected: false);
     }
 
     private static bool IsProceedButtonUsable(NProceedButton? button)
@@ -7010,7 +7056,13 @@ internal sealed class RewardCardOptionPayload
 
     public string rarity { get; init; } = string.Empty;
 
+    public bool costs_x { get; init; }
+
+    public bool star_costs_x { get; init; }
+
     public int energy_cost { get; init; }
+
+    public int star_cost { get; init; }
 
     public string rules_text { get; init; } = string.Empty;
 
@@ -7049,7 +7101,11 @@ internal sealed class DeckCardPayload
 
     public string? enchantment_id { get; init; }
 
+    public string? enchantment_name { get; init; }
+
     public int? enchantment_amount { get; init; }
+
+    public string? enchantment_description { get; init; }
 
     public string card_type { get; init; } = string.Empty;
 
@@ -7082,6 +7138,16 @@ internal sealed class SelectionCardPayload
 
     public bool upgraded { get; init; }
 
+    public int upgrade_level { get; init; }
+
+    public string? enchantment_id { get; init; }
+
+    public string? enchantment_name { get; init; }
+
+    public int? enchantment_amount { get; init; }
+
+    public string? enchantment_description { get; init; }
+
     public string card_type { get; init; } = string.Empty;
 
     public string rarity { get; init; } = string.Empty;
@@ -7099,6 +7165,8 @@ internal sealed class SelectionCardPayload
     public string resolved_rules_text { get; init; } = string.Empty;
 
     public CardDynamicValuePayload[] dynamic_values { get; init; } = Array.Empty<CardDynamicValuePayload>();
+
+    public SelectionCardPayload? upgrade_preview { get; init; }
 }
 
 internal sealed class CardDynamicValuePayload

@@ -43,6 +43,32 @@ _BOSS_MEMBERS = {
     "QUEEN_BOSS": ("女王", "火炬头聚合体"),
     "THE_KIN_BOSS": ("同族信徒", "同族神官"),
 }
+_ENCHANTMENT_NAMES = {
+    "ADROIT": "伶俐",
+    "CLONE": "克隆",
+    "CORRUPTED": "腐化",
+    "DEPRECATED_ENCHANTMENT": "弃用",
+    "GLAM": "华彩",
+    "GOOPY": "黏糊",
+    "IMBUED": "注能",
+    "INKY": "墨影",
+    "INSTINCT": "本能",
+    "MOCK_FREE_ENCHANTMENT": "临时免费附魔",
+    "MOMENTUM": "动量",
+    "NIMBLE": "灵巧",
+    "PERFECT_FIT": "完美契合",
+    "ROYALLY_APPROVED": "王室认证",
+    "SHARP": "锋利",
+    "SLITHER": "蛇行",
+    "SLUMBERING_ESSENCE": "沉眠精华",
+    "SOULS_POWER": "灵魂之力",
+    "SOWN": "播种",
+    "SPIRAL": "涡旋",
+    "STEADY": "稳定",
+    "SWIFT": "迅速",
+    "TEZCATARAS_EMBER": "特兹卡塔拉的余烬",
+    "VIGOROUS": "活力",
+}
 
 NodeKey = tuple[int, int]
 
@@ -59,8 +85,7 @@ def render_strategic_context(state: Mapping[str, Any]) -> str:
     run = state.get("run") or {}
     act_id = human_act_number(run.get("act_id"))
     boss_id = _clean_text(run.get("boss_id")) or "未知"
-    boss_name = _BOSS_NAMES.get(boss_id)
-    boss = f"{boss_name} ({boss_id})" if boss_name else boss_id
+    boss = _BOSS_NAMES.get(boss_id, "未知")
     boss_members = _BOSS_MEMBERS.get(boss_id)
     if boss_members:
         boss += f" | 组成: {'、'.join(boss_members)}"
@@ -68,6 +93,7 @@ def render_strategic_context(state: Mapping[str, Any]) -> str:
     lines.extend(
         (
             "【当前状态】",
+            _render_character(run),
             (
                 f"HP {run.get('current_hp', 0)}/{run.get('max_hp', 0)} | "
                 f"金币{run.get('gold', 0)} | 第{run.get('floor', 0)}层"
@@ -81,6 +107,30 @@ def render_strategic_context(state: Mapping[str, Any]) -> str:
     if position:
         lines.append(position)
     return "\n".join(lines)
+
+
+def _render_character(run: Mapping[str, Any]) -> str:
+    """渲染角色身份、最大能量与玩家可见的角色容量。
+
+    Args:
+        run (Mapping[str, Any]): 当前整局状态。
+
+    Returns:
+        str: 不依赖角色 ID 特判的稳定资源摘要。
+    """
+    name = _clean_text(run.get("character_name")) or "未知角色"
+    parts = [f"角色: {name}"]
+    max_energy = run.get("max_energy")
+    if isinstance(max_energy, int) and not isinstance(max_energy, bool):
+        parts.append(f"最大能量{max_energy}")
+    base_orb_slots = run.get("base_orb_slots")
+    if (
+        isinstance(base_orb_slots, int)
+        and not isinstance(base_orb_slots, bool)
+        and base_orb_slots > 0
+    ):
+        parts.append(f"基础充能球槽{base_orb_slots}")
+    return " | ".join(parts)
 
 
 def render_map(state: Mapping[str, Any]) -> str:
@@ -102,29 +152,45 @@ def render_map(state: Mapping[str, Any]) -> str:
     lines = [
         "=== 地图 ===",
         f"当前位置: 行{current.get('row')} 列{current.get('col')}",
-        "可前往:",
     ]
-    for option in map_state.get("available_nodes") or []:
-        key = _node_key(option)
-        node = node_index.get(key, option)
-        distance = _distance_to_boss(key, node_index)
-        preview = _route_preview(key, node_index)
-        suffix = f" | 距Boss {distance}步" if distance is not None else ""
-        if preview:
-            suffix += f" | 后续: {preview}"
-        lines.append(
-            f"  [{option.get('index')}] 行{key[0]}列{key[1]} "
-            f"{_node_glyph(node)}{suffix}"
+    available_nodes = map_state.get("available_nodes") or []
+    route_starts: Sequence[Mapping[str, Any]] = available_nodes
+    if available_nodes:
+        lines.append("可前往:")
+        for option in available_nodes:
+            key = _node_key(option)
+            node = node_index.get(key, option)
+            distance = _distance_to_boss(key, node_index)
+            preview = _route_preview(key, node_index)
+            suffix = f" | 距Boss {distance}步" if distance is not None else ""
+            if preview:
+                suffix += f" | 后续: {preview}"
+            lines.append(
+                f"  [{option.get('index')}] 行{key[0]}列{key[1]} "
+                f"{_node_glyph(node)}{suffix}"
+            )
+    else:
+        current_node = node_index.get(_node_key(current))
+        route_starts = (
+            [node_index[key] for key in _child_keys(current_node) if key in node_index]
+            if current_node is not None
+            else []
         )
+        next_text = "、".join(
+            f"行{row}列{col} {_node_glyph(node)}"
+            for node in route_starts
+            for row, col in [_node_key(node)]
+        )
+        lines.append(f"当前节点后续: {next_text or '无'}")
 
-    reachable = _reachable_nodes(map_state.get("available_nodes") or [], node_index)
+    reachable = _reachable_nodes(route_starts, node_index)
     counts = Counter(_node_glyph(node) for node in reachable.values())
     count_text = " ".join(
         f"{glyph}×{counts[glyph]}"
         for glyph in sorted(counts, key=lambda item: _GLYPH_ORDER.get(item, 99))
     )
     start_row = min(
-        (_node_key(node)[0] for node in map_state.get("available_nodes") or []),
+        (_node_key(node)[0] for node in route_starts),
         default=_as_int(current.get("row")),
     )
     deepest = max((row - start_row for row, _col in reachable), default=0)
@@ -145,16 +211,19 @@ def _render_ascension(run: Mapping[str, Any]) -> str:
         str: 单行进阶摘要。
     """
     ascension = run.get("ascension", 0)
-    effects = []
+    lines = [f"难度{ascension}:"]
     for effect in run.get("ascension_effects") or []:
         if isinstance(effect, Mapping):
             name = _clean_text(effect.get("name"))
             description = _clean_text(effect.get("description"))
-            effects.append(f"{name}（{description}）" if description else name)
+            suffix = f"：{description}" if description else ""
+            if name:
+                lines.append(f"- {name}{suffix}")
         else:
-            effects.append(_clean_text(effect))
-    suffix = f": {'；'.join(item for item in effects if item)}" if effects else ""
-    return f"难度{ascension}{suffix}"
+            name = _clean_text(effect)
+            if name:
+                lines.append(f"- {name}")
+    return "\n".join(lines) if len(lines) > 1 else f"难度{ascension}"
 
 
 def _render_potions(potions: Sequence[Mapping[str, Any]]) -> str:
@@ -167,16 +236,19 @@ def _render_potions(potions: Sequence[Mapping[str, Any]]) -> str:
         str: 单行药水栏摘要。
     """
     occupied = sum(bool(potion.get("occupied")) for potion in potions)
-    values = []
+    if not potions:
+        return "药水栏 0/0: 无"
+    lines = [f"药水栏 {occupied}/{len(potions)}:"]
     for potion in potions:
         index = potion.get("index")
         if not potion.get("occupied"):
-            values.append(f"[{index}] -")
+            lines.append(f"- [{index}] 空")
             continue
         name = _clean_text(potion.get("name")) or "未知药水"
         description = _clean_text(potion.get("description"))
-        values.append(f"[{index}] {name}{f'（{description}）' if description else ''}")
-    return f"药水栏 {occupied}/{len(potions)}: {' '.join(values) if values else '无'}"
+        suffix = f"：{description}" if description else ""
+        lines.append(f"- [{index}] {name}{suffix}")
+    return "\n".join(lines)
 
 
 def _render_relics(relics: Sequence[Mapping[str, Any]]) -> str:
@@ -186,48 +258,138 @@ def _render_relics(relics: Sequence[Mapping[str, Any]]) -> str:
         relics (Sequence[Mapping[str, Any]]): 当前持有的遗物。
 
     Returns:
-        str: 单行遗物摘要。
+        str: 每件遗物一行的动态状态摘要。
     """
-    values = []
-    for relic in relics:
+    if not relics:
+        return "遗物: 无"
+    lines = [f"遗物 {len(relics)} 件:"]
+    for fallback_index, relic in enumerate(relics):
+        index = relic.get("index", fallback_index)
         name = _clean_text(relic.get("name")) or "未知遗物"
-        description = _clean_text(relic.get("description"))
         stack_count = relic.get("stack_count", relic.get("stack"))
         if isinstance(stack_count, int) and stack_count > 1:
             name = f"{name}×{stack_count}"
-        values.append(f"{name}（{description}）" if description else name)
-    return f"遗物: {', '.join(values) if values else '无'}"
+        states = []
+        counter_value = relic.get("counter_value")
+        if relic.get("show_counter") is True and isinstance(counter_value, int):
+            states.append(f"计数{counter_value}")
+        is_used_up = relic.get("is_used_up") is True
+        is_melted = relic.get("is_melted") is True
+        if is_used_up:
+            states.append("已耗尽")
+        if is_melted:
+            states.extend(("已熔毁", "效果失效"))
+        status = str(relic.get("status") or "")
+        if status == "Active":
+            states.append("已激活")
+        elif status == "Disabled":
+            states.append("当前禁用")
+        state_text = f"〔{'；'.join(states)}〕" if states else ""
+        description = (
+            "" if is_used_up or is_melted else _clean_text(relic.get("description"))
+        )
+        suffix = f"：{description}" if description else ""
+        lines.append(f"- [{index}] {name}{state_text}{suffix}")
+    return "\n".join(lines)
 
 
 def _render_deck(deck: Sequence[Mapping[str, Any]]) -> str:
-    """按名称、升级、费用和类型分组渲染牌组。
+    """按实例渲染牌组的升级、附魔和永久数值。
 
     Args:
         deck (Sequence[Mapping[str, Any]]): 当前牌组中的全部卡牌。
 
     Returns:
-        str: 多行牌组摘要。
+        str: 保留稳定实例索引的多行牌组摘要。
     """
-    groups: dict[tuple[str, str, str], int] = {}
-    for card in deck:
-        name = card_display_name(
-            card.get("name"),
-            upgraded=card.get("upgraded") is True,
-        )
-        cost = _card_cost(card)
-        card_type = _CARD_TYPE_NAMES.get(
-            str(card.get("card_type") or ""),
-            _clean_text(card.get("card_type")) or "未知",
-        )
-        key = (name, cost, card_type)
-        groups[key] = groups.get(key, 0) + 1
-    upgraded = sum(bool(card.get("upgraded")) for card in deck)
-    lines = [f"牌组 {len(deck)} 张（升级{upgraded}）"]
+    upgraded = sum(_upgrade_level(card) > 0 for card in deck)
+    enchanted = sum(bool(card.get("enchantment_id")) for card in deck)
+    lines = [f"牌组 {len(deck)} 张（升级{upgraded}，附魔{enchanted}）:"]
     lines.extend(
-        f"- {name} x{count}（{cost}{card_type}）"
-        for (name, cost, card_type), count in groups.items()
+        format_strategic_card(card, fallback_index=fallback_index)
+        for fallback_index, card in enumerate(deck)
     )
     return "\n".join(lines)
+
+
+def format_strategic_card(
+    card: Mapping[str, Any],
+    *,
+    fallback_index: int = 0,
+    extra_states: Sequence[str] = (),
+) -> str:
+    """按牌组样式渲染一个战略卡牌实例或候选项。
+
+    Args:
+        card (Mapping[str, Any]): Mod 返回的卡牌实例、候选或升级预览。
+        fallback_index (int): 状态缺少稳定索引时使用的列表位置。
+        extra_states (Sequence[str]): 商店价格、不可购买等附加玩家可见状态。
+
+    Returns:
+        str: 不含英文卡牌 ID 和重复升级等级的单行卡牌文本。
+    """
+    index = card.get("index", fallback_index)
+    name = card_display_name(
+        card.get("name"),
+        upgraded=card.get("upgraded") is True,
+    )
+    cost = _card_cost(card)
+    card_type = _CARD_TYPE_NAMES.get(
+        str(card.get("card_type") or ""),
+        _clean_text(card.get("card_type")) or "未知",
+    )
+    details = f"{cost}{card_type}" or "未知"
+    states = []
+    enchantment = _render_enchantment(card)
+    if enchantment:
+        states.append(enchantment)
+    if card.get("selected") is True:
+        states.append("已选择")
+    states.extend(item for item in extra_states if item)
+    state_text = f"〔{'；'.join(states)}〕" if states else ""
+    rules_text = _clean_text(card.get("resolved_rules_text") or card.get("rules_text"))
+    suffix = f"：{rules_text}" if rules_text else ""
+    return f"- [{index}] {name}（{details}）{state_text}{suffix}"
+
+
+def _upgrade_level(card: Mapping[str, Any]) -> int:
+    """读取卡牌实例的真实升级等级并兼容旧录制。
+
+    Args:
+        card (Mapping[str, Any]): 一张牌的结构化状态。
+
+    Returns:
+        int: 非负升级次数。
+    """
+    value = card.get("upgrade_level")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 1 if card.get("upgraded") is True else 0
+
+
+def _render_enchantment(card: Mapping[str, Any]) -> str:
+    """渲染卡牌实例附魔名称、层数和动态说明。
+
+    Args:
+        card (Mapping[str, Any]): 一张牌的结构化状态。
+
+    Returns:
+        str: ``附魔：中文名×层数``；未附魔时为空。
+    """
+    enchantment_id = _clean_text(card.get("enchantment_id"))
+    if not enchantment_id:
+        return ""
+    name = _clean_text(card.get("enchantment_name")) or _ENCHANTMENT_NAMES.get(
+        enchantment_id,
+        "未知附魔",
+    )
+    amount = card.get("enchantment_amount")
+    amount_text = (
+        f"×{amount}"
+        if isinstance(amount, int) and not isinstance(amount, bool) and amount > 1
+        else ""
+    )
+    return f"附魔：{name}{amount_text}"
 
 
 def _card_cost(card: Mapping[str, Any]) -> str:
@@ -237,12 +399,22 @@ def _card_cost(card: Mapping[str, Any]) -> str:
         card (Mapping[str, Any]): 一张牌的结构化状态。
 
     Returns:
-        str: ``1费``、``X费`` 或空字符串。
+        str: ``1费``、``X费+2星能`` 或空字符串。
     """
+    costs = []
     if card.get("costs_x"):
-        return "X费"
-    cost = card.get("energy_cost")
-    return f"{cost}费" if isinstance(cost, int) and cost >= 0 else ""
+        costs.append("X费")
+    else:
+        energy_cost = card.get("energy_cost")
+        if isinstance(energy_cost, int) and energy_cost >= 0:
+            costs.append(f"{energy_cost}费")
+    if card.get("star_costs_x"):
+        costs.append("X星能")
+    else:
+        star_cost = card.get("star_cost")
+        if isinstance(star_cost, int) and star_cost > 0:
+            costs.append(f"{star_cost}星能")
+    return "+".join(costs)
 
 
 def _render_position(map_state: Mapping[str, Any]) -> str:
