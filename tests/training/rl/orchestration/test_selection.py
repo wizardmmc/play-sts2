@@ -116,3 +116,86 @@ def test_cycle_timing_reports_tree_and_validation_budget() -> None:
         validation_seconds=40,
     )
     assert exceeded["within_budget"] is False
+
+
+def test_tree_selection_prefers_materialized_floor_ten_checkpoint_for_late_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """存在 floor>=10 入口时，晚期槽不能被稀有但很早的节点抢占。
+
+    Args:
+        tmp_path (Path): 候选和结果目录。
+        monkeypatch (pytest.MonkeyPatch): 替换原生 checkpoint 加载。
+
+    Returns:
+        None: 第二个全局 Tree 节点来自 floor 10 以后。
+    """
+    from play_sts2.training.rl.orchestration import select_tree_checkpoints, selection
+
+    def load_checkpoint(path: Path) -> SimpleNamespace:
+        """按路径构造不同的 checkpoint identity。
+
+        Args:
+            path (Path): 候选路径。
+
+        Returns:
+            SimpleNamespace: 最小 checkpoint。
+        """
+        return SimpleNamespace(
+            game_version="v0.111.0",
+            mod_version="mod-test",
+            entry=SimpleNamespace(
+                audit={"path": str(path)},
+                policy_text=str(path),
+                legal_actions=("a", "b"),
+            ),
+        )
+
+    monkeypatch.setattr(selection, "load_strategic_checkpoint", load_checkpoint)
+    source = tmp_path / "candidates.json"
+    source.write_text(
+        json.dumps(
+            {
+                "strategy_policy_version": "qwen3.5-s0",
+                "battle_policy_version": "qwen3.5-b0",
+                "checkpoints": [
+                    {
+                        "kind": "event",
+                        "floor": 1,
+                        "option_ids": ["a", "b"],
+                        "path": "a",
+                    },
+                    {"kind": "map", "floor": 1, "option_ids": ["a", "b"], "path": "b"},
+                    {
+                        "kind": "card_reward",
+                        "floor": 2,
+                        "option_ids": ["a", "b"],
+                        "path": "c",
+                    },
+                    {
+                        "kind": "card_reward",
+                        "floor": 3,
+                        "option_ids": ["a", "b"],
+                        "path": "d",
+                    },
+                    {
+                        "kind": "card_reward",
+                        "floor": 11,
+                        "option_ids": ["a", "b"],
+                        "path": "e",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = select_tree_checkpoints(
+        candidates_path=source,
+        output_path=tmp_path / "selected.json",
+        max_checkpoints=2,
+        selection_seed=1,
+    )
+
+    assert result["selected"][1]["floor"] >= 10

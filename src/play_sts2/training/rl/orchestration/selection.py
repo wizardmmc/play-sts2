@@ -100,7 +100,12 @@ def select_tree_checkpoints(
     early = rng.choice(early_candidates)
     selected = [early]
     if max_checkpoints == 2:
-        later = [
+        materialized_late = [
+            item
+            for item in candidates
+            if item["path"] != early["path"] and item["floor"] >= 10
+        ]
+        later = materialized_late or [
             item
             for item in candidates
             if item["path"] != early["path"] and item["floor"] > median_floor
