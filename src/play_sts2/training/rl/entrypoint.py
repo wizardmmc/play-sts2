@@ -23,7 +23,11 @@ from .dagger import (
     summarize_dagger_unsupported,
     write_dagger_labels,
 )
-from .io import load_battle_scenario, write_battle_rollout_group
+from .io import (
+    load_battle_scenario,
+    load_battle_snapshot,
+    write_battle_rollout_group,
+)
 
 
 def collect_battle_rollout_group(
@@ -41,6 +45,8 @@ def collect_battle_rollout_group(
     max_tokens: int = 128,
     temperature: float = 0.8,
     infrastructure_attempts: int = 3,
+    expected_snapshot_path: Path | None = None,
+    allow_zero_variance: bool = False,
 ) -> dict[str, object]:
     """从多个隔离游戏实例收集并写出一个严格同入口 group。
 
@@ -58,6 +64,9 @@ def collect_battle_rollout_group(
         max_tokens (int): 每个动作允许生成的最大 token 数。
         temperature (float): rollout 行为策略采样温度。
         infrastructure_attempts (int): 单条 arm 的基础设施总尝试数。
+        expected_snapshot_path (Path | None): 可选的 backbone 原始入口快照；提供时
+            第一条 reset 也必须逐字段一致。
+        allow_zero_variance (bool): 是否为独立 DAgger 保存零优势完整组。
 
     Raises:
         ValueError: 游戏 worker 数、地址或 vLLM 行为概率模式不满足契约。
@@ -82,6 +91,11 @@ def collect_battle_rollout_group(
     ):
         raise ValueError("战斗 RL 要求显式声明 xgrammar backend 与精确版本")
     scenario = load_battle_scenario(scenario_path)
+    expected_snapshot = (
+        load_battle_snapshot(expected_snapshot_path)
+        if expected_snapshot_path is not None
+        else None
+    )
     with ExitStack() as stack:
         workers: list[GameBattleRolloutWorker] = []
         healths: list[Health] = []
@@ -121,7 +135,12 @@ def collect_battle_rollout_group(
             workers,
             group_size=group_size,
             infrastructure_attempts=infrastructure_attempts,
-        ).collect(scenario, group_id=group_id)
+            allow_zero_variance=allow_zero_variance,
+        ).collect(
+            scenario,
+            group_id=group_id,
+            expected_snapshot=expected_snapshot,
+        )
     output = write_battle_rollout_group(
         output_path,
         group,

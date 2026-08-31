@@ -3,17 +3,20 @@
 import math
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import httpx
 
 from ....client import GameClient
 from ....harness import build_observation, format_action
+from ....inference import InferenceGenerationTruncated
 from ....runtime import (
     BattleOutcome,
+    BattlePolicyFailure,
     BattleResult,
     DecisionGenerationProfile,
+    DecisionRetriesExhausted,
     DecisionStep,
     RunRoute,
     classify_run_state,
@@ -85,6 +88,8 @@ class TreeSuffixResult:
         horizon_reason (str): 下一宏节点、胜利或死亡。
         continuation_return (StrategicReturn): 工程 suffix return。
         elapsed_seconds (float): 当前 suffix 游戏时间。
+        battle_candidates (tuple[Any, ...]): suffix 暴露的真实战斗入口。
+        failure_reason (str | None): 明确策略失败诊断。
     """
 
     strategy_policy_version: str
@@ -99,6 +104,8 @@ class TreeSuffixResult:
     horizon_reason: str
     continuation_return: StrategicReturn
     elapsed_seconds: float
+    battle_candidates: tuple[Any, ...] = ()
+    failure_reason: str | None = None
 
 
 class TreeSuffixRunner:
@@ -113,7 +120,9 @@ class TreeSuffixRunner:
         strategy_policy_version: str,
         battle_policy_version: str,
         max_macro_checkpoints: int,
+        continue_to_terminal: bool = False,
         max_model_steps: int = 100,
+        seed: str = "",
     ) -> None:
         """保存冻结 policy、游戏客户端和短 horizon。
 
@@ -124,7 +133,9 @@ class TreeSuffixRunner:
             strategy_policy_version (str): 期望战略模型身份。
             battle_policy_version (str): 期望战斗模型身份。
             max_macro_checkpoints (int): suffix 最多跨越的后继宏节点数。
+            continue_to_terminal (bool): 是否忽略短 horizon 并续玩到整局终局。
             max_model_steps (int): 战略模型动作上限。
+            seed (str): 当前原生 checkpoint 所属完整游戏种子。
 
         Raises:
             ValueError: policy 身份为空或预算不是正数。
@@ -145,7 +156,9 @@ class TreeSuffixRunner:
         self._strategy_policy_version = strategy_policy_version
         self._battle_policy_version = battle_policy_version
         self._max_macro_checkpoints = max_macro_checkpoints
+        self._continue_to_terminal = continue_to_terminal
         self._max_model_steps = max_model_steps
+        self._seed = seed
 
     def run(self, entry_state: Mapping[str, Any]) -> TreeSuffixResult:
         """执行一条宏 suffix 并只保留战略 policy token。
@@ -179,6 +192,8 @@ class TreeSuffixRunner:
         conflict_retries = 0
         died = False
         horizon_reason = "next_macro_checkpoint"
+        battle_candidates = []
+        failure_reason = None
 
         while True:
             screen = str(current.get("screen") or "")
@@ -215,8 +230,33 @@ class TreeSuffixRunner:
                     plan_open = False
                     macro_successor_text = _semantic_successor_text(model_state)
                 continuation_macro = None
-                result = self._battle.run(current)
+                candidate = None
+                if self._seed:
+                    from ..gigpo.scenario import extract_battle_candidate
+
+                    candidate = extract_battle_candidate(
+                        current,
+                        self._game.checkpoint_audit(),
+                        seed=self._seed,
+                        battle_index=len(battle_candidates),
+                    )
+                try:
+                    result = self._battle.run(current)
+                except BattlePolicyFailure as exc:
+                    if candidate is not None:
+                        battle_candidates.append(
+                            _failed_tree_battle_candidate(candidate, exc.failure_state)
+                        )
+                    current = dict(exc.failure_state)
+                    died = True
+                    horizon_reason = "model_error"
+                    failure_reason = str(exc)
+                    break
                 _validate_battle_policy(result, self._battle_policy_version)
+                if candidate is not None:
+                    battle_candidates.append(
+                        _complete_tree_battle_candidate(candidate, result)
+                    )
                 current = dict(result.final_state)
                 if pending_battle_is_boss and result.outcome is BattleOutcome.CLEARED:
                     bosses_cleared += 1
@@ -234,7 +274,10 @@ class TreeSuffixRunner:
                     macro_successor_text = _semantic_successor_text(model_state)
                     continuation_macro = checkpoint
                     macro_count += 1
-                    if macro_count >= self._max_macro_checkpoints:
+                    if (
+                        not self._continue_to_terminal
+                        and macro_count >= self._max_macro_checkpoints
+                    ):
                         break
             elif (
                 not plan_open
@@ -246,7 +289,10 @@ class TreeSuffixRunner:
             ):
                 continuation_macro = checkpoint
                 macro_count += 1
-                if macro_count >= self._max_macro_checkpoints:
+                if (
+                    not self._continue_to_terminal
+                    and macro_count >= self._max_macro_checkpoints
+                ):
                     break
             automatic = automatic_strategic_action(model_state)
             if automatic is not None:
@@ -255,9 +301,25 @@ class TreeSuffixRunner:
                 )
                 continue
             if len(strategic_steps) >= self._max_model_steps:
-                raise TreeRolloutError("Tree suffix 超过战略模型动作预算")
+                if plan_open:
+                    raise TreeRolloutError("Tree 入口计划超过战略模型动作预算")
+                died = True
+                horizon_reason = "model_error"
+                failure_reason = (
+                    f"Tree suffix 超过战略模型动作预算: {self._max_model_steps}"
+                )
+                break
             try:
                 decision = self._strategy.step(model_state)
+            except (DecisionRetriesExhausted, InferenceGenerationTruncated) as exc:
+                if plan_open:
+                    raise TreeRolloutError(
+                        "Tree 入口计划在首个可训练动作前策略失败"
+                    ) from exc
+                died = True
+                horizon_reason = "model_error"
+                failure_reason = str(exc)
+                break
             except httpx.HTTPStatusError as exc:
                 latest = stale_state_from_conflict(exc)
                 if latest is None and not is_action_window_conflict(exc):
@@ -333,6 +395,8 @@ class TreeSuffixRunner:
             horizon_reason=horizon_reason,
             continuation_return=reward,
             elapsed_seconds=elapsed,
+            battle_candidates=tuple(battle_candidates),
+            failure_reason=failure_reason,
         )
 
 
@@ -369,6 +433,62 @@ def build_tree_rollout_arm(
         horizon_reason=result.horizon_reason,
         continuation_return=result.continuation_return,
         elapsed_seconds=result.elapsed_seconds,
+        battle_candidates=result.battle_candidates,
+        failure_reason=result.failure_reason,
+    )
+
+
+def _complete_tree_battle_candidate(candidate: Any, result: BattleResult) -> Any:
+    """用 terminal suffix 的真实离场结果补齐战斗候选。
+
+    Args:
+        candidate (Any): 战斗第一回合构造的候选。
+        result (BattleResult): 冻结战斗 policy 的离场结果。
+
+    Raises:
+        ValueError: 离场生命值无法形成可见损失比例。
+
+    Returns:
+        Any: 带 outcome 与 HP 损失的候选数据类。
+    """
+    final_run = result.final_state.get("run")
+    if not isinstance(final_run, Mapping):
+        raise TypeError("Tree 战斗离场缺少 run 状态")
+    final_hp = final_run.get("current_hp")
+    entry_hp = candidate.scenario.current_hp
+    if (
+        isinstance(final_hp, bool)
+        or not isinstance(final_hp, int)
+        or entry_hp is None
+        or entry_hp <= 0
+    ):
+        raise ValueError("Tree 战斗离场生命值无效")
+    return replace(
+        candidate,
+        outcome=result.outcome.value,
+        hp_loss_ratio=max(0, entry_hp - max(0, final_hp)) / entry_hp,
+    )
+
+
+def _failed_tree_battle_candidate(candidate: Any, state: Mapping[str, Any]) -> Any:
+    """把战斗策略失败保留为场景选择中的困难入口。
+
+    Args:
+        candidate (Any): 战斗第一回合候选。
+        state (Mapping[str, Any]): 失败时最后可靠游戏状态。
+
+    Returns:
+        Any: outcome 为 ``model_error`` 的候选数据类。
+    """
+    run = state.get("run")
+    final_hp = run.get("current_hp") if isinstance(run, Mapping) else 0
+    if isinstance(final_hp, bool) or not isinstance(final_hp, int):
+        final_hp = 0
+    entry_hp = candidate.scenario.current_hp or 1
+    return replace(
+        candidate,
+        outcome="model_error",
+        hp_loss_ratio=max(0, entry_hp - max(0, final_hp)) / entry_hp,
     )
 
 

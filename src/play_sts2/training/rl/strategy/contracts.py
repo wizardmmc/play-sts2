@@ -90,6 +90,8 @@ class TreeRolloutArm:
         horizon_reason (str): 截断或终局原因。
         continuation_return (StrategicReturn): 当前 suffix return。
         elapsed_seconds (float): 当前 arm 游戏时间。
+        battle_candidates (tuple[Any, ...]): terminal suffix 暴露的战斗入口。
+        failure_reason (str | None): terminal policy 失败原因。
     """
 
     arm_index: int
@@ -108,6 +110,8 @@ class TreeRolloutArm:
     horizon_reason: str
     continuation_return: StrategicReturn
     elapsed_seconds: float
+    battle_candidates: tuple[Any, ...] = ()
+    failure_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

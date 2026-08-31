@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import tomllib
@@ -28,6 +29,7 @@ from .learner import (
     compare_battle_reward_schemes,
     constrained_completion_logprobs,
     load_grpo_training_group,
+    stratified_importance_weight,
 )
 from .reward import BattleRewardScheme
 
@@ -223,6 +225,16 @@ class FrozenAnchor:
             name: tensor.detach().cpu().clone() for name, tensor in self._state.items()
         }
 
+    def restore(self) -> None:
+        """把当前可训练参数永久恢复为训练开始时的父 adapter。
+
+        Returns:
+            None: 所有可训练参数恢复完成。
+        """
+        with _no_grad():
+            for name, parameter in self._parameters.items():
+                parameter.copy_(self._state[name])
+
 
 def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
     """从 TOML 加载战斗 GRPO 配置。
@@ -263,7 +275,7 @@ def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
             max_length=int(data["max_length"]),
             max_grad_norm=float(data.get("max_grad_norm", 1.0)),
             logits_chunk_size=int(data.get("logits_chunk_size", 128)),
-            checkpoint_groups=int(data.get("checkpoint_groups", 1)),
+            checkpoint_groups=int(data.get("checkpoint_groups", 50)),
             seed=int(data["seed"]),
             clip=float(data.get("clip", 0.2)),
             kl_beta=float(data.get("kl_beta", 0.02)),
@@ -296,8 +308,16 @@ def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
         and config.dagger_root is None
         or not config.policy_model.strip()
         or config.run_role not in {"engineering_smoke", "formal"}
+        or config.run_role == "formal"
+        and config.checkpoint_groups < 20
     ):
-        detail = ", ".join(invalid) if invalid else "组合字段"
+        detail = (
+            ", ".join(invalid)
+            if invalid
+            else "checkpoint_groups"
+            if config.run_role == "formal" and config.checkpoint_groups < 20
+            else "组合字段"
+        )
         raise GrpoTrainingError(f"战斗 GRPO 配置值无效: {detail}")
     return config
 
@@ -366,6 +386,7 @@ def train_battle_grpo(
             reward_scheme=config.reward_scheme,
             max_length=config.max_length,
             potion_cost=config.potion_cost,
+            allow_zero_variance=config.dagger_weight > 0,
         )
         for path in rollout_paths
     )
@@ -434,7 +455,16 @@ def train_battle_grpo(
     trace_path = run_path / "metrics.jsonl"
     trace_mode = "a" if exact_resume else "w"
     groups_this_call = 0
-    with trace_path.open(trace_mode, encoding="utf-8") as trace:
+    from .orchestration.telemetry import TensorboardMetricsWriter
+
+    purge_step = optimizer_steps + 1 if exact_resume else None
+    with (
+        trace_path.open(trace_mode, encoding="utf-8") as trace,
+        TensorboardMetricsWriter(
+            run_path / "tensorboard",
+            purge_step=purge_step,
+        ) as tensorboard,
+    ):
         while next_group_index < len(groups):
             if max_groups is not None and groups_this_call >= max_groups:
                 break
@@ -460,8 +490,7 @@ def train_battle_grpo(
                 "reward_mean": sum(group.rewards) / len(group.rewards),
                 **metric,
             }
-            trace.write(json.dumps(record, ensure_ascii=False) + "\n")
-            trace.flush()
+            _record_battle_training_metrics(trace, tensorboard, record)
             pausing = (
                 max_groups is not None
                 and groups_this_call >= max_groups
@@ -530,11 +559,37 @@ def _checkpoint_due(
         pausing (bool): 本次调用是否会在当前边界主动暂停。
 
     Returns:
-        bool: 周期命中、全部完成或主动暂停时为真。
+        bool: 非终局周期命中或主动暂停时为真；正常完成由最终 adapter 承担。
     """
-    return (
-        next_group_index % interval == 0 or next_group_index == total_groups or pausing
+    return pausing or (
+        next_group_index < total_groups and next_group_index % interval == 0
     )
+
+
+def _record_battle_training_metrics(
+    trace: Any,
+    tensorboard: Any,
+    record: Mapping[str, Any],
+) -> None:
+    """把同一 optimizer step 指标写入 JSONL 与 TensorBoard。
+
+    Args:
+        trace (Any): 当前 ``metrics.jsonl`` 文本 writer。
+        tensorboard (Any): ``TensorboardMetricsWriter`` 或测试替身。
+        record (Mapping[str, Any]): 带非负 ``step`` 的完整训练指标。
+
+    Raises:
+        GrpoTrainingError: step 不是非负整数。
+
+    Returns:
+        None: JSONL 已刷新，标量已加入 TensorBoard 队列。
+    """
+    step = record.get("step")
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise GrpoTrainingError("战斗训练指标缺少有效 optimizer step")
+    trace.write(json.dumps(dict(record), ensure_ascii=False) + "\n")
+    trace.flush()
+    tensorboard.write({"battle": dict(record)}, step=step)
 
 
 def write_battle_reward_comparison(
@@ -600,45 +655,13 @@ def optimize_grpo_group(
     if len(arms) != 8:
         raise GrpoTrainingError("战斗 GRPO learner 只接受严格八臂 group")
     optimizer.zero_grad(set_to_none=True)
-    totals = {"policy_loss": 0.0, "kl": 0.0, "ratio_mean": 0.0}
-    token_weight_total = 0.0
-    for arm in arms:
-        if arm.supervised_tokens <= 0:
-            raise GrpoTrainingError("GRPO arm 没有可训练 token")
-        for sequence in arm.sequences:
-            with anchor.applied(), torch.no_grad():
-                anchor_logprobs = _sequence_logprobs(
-                    model,
-                    sequence,
-                    device=device,
-                    logits_chunk_size=config.logits_chunk_size,
-                )
-            new_logprobs = _sequence_logprobs(
-                model,
-                sequence,
-                device=device,
-                logits_chunk_size=config.logits_chunk_size,
-            )
-            behavior = torch.tensor(
-                sequence.behavior_logprobs,
-                dtype=new_logprobs.dtype,
-                device=device,
-            )
-            total, policy, kl, ratio = _grpo_loss_tensors(
-                new_logprobs,
-                behavior,
-                anchor_logprobs,
-                advantage=sequence.advantage,
-                clip=config.clip,
-                kl_beta=config.kl_beta,
-            )
-            token_count = len(sequence.behavior_logprobs)
-            weight = token_count / arm.supervised_tokens / len(arms)
-            (total * weight).backward()
-            totals["policy_loss"] += float(policy.detach().cpu()) * weight
-            totals["kl"] += float(kl.detach().cpu()) * weight
-            totals["ratio_mean"] += float(ratio.detach().cpu()) * weight
-            token_weight_total += weight
+    totals = backward_grpo_group(
+        model,
+        anchor,
+        arms,
+        config=config,
+        device=device,
+    )
 
     dagger_loss_value = 0.0
     if config.dagger_weight > 0:
@@ -673,14 +696,243 @@ def optimize_grpo_group(
     optimizer.step()
     return (
         {
-            "policy_loss": totals["policy_loss"] / token_weight_total,
-            "kl": totals["kl"] / token_weight_total,
-            "ratio_mean": totals["ratio_mean"] / token_weight_total,
+            **totals,
             "dagger_loss": dagger_loss_value,
             "grad_norm": float(grad_norm.detach().cpu()),
         },
         dagger_cursor,
     )
+
+
+def backward_grpo_group(
+    model: Any,
+    anchor: FrozenAnchor,
+    arms: Sequence[Any],
+    *,
+    config: Any,
+    device: str,
+    loss_scale: float = 1.0,
+) -> dict[str, float]:
+    """累积一个 GRPO/Tree/GiGPO group 的梯度但不更新优化器。
+
+    普通 on-policy arm 的权重为一。分层 terminal Tree 的强制根动作先在冻结
+    父策略和完整 xgrammar 支持集上重算 ``pi_old``，PPO ratio 也以该概率为
+    behavior；整个入口计划的 policy loss 再乘 ``pi_old / q``。返回指标不乘
+    ``loss_scale``，便于比较不同数据源本身的数值。
+
+    Args:
+        model (Any): 当前可训练 policy。
+        anchor (FrozenAnchor): 冻结父 adapter。
+        arms (Sequence[Any]): 二条以上同组训练 arms。
+        config (Any): 提供 logits 分块、clip 与 KL 权重的配置。
+        device (str): 单个训练设备。
+        loss_scale (float): 当前数据源在组合战略 loss 中的固定系数。
+
+    Raises:
+        GrpoTrainingError: arm、重要性权重或 loss 数值无效。
+
+    Returns:
+        dict[str, float]: policy loss、KL、ratio 与重要性权重摘要。
+    """
+    import torch
+
+    if len(arms) < 2:
+        raise GrpoTrainingError("相对策略 group 至少需要两条 arms")
+    if not 0 < loss_scale <= 1:
+        raise GrpoTrainingError("组合 GRPO loss_scale 必须位于 (0, 1]")
+    anchor_values: list[list[Any]] = []
+    importance_weights: list[float] = []
+    for arm in arms:
+        if arm.supervised_tokens <= 0:
+            raise GrpoTrainingError("GRPO arm 没有可训练 token")
+        arm_anchors = []
+        for sequence in arm.sequences:
+            with anchor.applied(), torch.no_grad():
+                arm_anchors.append(
+                    _sequence_logprobs(
+                        model,
+                        sequence,
+                        device=device,
+                        logits_chunk_size=config.logits_chunk_size,
+                    )
+                )
+        anchor_values.append(arm_anchors)
+        if arm.recompute_root_probability:
+            try:
+                importance = stratified_importance_weight(
+                    arm_anchors[0],
+                    proposal_probability=arm.proposal_probability,
+                )
+            except ValueError as exc:
+                raise GrpoTrainingError("Tree importance correction 无效") from exc
+        else:
+            importance = 1.0
+        importance_weights.append(importance)
+    importance_total = sum(importance_weights)
+    if not math.isfinite(importance_total) or importance_total <= 0:
+        raise GrpoTrainingError("GRPO importance weight 总和无效")
+
+    totals = {"policy_loss": 0.0, "kl": 0.0, "ratio_mean": 0.0}
+    metric_weight_total = 0.0
+    estimator_weights = _importance_estimator_weights(importance_weights)
+    for arm_index, arm in enumerate(arms):
+        arm_weight = estimator_weights[arm_index]
+        for sequence_index, sequence in enumerate(arm.sequences):
+            anchor_logprobs = anchor_values[arm_index][sequence_index]
+            new_logprobs = _sequence_logprobs(
+                model,
+                sequence,
+                device=device,
+                logits_chunk_size=config.logits_chunk_size,
+            )
+            if arm.recompute_root_probability and sequence_index == 0:
+                behavior = anchor_logprobs
+            else:
+                behavior = torch.tensor(
+                    sequence.behavior_logprobs,
+                    dtype=new_logprobs.dtype,
+                    device=device,
+                )
+            total, policy, kl, ratio = _grpo_loss_tensors(
+                new_logprobs,
+                behavior,
+                anchor_logprobs,
+                advantage=sequence.advantage,
+                clip=config.clip,
+                kl_beta=config.kl_beta,
+            )
+            token_count = len(sequence.behavior_logprobs)
+            weight = arm_weight * token_count / arm.supervised_tokens
+            (total * weight * loss_scale).backward()
+            totals["policy_loss"] += float(policy.detach().cpu()) * weight
+            totals["kl"] += float(kl.detach().cpu()) * weight
+            totals["ratio_mean"] += float(ratio.detach().cpu()) * weight
+            metric_weight_total += weight
+    if metric_weight_total <= 0:
+        raise GrpoTrainingError("GRPO group 没有有效 loss 权重")
+    return {
+        "policy_loss": totals["policy_loss"] / metric_weight_total,
+        "kl": totals["kl"] / metric_weight_total,
+        "ratio_mean": totals["ratio_mean"] / metric_weight_total,
+        "importance_mean": sum(importance_weights) / len(importance_weights),
+        "importance_max": max(importance_weights),
+    }
+
+
+def evaluate_grpo_group(
+    model: Any,
+    anchor: FrozenAnchor,
+    arms: Sequence[Any],
+    *,
+    config: Any,
+    device: str,
+) -> dict[str, float]:
+    """在不反向传播时复算更新后 group 的 ratio 与父策略 KL。
+
+    Args:
+        model (Any): 已完成候选更新的 policy。
+        anchor (FrozenAnchor): 同一步冻结父 adapter。
+        arms (Sequence[Any]): 当前 GiGPO 或 Tree arms。
+        config (Any): 提供 logits 分块、clip 与 KL 配置。
+        device (str): 单个训练设备。
+
+    Raises:
+        GrpoTrainingError: group 或重要性权重无效。
+
+    Returns:
+        dict[str, float]: 候选参数上的 post-step KL、ratio 与权重摘要。
+    """
+    import torch
+
+    if len(arms) < 2:
+        raise GrpoTrainingError("相对策略 group 至少需要两条 arms")
+    anchor_values: list[list[Any]] = []
+    importance_weights = []
+    for arm in arms:
+        if arm.supervised_tokens <= 0:
+            raise GrpoTrainingError("GRPO arm 没有可训练 token")
+        arm_anchors = []
+        for sequence in arm.sequences:
+            with anchor.applied(), torch.no_grad():
+                arm_anchors.append(
+                    _sequence_logprobs(
+                        model,
+                        sequence,
+                        device=device,
+                        logits_chunk_size=config.logits_chunk_size,
+                    )
+                )
+        anchor_values.append(arm_anchors)
+        if arm.recompute_root_probability:
+            importance = stratified_importance_weight(
+                arm_anchors[0],
+                proposal_probability=arm.proposal_probability,
+            )
+        else:
+            importance = 1.0
+        importance_weights.append(importance)
+    estimator_weights = _importance_estimator_weights(importance_weights)
+    totals = {"kl": 0.0, "ratio_mean": 0.0}
+    metric_weight_total = 0.0
+    with torch.no_grad():
+        for arm_index, arm in enumerate(arms):
+            for sequence_index, sequence in enumerate(arm.sequences):
+                anchor_logprobs = anchor_values[arm_index][sequence_index]
+                new_logprobs = _sequence_logprobs(
+                    model,
+                    sequence,
+                    device=device,
+                    logits_chunk_size=config.logits_chunk_size,
+                )
+                if arm.recompute_root_probability and sequence_index == 0:
+                    behavior = anchor_logprobs
+                else:
+                    behavior = torch.tensor(
+                        sequence.behavior_logprobs,
+                        dtype=new_logprobs.dtype,
+                        device=device,
+                    )
+                _total, _policy, kl, ratio = _grpo_loss_tensors(
+                    new_logprobs,
+                    behavior,
+                    anchor_logprobs,
+                    advantage=sequence.advantage,
+                    clip=config.clip,
+                    kl_beta=config.kl_beta,
+                )
+                token_count = len(sequence.behavior_logprobs)
+                weight = (
+                    estimator_weights[arm_index] * token_count / arm.supervised_tokens
+                )
+                totals["kl"] += float(kl.detach().cpu()) * weight
+                totals["ratio_mean"] += float(ratio.detach().cpu()) * weight
+                metric_weight_total += weight
+    if metric_weight_total <= 0:
+        raise GrpoTrainingError("GRPO group 没有有效 post-step 指标权重")
+    return {
+        "kl": totals["kl"] / metric_weight_total,
+        "ratio_mean": totals["ratio_mean"] / metric_weight_total,
+        "importance_mean": sum(importance_weights) / len(importance_weights),
+        "importance_max": max(importance_weights),
+    }
+
+
+def _importance_estimator_weights(values: Sequence[float]) -> tuple[float, ...]:
+    """返回无偏 ``1/K`` importance estimator 的 branch 权重。
+
+    Args:
+        values (Sequence[float]): 每条 branch 的 ``pi_old/q``；普通 arm 为一。
+
+    Raises:
+        GrpoTrainingError: 数组为空或包含非有限正数。
+
+    Returns:
+        tuple[float, ...]: 每项为原始 importance 除以固定采样数 K，不按当前
+        样本权重和做 self-normalization。
+    """
+    if not values or any(not math.isfinite(value) or value <= 0 for value in values):
+        raise GrpoTrainingError("GRPO importance estimator 权重无效")
+    return tuple(value / len(values) for value in values)
 
 
 def _sequence_logprobs(

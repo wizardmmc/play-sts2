@@ -444,6 +444,37 @@ def test_build_battle_group_rejects_zero_reward_variance() -> None:
         )
 
 
+def test_build_battle_group_keeps_zero_variance_for_dagger() -> None:
+    """阶段七可显式保留零优势八臂组供独立 DAgger 监督。
+
+    Returns:
+        None: 同入口与动作探索仍成立，只有 GRPO advantages 全为零。
+    """
+    rl = importlib.import_module("play_sts2.training.rl")
+    snapshot = _snapshot()
+    rollouts = tuple(
+        _rollout(
+            rl,
+            arm_index=index,
+            snapshot=snapshot,
+            action="ACTION: end_turn" if index % 2 == 0 else "ACTION: play_card 0",
+            reward=1.0,
+        )
+        for index in range(8)
+    )
+
+    group = rl.build_battle_rollout_group(
+        group_id="dagger-only",
+        scenario=_scenario(),
+        rollouts=rollouts,
+        expected_size=8,
+        allow_zero_variance=True,
+    )
+
+    assert group.reward_std == 0.0
+    assert group.advantages == (0.0,) * 8
+
+
 def test_build_battle_group_rejects_missing_first_action_exploration() -> None:
     """回报有差异但首动作完全相同时不通过动作探索检查。
 

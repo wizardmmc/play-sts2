@@ -168,6 +168,7 @@ def build_battle_rollout_group(
     scenario: BattleScenario,
     rollouts: Sequence[BattleRollout],
     expected_size: int,
+    allow_zero_variance: bool = False,
 ) -> BattleRolloutGroup:
     """核对同入口、同策略和有效探索后计算组相对优势。
 
@@ -176,6 +177,7 @@ def build_battle_rollout_group(
         scenario (BattleScenario): 所有 arm 请求使用的场景。
         rollouts (Sequence[BattleRollout]): 已完成的候选 arms。
         expected_size (int): 本轮采样要求的精确 arm 数。
+        allow_zero_variance (bool): 是否为独立 DAgger 保留零优势完整组。
 
     Raises:
         BattleGroupRejected: arm 数、入口、策略、动作或奖励方差不满足准入。
@@ -216,9 +218,13 @@ def build_battle_rollout_group(
     rewards = tuple(rollout.reward.total for rollout in ordered)
     reward_mean = statistics.fmean(rewards)
     reward_std = statistics.pstdev(rewards)
-    if reward_std == 0.0:
+    if reward_std == 0.0 and not allow_zero_variance:
         raise BattleGroupRejected("战斗 group 的奖励没有方差")
-    advantages = tuple((reward - reward_mean) / reward_std for reward in rewards)
+    advantages = (
+        (0.0,) * len(rewards)
+        if reward_std == 0.0
+        else tuple((reward - reward_mean) / reward_std for reward in rewards)
+    )
     return BattleRolloutGroup(
         group_id=group_id,
         scenario=scenario,

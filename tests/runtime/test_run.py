@@ -52,6 +52,44 @@ class WholeRunProvider:
         return ModelReply(next(self._replies))
 
 
+class StrategicStateRecorder:
+    """只记录实际将进入战略决策的投影状态。"""
+
+    def __init__(self) -> None:
+        """初始化空观测列表。"""
+        self.states: list[dict[str, Any]] = []
+
+    def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
+        """记录战略状态并原样返回。
+
+        Args:
+            state (dict[str, Any]): 已应用奖励或商店可见性记忆的状态。
+
+        Returns:
+            dict[str, Any]: 不改变 Runtime 后续决策的原状态。
+        """
+        runtime = importlib.import_module("play_sts2.runtime")
+        if runtime.classify_run_state(state) is runtime.RunRoute.STRATEGIC:
+            self.states.append(state)
+        return state
+
+
+class DecisionRecorder:
+    """记录真正成功进入整局时间线的决策。"""
+
+    def __init__(self) -> None:
+        """初始化空决策列表。"""
+        self.decisions: list[Any] = []
+
+    def __call__(self, decision: Any) -> None:
+        """追加一个成功分层决策。
+
+        Args:
+            decision (Any): Runtime 创建的 ``RunDecision``。
+        """
+        self.decisions.append(decision)
+
+
 class WholeRunGame:
     """模拟地图、战斗、奖励、过渡地图和胜利终局。"""
 
@@ -439,6 +477,34 @@ def test_run_runner_completes_strategy_battle_and_transient_loop() -> None:
     )
 
 
+def test_run_runner_routes_strategy_and_battle_to_distinct_providers() -> None:
+    """整局 Runner 应按 Harness 层把请求路由到不同 policy。
+
+    Returns:
+        None: 三次战略请求和一次战斗请求分别落到对应 provider。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    strategy = WholeRunProvider(
+        [
+            "ACTION: choose_map_node 0",
+            "ACTION: claim_reward 0",
+            "ACTION: choose_map_node 0",
+        ]
+    )
+    battle = WholeRunProvider(["ACTION: end_turn"])
+
+    result = runtime.RunRunner(
+        WholeRunGame(),
+        strategy_provider=strategy,
+        battle_provider=battle,
+        state_timeout=1,
+    ).run(_map_state())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert len(strategy.requests) == 3
+    assert len(battle.requests) == 1
+
+
 def test_run_runner_can_constrain_battle_and_strategy_actions() -> None:
     """整局约束开关同时覆盖战略页和战斗页。
 
@@ -505,6 +571,34 @@ def test_run_runner_retries_temporary_strategic_action_conflict() -> None:
     assert len(provider.requests) == 2
 
 
+def test_run_runner_keeps_conflict_retry_when_model_retries_are_disabled() -> None:
+    """训练 rollout 禁止模型重试时仍应有限恢复动作窗口竞争。
+
+    Returns:
+        None: ``max_retries=0`` 不会误伤独立的 conflict retry 预算。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ConflictingStrategicGame()
+    provider = WholeRunProvider(
+        ["ACTION: choose_map_node 0", "ACTION: choose_map_node 0"]
+    )
+    recorder = DecisionRecorder()
+
+    result = runtime.RunRunner(
+        game,
+        provider,
+        max_retries=0,
+        max_conflict_retries=3,
+        state_timeout=1,
+        decision_hook=recorder,
+    ).run(_map_state())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert game.action_calls == 2
+    assert len(provider.requests) == 2
+    assert len(recorder.decisions) == 1
+
+
 def test_run_runner_reports_terminal_loss_without_model_call() -> None:
     """已经失败的终局直接返回死亡，不再请求模型动作。
 
@@ -543,6 +637,31 @@ def test_run_runner_fails_fast_on_unknown_screen() -> None:
         runtime.RunRunner(StaticGame(state), provider).run(state)
 
     assert provider.requests == []
+
+
+def test_run_runner_can_preserve_policy_failure_as_partial_result() -> None:
+    """RL 完整链路应把明确非法输出留在验证与 reward 分母。
+
+    Returns:
+        None: 失败时的楼层、已完成计数和原因不会被清零或当基础设施异常。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    state = _map_state(state_revision=7)
+    provider = WholeRunProvider(["不是合法动作"])
+
+    result = runtime.RunRunner(
+        StaticGame(state),
+        provider,
+        max_retries=0,
+        capture_policy_failures=True,
+    ).run(state)
+
+    assert result.outcome is runtime.RunOutcome.DIED
+    assert result.model_error is True
+    assert result.final_state["run"]["gold"] == state["run"]["gold"]
+    assert result.bosses_cleared == 0
+    assert result.battle_count == 0
+    assert "重试耗尽" in str(result.failure_reason)
 
 
 def test_run_runner_times_out_while_state_stays_transient() -> None:
@@ -723,8 +842,13 @@ def test_run_runner_hides_skipped_card_reward_until_leaving_reward_screen() -> N
             "ACTION: choose_reward_card 0",
         ]
     )
+    recorder = StrategicStateRecorder()
 
-    result = runtime.RunRunner(game, provider).run(_reward_with_card_and_gold())
+    result = runtime.RunRunner(
+        game,
+        provider,
+        stable_state_hook=recorder,
+    ).run(_reward_with_card_and_gold())
 
     assert result.outcome is runtime.RunOutcome.VICTORY
     assert game.actions == [
@@ -747,6 +871,14 @@ def test_run_runner_hides_skipped_card_reward_until_leaving_reward_screen() -> N
     next_reward = provider.requests[6][-1].content
     assert "将一张牌添加到你的牌组" in next_reward
     assert "claim_reward" in next_reward
+    strategic_decisions = [
+        decision for decision in result.decisions if decision.layer.value == "strategic"
+    ]
+    assert len(recorder.states) == len(strategic_decisions)
+    assert all(
+        item["reward_type"] != "Card"
+        for item in recorder.states[2]["reward"]["rewards"]
+    )
 
 
 def _completed(state: dict[str, Any]) -> dict[str, Any]:

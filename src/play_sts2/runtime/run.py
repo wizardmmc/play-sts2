@@ -4,15 +4,21 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
 from ..client import GameClient
 from ..harness import HarnessLayer, shop_purchase_available
-from ..inference import DecisionProvider
-from .battle import BattleRunner
+from ..inference import DecisionProvider, InferenceGenerationTruncated
+from .battle import (
+    BattleOutcome,
+    BattlePolicyFailure,
+    BattleResult,
+    BattleRunner,
+)
 from .decision import (
+    DecisionRetriesExhausted,
     DecisionStep,
     is_action_window_conflict,
     stale_state_from_conflict,
@@ -37,6 +43,33 @@ class RunOutcome(str, Enum):
     DIED = "died"
 
 
+class StableStateHook(Protocol):
+    """声明整局采样器在稳定状态路由前使用的可选钩子。"""
+
+    def __call__(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
+        """观察稳定状态，并可在原生存退后返回等价恢复状态。
+
+        Args:
+            state (Mapping[str, Any]): 当前稳定游戏状态。
+
+        Returns:
+            Mapping[str, Any]: 继续交给 Runner 的同一决策状态。
+        """
+        ...
+
+
+class RunDecisionHook(Protocol):
+    """声明整局采样器在动作成功后使用的可选观察钩子。"""
+
+    def __call__(self, decision: "RunDecision") -> None:
+        """观察一个已经成功执行并进入时间线的决策。
+
+        Args:
+            decision (RunDecision): 分层动作与完整 Runtime 步骤。
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class RunDecision:
     """表示整局时间线中的一次分层模型决策。
@@ -59,12 +92,20 @@ class RunResult:
         decisions (tuple[RunDecision, ...]): 按真实执行顺序保存的全部决策。
         battle_count (int): 本局进入并完成的战斗数量。
         final_state (dict[str, Any]): Mod 返回的终局状态。
+        bosses_cleared (int): 本局实际完成的 Boss 战数量。
+        battle_results (tuple[BattleResult, ...]): 按入口顺序保存的完整战斗结果。
+        model_error (bool): 是否由明确的策略失败提前结束。
+        failure_reason (str | None): 可读的策略失败原因。
     """
 
     outcome: RunOutcome
     decisions: tuple[RunDecision, ...]
     battle_count: int
     final_state: dict[str, Any]
+    bosses_cleared: int
+    battle_results: tuple[BattleResult, ...]
+    model_error: bool = False
+    failure_reason: str | None = None
 
 
 class RunRunner:
@@ -73,35 +114,62 @@ class RunRunner:
     def __init__(
         self,
         game: GameClient,
-        provider: DecisionProvider,
+        provider: DecisionProvider | None = None,
         *,
+        strategy_provider: DecisionProvider | None = None,
+        battle_provider: DecisionProvider | None = None,
+        stable_state_hook: StableStateHook | None = None,
+        decision_hook: RunDecisionHook | None = None,
         max_tokens: int = 128,
         temperature: float = 0.0,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        max_conflict_retries: int = _DEFAULT_MAX_RETRIES,
         max_strategic_steps: int = _DEFAULT_MAX_STRATEGIC_STEPS,
         state_timeout: float = _DEFAULT_STATE_TIMEOUT,
         constrain_actions: bool = False,
+        capture_policy_failures: bool = False,
     ) -> None:
         """初始化不拥有游戏与模型连接生命周期的整局 Runner。
 
         Args:
             game (GameClient): 已连接到当前游戏实例的客户端。
-            provider (DecisionProvider): 已连接到推理服务的模型提供者。
+            provider (DecisionProvider | None): 战略与战斗共用的模型提供者。
+            strategy_provider (DecisionProvider | None): 可选的独立战略模型提供者。
+            battle_provider (DecisionProvider | None): 可选的独立战斗模型提供者。
+            stable_state_hook (StableStateHook | None): 可选的本地状态观察与
+                checkpoint 捕获钩子；返回状态仍必须可由 Runtime 路由。
+            decision_hook (RunDecisionHook | None): 可选的成功决策观察钩子。
             max_tokens (int): 每次模型回复允许生成的最大 token 数。
             temperature (float): 每次模型回复使用的采样温度。
             max_retries (int): 每个动作首次失败后允许的重试次数。
+            max_conflict_retries (int): 瞬时动作窗口竞争的有限重试次数。
             max_strategic_steps (int): 单局允许执行的最大战略动作数。
             state_timeout (float): 单次等待可处理状态的最长秒数。
             constrain_actions (bool): 是否把每个战斗与战略状态的完整合法动作行
                 交给推理服务约束。
+            capture_policy_failures (bool): 是否把明确的非法输出、截断或动作上限
+                作为带部分计数的失败结果返回；普通游玩保持抛出异常。
 
         Returns:
             None: 此方法只组合整局闭环需要的依赖与边界。
+
+        Raises:
+            ValueError: 没有提供共用 provider，也没有同时提供两层 provider。
         """
+        if provider is not None and (
+            strategy_provider is not None or battle_provider is not None
+        ):
+            raise ValueError("共用 provider 不能与分层 provider 同时提供")
+        if provider is None and (strategy_provider is None or battle_provider is None):
+            raise ValueError("必须提供共用 provider 或完整的战略/战斗 provider")
+        strategic_policy = strategy_provider or provider
+        battle_policy = battle_provider or provider
+        if strategic_policy is None or battle_policy is None:
+            raise ValueError("整局 provider 配置不完整")
         self._game = game
         self._battle = BattleRunner(
             game,
-            provider,
+            battle_policy,
             max_tokens=max_tokens,
             temperature=temperature,
             max_retries=max_retries,
@@ -110,15 +178,19 @@ class RunRunner:
         )
         self._strategic = StrategicRunner(
             game,
-            provider,
+            strategic_policy,
             max_tokens=max_tokens,
             temperature=temperature,
             max_retries=max_retries,
             constrain_actions=constrain_actions,
         )
         self._max_retries = max_retries
+        self._max_conflict_retries = max_conflict_retries
         self._max_strategic_steps = max_strategic_steps
         self._state_timeout = state_timeout
+        self._stable_state_hook = stable_state_hook
+        self._decision_hook = decision_hook
+        self._capture_policy_failures = capture_policy_failures
 
     def run(self, initial_state: Mapping[str, Any] | None = None) -> RunResult:
         """从当前新局状态开始，持续执行模型决策直到终局。
@@ -139,6 +211,9 @@ class RunRunner:
         state = dict(initial_state) if initial_state is not None else self._game.state()
         decisions: list[RunDecision] = []
         battle_count = 0
+        battle_results = []
+        bosses_cleared = 0
+        pending_battle_is_boss = False
         strategic_steps = 0
         conflict_retries = 0
         card_reward_skipped = False
@@ -156,6 +231,17 @@ class RunRunner:
                 shop_inventory_closed=shop_inventory_closed,
             )
             route = classify_run_state(model_state)
+            if route is not RunRoute.TRANSIENT and self._stable_state_hook is not None:
+                observed = self._stable_state_hook(model_state)
+                if not isinstance(observed, Mapping):
+                    raise RunError("稳定状态钩子必须返回游戏状态对象")
+                state = dict(observed)
+                model_state = project_strategic_model_state(
+                    state,
+                    card_reward_skipped=card_reward_skipped,
+                    shop_inventory_closed=shop_inventory_closed,
+                )
+                route = classify_run_state(model_state)
             if route is RunRoute.TRANSIENT:
                 state = self._wait_for_route(
                     state,
@@ -170,28 +256,78 @@ class RunRunner:
                     decisions=tuple(decisions),
                     battle_count=battle_count,
                     final_state=state,
+                    bosses_cleared=bosses_cleared,
+                    battle_results=tuple(battle_results),
                 )
             if route is RunRoute.BATTLE:
-                battle = self._battle.run(state)
+                try:
+                    battle = self._battle.run(state)
+                except BattlePolicyFailure as exc:
+                    if not self._capture_policy_failures:
+                        raise
+                    failed_decisions = tuple(
+                        RunDecision(HarnessLayer.BATTLE, step) for step in exc.steps
+                    )
+                    decisions.extend(failed_decisions)
+                    if self._decision_hook is not None:
+                        for decision in failed_decisions:
+                            self._decision_hook(decision)
+                    return _policy_failure_result(
+                        state=exc.failure_state,
+                        decisions=decisions,
+                        battle_count=battle_count,
+                        bosses_cleared=bosses_cleared,
+                        battle_results=battle_results,
+                        reason=str(exc),
+                    )
                 battle_count += 1
-                decisions.extend(
+                battle_results.append(battle)
+                if pending_battle_is_boss and battle.outcome is BattleOutcome.CLEARED:
+                    bosses_cleared += 1
+                pending_battle_is_boss = False
+                battle_decisions = tuple(
                     RunDecision(HarnessLayer.BATTLE, step) for step in battle.steps
                 )
+                decisions.extend(battle_decisions)
+                if self._decision_hook is not None:
+                    for decision in battle_decisions:
+                        self._decision_hook(decision)
                 state = battle.final_state
                 continue
 
             if strategic_steps >= self._max_strategic_steps:
-                raise RunError(f"战略动作数超过上限: {self._max_strategic_steps}")
+                reason = f"战略动作数超过上限: {self._max_strategic_steps}"
+                if self._capture_policy_failures:
+                    return _policy_failure_result(
+                        state=state,
+                        decisions=decisions,
+                        battle_count=battle_count,
+                        bosses_cleared=bosses_cleared,
+                        battle_results=battle_results,
+                        reason=reason,
+                    )
+                raise RunError(reason)
             try:
                 step = self._strategic.step(
                     model_state,
                     notice=_shop_exit_notice(model_state),
                 )
+            except (DecisionRetriesExhausted, InferenceGenerationTruncated) as exc:
+                if not self._capture_policy_failures:
+                    raise
+                return _policy_failure_result(
+                    state=state,
+                    decisions=decisions,
+                    battle_count=battle_count,
+                    bosses_cleared=bosses_cleared,
+                    battle_results=battle_results,
+                    reason=str(exc),
+                )
             except httpx.HTTPStatusError as exc:
                 latest = stale_state_from_conflict(exc)
                 if latest is None and not is_action_window_conflict(exc):
                     raise
-                if conflict_retries >= self._max_retries:
+                if conflict_retries >= self._max_conflict_retries:
                     raise
                 conflict_retries += 1
                 state = self._wait_for_route(
@@ -201,7 +337,13 @@ class RunRunner:
                 continue
             conflict_retries = 0
             strategic_steps += 1
-            decisions.append(RunDecision(HarnessLayer.STRATEGIC, step))
+            run_decision = RunDecision(HarnessLayer.STRATEGIC, step)
+            decisions.append(run_decision)
+            if self._decision_hook is not None:
+                self._decision_hook(run_decision)
+            pending_battle_is_boss = pending_battle_is_boss or _chosen_map_node_is_boss(
+                step
+            )
             next_state = self._state_after(
                 step.action_result,
                 after_revision=state_revision(state),
@@ -303,6 +445,40 @@ def _terminal_outcome(state: Mapping[str, Any]) -> RunOutcome:
     game_over = state.get("game_over") or {}
     victory = game_over.get("is_victory", game_over.get("victory"))
     return RunOutcome.VICTORY if victory is True else RunOutcome.DIED
+
+
+def _policy_failure_result(
+    *,
+    state: Mapping[str, Any],
+    decisions: list[RunDecision],
+    battle_count: int,
+    bosses_cleared: int,
+    battle_results: list[BattleResult],
+    reason: str,
+) -> RunResult:
+    """把明确策略失败保留为含部分进度的最差整局结果。
+
+    Args:
+        state (Mapping[str, Any]): 策略失败时的最后可靠状态。
+        decisions (list[RunDecision]): 已成功执行的全部分层动作。
+        battle_count (int): 已完整离开的战斗数。
+        bosses_cleared (int): 已完成 Boss 战数。
+        battle_results (list[BattleResult]): 已完成战斗结果。
+        reason (str): 非隐藏的失败诊断。
+
+    Returns:
+        RunResult: ``DIED`` 且 ``model_error`` 为真的部分结果。
+    """
+    return RunResult(
+        outcome=RunOutcome.DIED,
+        decisions=tuple(decisions),
+        battle_count=battle_count,
+        final_state=dict(state),
+        bosses_cleared=bosses_cleared,
+        battle_results=tuple(battle_results),
+        model_error=True,
+        failure_reason=reason,
+    )
 
 
 def _hide_skipped_card_rewards(
@@ -428,3 +604,26 @@ def _shop_exit_notice(state: Mapping[str, Any]) -> str | None:
         "决策提示：当前没有任何可购买项目，关闭并重新打开库存也不会刷新商品。"
         "立刻输出 `ACTION: proceed` 离开商店。"
     )
+
+
+def _chosen_map_node_is_boss(step: DecisionStep) -> bool:
+    """判断战略动作是否选择玩家可见的 Boss 地图节点。
+
+    Args:
+        step (DecisionStep): 已执行的战略决策。
+
+    Returns:
+        bool: 所选节点明确标记为 Boss 时返回真。
+    """
+    if step.action.name != "choose_map_node":
+        return False
+    selected = step.action.parameters.get("option_index")
+    map_state = step.before_state.get("map")
+    nodes = map_state.get("available_nodes") if isinstance(map_state, Mapping) else None
+    for fallback_index, node in enumerate(nodes or []):
+        if not isinstance(node, Mapping):
+            continue
+        index = node.get("index", fallback_index)
+        if index == selected:
+            return node.get("is_boss") is True or node.get("node_type") == "Boss"
+    return False

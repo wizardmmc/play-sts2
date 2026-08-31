@@ -187,6 +187,7 @@ class BattleGroupCollector:
         *,
         group_size: int = 8,
         infrastructure_attempts: int = 3,
+        allow_zero_variance: bool = False,
     ) -> None:
         """保存 worker 池与基础设施重采边界。
 
@@ -194,6 +195,7 @@ class BattleGroupCollector:
             workers (Sequence[BattleRolloutWorker]): 彼此隔离的本地游戏 workers。
             group_size (int): 每个同状态 group 的精确 arm 数。
             infrastructure_attempts (int): 单条 arm 遭遇基础设施故障时的总尝试数。
+            allow_zero_variance (bool): 是否为独立 DAgger 保留零优势完整组。
 
         Raises:
             ValueError: worker 为空、group 小于 2 或尝试数小于 1。
@@ -210,18 +212,21 @@ class BattleGroupCollector:
             raise ValueError("基础设施总尝试数不能小于 1")
         self._group_size = group_size
         self._infrastructure_attempts = infrastructure_attempts
+        self._allow_zero_variance = allow_zero_variance
 
     def collect(
         self,
         scenario: BattleScenario,
         *,
         group_id: str,
+        expected_snapshot: BattleSnapshot | None = None,
     ) -> BattleRolloutGroup:
         """先建立入口基准，再并行收集其余 arms 并执行 group 准入。
 
         Args:
             scenario (BattleScenario): 待重复构造的确定性战斗。
             group_id (str): 当前采样组的稳定标识。
+            expected_snapshot (BattleSnapshot | None): 可选的完整游戏原始战斗入口。
 
         Raises:
             RolloutInfrastructureError: 某条 arm 重采后仍无法完成。
@@ -235,7 +240,7 @@ class BattleGroupCollector:
             self._workers[0],
             scenario,
             arm_index=0,
-            expected_snapshot=None,
+            expected_snapshot=expected_snapshot,
         )
         allocations: list[list[int]] = [[] for _worker in self._workers]
         for arm_index in range(1, self._group_size):
@@ -266,6 +271,7 @@ class BattleGroupCollector:
             scenario=scenario,
             rollouts=rollouts,
             expected_size=self._group_size,
+            allow_zero_variance=self._allow_zero_variance,
         )
 
     def _collect_batch(

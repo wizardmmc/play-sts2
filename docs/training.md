@@ -1,3 +1,131 @@
+# RL 训练
+
+本节是正式长期 RL 的运行规范；`docs/current-doing-rl.md` 保存算法依据、工程阶段和
+历史 smoke，不再覆盖本节的课程、预算或是否启用 DAgger。
+
+## 资源与单轮顺序
+
+- 当前进阶记为 `A`，初始为 A0；同一轮所有 rollout 必须使用同一个 `A`。
+- Mac 固定启动两个隔离无头 STS2 v0.111.0 实例，服务器默认只使用一张 A100；本地
+  不做模型推理或训练。
+- 一轮开始后冻结 `(S_n, B_n, generation profile, environment)`，依次执行：
+
+```text
+同一 seed 的 K=8 完整 backbone
+→ 全局候选池选择 1～2 个 terminal Tree checkpoint
+→ GiGPO + Tree 更新战略 residual 为 S_(n+1)
+→ 从 backbone + Tree 入口选择战斗场景
+→ 每场景 K=8 战斗 GRPO，更新战斗 residual 为 B_(n+1)
+→ 3 frozen + 1 fresh 完整验证
+→ 记录 TensorBoard、cycle journal 与长期 curriculum 状态
+```
+
+backbone 保存全部宏候选元数据，每条 episode 最多物化一个早期和一个较晚 checkpoint；
+Tree 在全局池中按节点类型和早/晚分层随机抽取，固定随机 seed，并受墙钟预算约束，
+不能在八局中每局各展开几个节点。每轮默认最多两个 Tree checkpoint：二至四岔 MAP
+按实际根选项数采分支，事件、奖励、火堆和商店等组合宏采 4 条 iid 完整计划。Tree
+游戏墙钟不得超过训练游戏总时间的 40%。
+
+冷启动战略回报为：
+
+```text
+R_terminal = 4 × 完整胜利
+R_progress = 1 × 击败 Boss 数 + 0.01 × 终局楼层
+             + 0.001 × 胜局终点 HP / 最大 HP
+```
+
+GiGPO 分别形成 episode 与 milestone advantage；Tree 使用同一完整终局回报，不另造
+卡牌、遗物或路线强度表。没有胜局时 Boss 和楼层提供密集课程信号；出现胜局后完整
+胜利自然成为主要信号。
+
+战斗场景优先选择死亡、模型失败、高战损和精英/Boss，同时在最近 20 个已选场景中
+累计保留至少 20% 普通战斗。每场景仍是严格 8 条同入口学生 rollout，默认 reward 为：
+
+```text
+R_battle = 3 × 战胜 + 6 × clip((终局HP-入场HP)/入场HP, -1, 0.25)
+           - 3 × 死亡 - 0.05 × 回合数
+```
+
+第一轮正式长训不启用 CombatSolver DAgger：`dagger_weight=0` 且不提供
+`dagger_root`。零 reward 方差的战斗 group 直接跳过；只有未来明确重新启用独立
+DAgger loss 时，才允许保留零优势 group 做纯监督更新。既有 DAgger 代码和 smoke
+只作为可选回退与对照，不进入当前主路径。
+
+## 课程状态机
+
+### 当前进阶尚未首次通关
+
+使用一个固定 target seed，严格执行完整的 `3 target + 1 fresh` 周期：初轮 target
+加再重复两轮 target，然后训练一轮从未见过的 fresh seed。直到 target seed 的某轮
+K=8 中至少出现一局完整胜利，进入迁移阶段。
+
+### 首次通关后的迁移阶段
+
+继续执行 `3 target + 1 fresh`。fresh seed 即使失败也已经属于“见过”，以后不能再次
+冒充 fresh。至少两个不同 fresh seed 都能在各自第一次 K=8 训练中出现一局完整胜利，
+且 frozen validation 没有硬退化，才进入正式循环；单个幸运新图不够。
+
+### 正式循环
+
+按五个 seed block 固定调度：
+
+```text
+20% 已通关 seed
+40% 困难 seed
+40% 从未训练的 fresh seed
+```
+
+一个 seed 最多连续训练三轮；任一轮出现完整胜利即可结束该 block 并进入 cleared 池。
+三轮仍未通关，或表现低于最近三次 3+1 validation 的滚动基线，则进入 hard 池。池中
+分类优先比较 Boss/幕进度，再解释平均楼层；controller 当前以胜局和滚动平均楼层完成
+最小自动分类，Boss 指标同时落盘供 GPT 监工判断。
+
+当连续三个不同、此前未训练的 fresh seed 都在各自某轮 K=8 中至少 4 局完整胜利，
+并且 frozen validation、固定战斗回归和 held-out Tree 回归同时通过时，把当前进阶
+提高到 `A+1`。新难度以最后一条合格 seed 作为 target，清空当前难度 seed 池，重新
+从“尚未首次通关”开始；旧难度仍保留便宜回归，不参加新难度 reward normalization。
+
+## 验证、TensorBoard 与 checkpoint
+
+默认每轮用三个永不训练的 frozen seed 和一条当轮 fresh seed 各玩一局。完整验证
+墙钟若超过总轮次的 20%，改为每两轮一次 3+1，中间轮只跑固定便宜回归；不能把大部分
+时间花在验证上。
+
+`battle-grpo` 与 `strategy-grpo` 在各自 run 目录下写 `tensorboard/`；本地
+`eval-rl-policy` 和长期 curriculum CLI 通过 `--tensorboard-dir` 写入本轮公共 event
+目录。A100 run 产物同步回本地后，TensorBoard 递归读取 `runs/rl/`，分别展示 loss、
+KL、ratio、梯度、胜率、楼层、Boss、战斗战损、frozen/fresh 验证、阶段与进阶：
+
+```bash
+uv run --group training tensorboard --logdir runs/rl
+```
+
+TensorBoard event 只追加小型标量，不触发模型 checkpoint。完整 LoRA/AdamW/RNG
+checkpoint 默认每 50 个战斗 group 覆盖一次，formal 配置不得小于 20；主动暂停强制
+保存，正常完成直接发布最终 adapter，不重复写 `checkpoint-last`。
+
+长期 controller 只负责 seed、阶段、进阶和池状态，现有 cycle CLI 继续负责实际采样、
+两次 adapter 更新与验证：
+
+```bash
+uv run play-sts2-train init-rl-curriculum \
+  --state runs/rl/curriculum.json \
+  --target-seed <TARGET> --ascension 0
+
+uv run play-sts2-train plan-rl-curriculum \
+  --state runs/rl/curriculum.json --fresh-seed <NEW_SEED>
+
+uv run --group training play-sts2-train update-rl-curriculum \
+  --state runs/rl/curriculum.json \
+  --seed <ACTUAL_SEED> --source <target|cleared|hard|fresh> \
+  --ascension <A> --cycle-index <N> --wins <0..8> --attempts 8 \
+  --mean-floor <F> --bosses-cleared <N> \
+  --rolling-validation-mean-floor <F> \
+  --validation-stable --battle-regression-passed --tree-regression-passed \
+  [--validation-over-budget] \
+  --tensorboard-dir runs/rl/tensorboard
+```
+
 # SFT 训练与评测
 
 ## 目录边界

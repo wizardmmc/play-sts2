@@ -6,7 +6,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from ...scenario import BattleScenario
+from ...scenario import (
+    BattleScenario,
+    BattleSnapshot,
+    CardSnapshot,
+    EnemySnapshot,
+    IntentSnapshot,
+    ModelInputSnapshot,
+)
 from .contracts import BattleRolloutGroup
 
 
@@ -67,3 +74,55 @@ def write_battle_rollout_group(
         encoding="utf-8",
     )
     return output
+
+
+def load_battle_snapshot(path: Path) -> BattleSnapshot:
+    """从 selection 写出的 JSON 恢复原始完整游戏战斗入口快照。
+
+    Args:
+        path (Path): 单个 ``BattleSnapshot`` JSON 文件。
+
+    Raises:
+        ValueError: 嵌套字段不能构成完整快照。
+
+    Returns:
+        BattleSnapshot: 可作为第一条 scenario reset 的严格入口基准。
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise TypeError("战斗入口 snapshot 必须是 JSON 对象")
+    try:
+        model = payload["model_input"]
+        hand = payload["hand"]
+        enemies = payload["enemies"]
+        if (
+            not isinstance(model, Mapping)
+            or not isinstance(hand, list)
+            or not isinstance(enemies, list)
+        ):
+            raise TypeError
+        snapshot = BattleSnapshot(
+            turn=int(payload["turn"]),
+            hand=tuple(CardSnapshot(**dict(card)) for card in hand),
+            enemies=tuple(
+                EnemySnapshot(
+                    index=int(enemy["index"]),
+                    enemy_id=str(enemy["enemy_id"]),
+                    current_hp=int(enemy["current_hp"]),
+                    max_hp=int(enemy["max_hp"]),
+                    move_id=enemy.get("move_id"),
+                    intents=tuple(
+                        IntentSnapshot(**dict(intent)) for intent in enemy["intents"]
+                    ),
+                )
+                for enemy in enemies
+            ),
+            model_input=ModelInputSnapshot(
+                system=str(model["system"]),
+                user=str(model["user"]),
+                available_actions=tuple(model["available_actions"]),
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("战斗入口 snapshot 字段无效") from exc
+    return snapshot

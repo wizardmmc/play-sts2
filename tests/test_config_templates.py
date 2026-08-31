@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from play_sts2.inference.config import load_inference_config
+from play_sts2.training.rl import load_battle_grpo_config
 from play_sts2.training.rl.strategy import load_tree_grpo_config
 from play_sts2.training.sft import load_sft_config, load_sft_mix
 from play_sts2.training.sft_cuda import load_cuda_sft_config
@@ -22,6 +23,7 @@ def test_checked_in_toml_templates_load_without_local_configs() -> None:
     cuda = load_cuda_sft_config(templates / "sft/sft-cuda.toml")
     mix = load_sft_mix(templates / "sft/mix.toml")
     tree = load_tree_grpo_config(templates / "rl/tree-grpo.toml")
+    battle = load_battle_grpo_config(templates / "rl/battle-grpo.toml")
 
     assert inference.default_profile == "no-think"
     assert sft.device == "auto"
@@ -29,3 +31,5 @@ def test_checked_in_toml_templates_load_without_local_configs() -> None:
     assert mix.human_train_action_limits["play_card"] == 600
     assert tree.run_role == "engineering_smoke"
     assert tree.device == "cuda:0"
+    assert battle.dagger_weight == 0
+    assert battle.dagger_root is None

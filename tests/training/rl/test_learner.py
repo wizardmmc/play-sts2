@@ -162,6 +162,33 @@ def test_grpo_loss_uses_rollout_behavior_logprobs_and_anchor_kl() -> None:
     assert not math.isclose(result.ratio_mean, 1.0)
 
 
+def test_stratified_tree_importance_uses_full_root_action_probability() -> None:
+    """强制根动作的校正权重应为冻结策略动作概率除以 proposal。
+
+    Returns:
+        None: 三个 token 的条件概率先相乘，再除以均匀 ``q``。
+    """
+    logprobs = torch.log(torch.tensor([0.5, 0.8, 1.0]))
+
+    weight = rl.stratified_importance_weight(logprobs, proposal_probability=0.25)
+
+    assert weight == pytest.approx(1.6)
+
+
+def test_stratified_tree_importance_rejects_invalid_proposal() -> None:
+    """proposal 为零或冻结动作概率非有限时必须停止更新。
+
+    Returns:
+        None: 两类无效输入都不会静默截断成可训练权重。
+    """
+    with pytest.raises(ValueError, match="proposal"):
+        rl.stratified_importance_weight(torch.tensor([-0.2]), proposal_probability=0.0)
+    with pytest.raises(ValueError, match="log-prob"):
+        rl.stratified_importance_weight(
+            torch.tensor([float("nan")]), proposal_probability=0.5
+        )
+
+
 def test_load_grpo_group_rejects_arm_profile_drift(tmp_path: Path) -> None:
     """顶层标签正确也不能掩盖某条 arm 混入 raw log-prob 或不同入口。
 

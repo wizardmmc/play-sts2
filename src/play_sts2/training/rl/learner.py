@@ -51,12 +51,17 @@ class GrpoArm:
         reward (float): 当前奖励方案下的终局回报。
         advantage (float): 组内标准化相对优势。
         sequences (tuple[GrpoSequence, ...]): 按步骤排列的 stateless 序列。
+        proposal_probability (float): 当前 arm 根计划在 proposal 下的概率。
+        recompute_root_probability (bool): 是否用冻结父策略重算根动作概率和
+            PPO behavior 概率。
     """
 
     arm_index: int
     reward: float
     advantage: float
     sequences: tuple[GrpoSequence, ...]
+    proposal_probability: float = 1.0
+    recompute_root_probability: bool = False
 
     @property
     def supervised_tokens(self) -> int:
@@ -79,6 +84,9 @@ class GrpoTrainingGroup:
         rewards (tuple[float, ...]): 按 arm 排列的终局回报。
         advantages (tuple[float, ...]): 按总体标准差归一的组相对优势。
         arms (tuple[GrpoArm, ...]): 可供 learner 顺序反向传播的完整 arms。
+        battle_policy_version (str | None): 战略数据对应的冻结战斗 policy。
+        generation_profile (Mapping[str, Any] | None): rollout 的完整生成参数。
+        environment (Mapping[str, Any] | None): 游戏、Mod 与约束运行时收据。
     """
 
     group_id: str
@@ -87,6 +95,9 @@ class GrpoTrainingGroup:
     rewards: tuple[float, ...]
     advantages: tuple[float, ...]
     arms: tuple[GrpoArm, ...]
+    battle_policy_version: str | None = None
+    generation_profile: Mapping[str, Any] | None = None
+    environment: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +198,7 @@ def load_grpo_training_group(
     max_length: int,
     potion_cost: float = 0.25,
     choice_masker: Any | None = None,
+    allow_zero_variance: bool = False,
 ) -> GrpoTrainingGroup:
     """从完整 rollout JSON 重算奖励并构造 stateless token 序列。
 
@@ -197,6 +209,7 @@ def load_grpo_training_group(
         max_length (int): 单步 prompt 加 completion 的最大 token 数。
         potion_cost (float): 固定药水成本方案的每瓶成本。
         choice_masker (Any | None): 测试可注入的 choice bitmask 构造器。
+        allow_zero_variance (bool): 是否为独立 DAgger 构造零优势训练组。
 
     Raises:
         GrpoTrainingError: group、策略、token、行为概率或奖励方差无效。
@@ -248,9 +261,13 @@ def load_grpo_training_group(
     )
     reward_mean = statistics.fmean(rewards)
     reward_std = statistics.pstdev(rewards)
-    if reward_std == 0.0:
+    if reward_std == 0.0 and not allow_zero_variance:
         raise GrpoTrainingError("GRPO group 奖励没有方差")
-    advantages = tuple((reward - reward_mean) / reward_std for reward in rewards)
+    advantages = (
+        (0.0,) * len(rewards)
+        if reward_std == 0.0
+        else tuple((reward - reward_mean) / reward_std for reward in rewards)
+    )
     try:
         temperature = float(generation_profile["temperature"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -281,6 +298,8 @@ def load_grpo_training_group(
         rewards=rewards,
         advantages=advantages,
         arms=arms,
+        generation_profile=dict(generation_profile),
+        environment=dict(environment),
     )
 
 
@@ -371,6 +390,37 @@ def grpo_sequence_loss(
         kl=float(kl.detach().cpu()),
         ratio_mean=float(ratio.detach().cpu()),
     )
+
+
+def stratified_importance_weight(
+    anchor_logprobs: Any,
+    *,
+    proposal_probability: float,
+) -> float:
+    """计算强制根动作 ``pi_old(a|s) / q(a|s)``。
+
+    Args:
+        anchor_logprobs (Any): 冻结父策略在完整 xgrammar 支持集上的逐 token
+            条件 log-prob。
+        proposal_probability (float): 分层采样 proposal 的根动作概率。
+
+    Raises:
+        ValueError: proposal、log-prob 或最终权重不是有限正数。
+
+    Returns:
+        float: 可乘到当前 terminal branch policy loss 的重要性权重。
+    """
+    import torch
+
+    if not math.isfinite(proposal_probability) or not 0 < proposal_probability <= 1:
+        raise ValueError("Tree proposal probability 必须位于 (0, 1]")
+    if anchor_logprobs.numel() == 0 or not torch.isfinite(anchor_logprobs).all().item():
+        raise ValueError("Tree anchor log-prob 必须是有限非空张量")
+    probability = float(torch.exp(anchor_logprobs.float().sum()).detach().cpu())
+    weight = probability / proposal_probability
+    if not math.isfinite(weight) or weight <= 0:
+        raise ValueError("Tree importance weight 必须是有限正数")
+    return weight
 
 
 def compare_battle_reward_schemes(

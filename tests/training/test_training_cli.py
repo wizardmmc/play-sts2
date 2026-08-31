@@ -1,10 +1,171 @@
 """验证训练命令行对 SFT 训练与评测的路由。"""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from play_sts2.training import cli
+
+
+def test_long_run_curriculum_cli_initializes_plans_and_records_cycle(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    """长期 controller CLI 应用同一可读状态完成 init、plan 与 update。
+
+    Args:
+        tmp_path (Path): curriculum 状态目录。
+        capsys (object): Pytest 标准输出捕获器。
+
+    Returns:
+        None: target 首胜后状态进入跨 seed 迁移阶段。
+    """
+    state = tmp_path / "curriculum.json"
+    assert (
+        cli.main(
+            [
+                "init-rl-curriculum",
+                "--state",
+                str(state),
+                "--target-seed",
+                "AAAAAAAAAA",
+                "--ascension",
+                "0",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert (
+        cli.main(
+            [
+                "plan-rl-curriculum",
+                "--state",
+                str(state),
+                "--fresh-seed",
+                "BBBBBBBBBB",
+            ]
+        )
+        == 0
+    )
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["seed"] == "AAAAAAAAAA"
+    assert planned["source"] == "target"
+
+    assert (
+        cli.main(
+            [
+                "update-rl-curriculum",
+                "--state",
+                str(state),
+                "--seed",
+                "AAAAAAAAAA",
+                "--source",
+                "target",
+                "--ascension",
+                "0",
+                "--cycle-index",
+                "0",
+                "--wins",
+                "1",
+                "--attempts",
+                "8",
+                "--mean-floor",
+                "12.5",
+                "--bosses-cleared",
+                "1",
+                "--rolling-validation-mean-floor",
+                "10",
+                "--validation-stable",
+                "--battle-regression-passed",
+                "--tree-regression-passed",
+            ]
+        )
+        == 0
+    )
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["phase"] == "transfer"
+
+
+def test_decide_rl_promotion_writes_explicit_hard_gate_receipt(
+    tmp_path: Path,
+) -> None:
+    """promotion CLI 应要求三份报告并把四个外部硬门槛写进收据。
+
+    Args:
+        tmp_path (Path): 父子报告与输出目录。
+
+    Returns:
+        None: 全部门槛通过时生成绑定候选双 policy 的批准收据。
+    """
+    parent = tmp_path / "parent.json"
+    candidate_paths = [tmp_path / f"candidate-{index}.json" for index in range(3)]
+    parent.write_text(
+        json.dumps(_promotion_report("qwen3.5-s0", "qwen3.5-b0", 8.0)),
+        encoding="utf-8",
+    )
+    for path in candidate_paths:
+        path.write_text(
+            json.dumps(_promotion_report("qwen3.5-s1", "qwen3.5-b1", 9.0)),
+            encoding="utf-8",
+        )
+    output = tmp_path / "receipt.json"
+    arguments = [
+        "decide-rl-promotion",
+        "--parent-report",
+        str(parent),
+    ]
+    for path in candidate_paths:
+        arguments.extend(("--candidate-report", str(path)))
+    arguments.extend(
+        (
+            "--battle-regression-passed",
+            "--branch-regret-passed",
+            "--illegal-action-passed",
+            "--potion-guard-passed",
+            "--output",
+            str(output),
+        )
+    )
+
+    result = cli.main(arguments)
+
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert result == 0
+    assert receipt["approved"] is True
+    assert receipt["strategy_policy"] == "qwen3.5-s1"
+    assert receipt["battle_policy"] == "qwen3.5-b1"
+
+
+def _promotion_report(strategy: str, battle: str, floor: float) -> dict[str, object]:
+    """构造 promotion CLI 使用的最小完整验证报告。
+
+    Args:
+        strategy (str): 战略 policy。
+        battle (str): 战斗 policy。
+        floor (float): 四局平均楼层。
+
+    Returns:
+        dict[str, object]: 阶段七验证核心指标。
+    """
+    return {
+        "format": "stage7_policy_evaluation",
+        "strategy_policy": strategy,
+        "battle_policy": battle,
+        "victories": 0,
+        "bosses_cleared": 0,
+        "mean_floor": floor,
+        "frozen": [
+            {
+                "seed": f"FROZEN{index}",
+                "victory": False,
+                "bosses_cleared": 0,
+                "final_floor": int(floor),
+            }
+            for index in range(3)
+        ],
+    }
 
 
 def test_training_commands_use_grouped_config_defaults() -> None:
@@ -106,6 +267,8 @@ def test_collect_rl_battle_command_routes_remote_policy_and_game_workers(
             "max_tokens": 128,
             "temperature": 0.8,
             "infrastructure_attempts": 3,
+            "expected_snapshot_path": None,
+            "allow_zero_variance": False,
         }
     ]
     assert '"arms": 8' in capsys.readouterr().out
