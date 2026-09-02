@@ -21,6 +21,7 @@ from .rl import (
     evaluate_battle_rollout_file,
     evaluate_policy_pair,
     evaluate_tree_branch_regret,
+    full_validation_due,
     initialize_residual_adapters,
     label_dagger_rollout_group,
     load_battle_grpo_config,
@@ -870,9 +871,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source=args.source,
             ascension=args.ascension,
             cycle_index=args.cycle_index,
-            full_validation_due=(
-                curriculum.total_cycles % curriculum.validation_interval == 0
-            ),
+            full_validation_due=full_validation_due(curriculum),
         )
         result = TrainingCycleResult(
             seed=args.seed,
@@ -1036,9 +1035,7 @@ def _curriculum_output(
         "cleared_seeds": list(curriculum.cleared_seeds),
         "hard_seeds": list(curriculum.hard_seeds),
         "validation_interval": curriculum.validation_interval,
-        "next_full_validation_due": (
-            curriculum.total_cycles % curriculum.validation_interval == 0
-        ),
+        "next_full_validation_due": full_validation_due(curriculum),
         "state": str(path),
     }
 

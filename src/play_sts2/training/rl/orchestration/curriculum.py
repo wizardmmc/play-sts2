@@ -81,7 +81,7 @@ class LongRunCurriculumState:
         recent_fresh_results (tuple[TrainingCycleResult, ...]): 最近三条完整 fresh
             seed block 结果，用于升进阶。
         last_completed_seed (str | None): 最近结束 block 的 seed，避免立即重抽。
-        validation_interval (int): 完整 3+1 的轮次间隔，一或二。
+        validation_interval (int): 正式阶段完整 3+1 的轮次间隔，一或二。
     """
 
     phase: CurriculumPhase
@@ -163,13 +163,14 @@ def next_training_assignment(
         TrainingAssignment: 下一轮 K=8 训练分配。
     """
     if state.phase in {CurriculumPhase.COLD_START, CurriculumPhase.TRANSFER}:
-        if state.phase_cycles % 4 != 3:
+        validation_due = full_validation_due(state)
+        if not validation_due:
             return TrainingAssignment(
                 seed=state.target_seed,
                 source="target",
                 ascension=state.ascension,
                 cycle_index=state.total_cycles,
-                full_validation_due=_full_validation_due(state),
+                full_validation_due=False,
             )
         _validate_fresh_seed(state, fresh_seed)
         return TrainingAssignment(
@@ -177,7 +178,7 @@ def next_training_assignment(
             source="fresh",
             ascension=state.ascension,
             cycle_index=state.total_cycles,
-            full_validation_due=_full_validation_due(state),
+            full_validation_due=True,
         )
     if state.active_formal_seed is not None:
         if state.active_formal_source is None:
@@ -187,7 +188,7 @@ def next_training_assignment(
             source=state.active_formal_source,
             ascension=state.ascension,
             cycle_index=state.total_cycles,
-            full_validation_due=_full_validation_due(state),
+            full_validation_due=full_validation_due(state),
         )
     bucket = formal_seed_bucket(state.formal_seed_index)
     pool = state.cleared_seeds if bucket == "cleared" else state.hard_seeds
@@ -199,7 +200,7 @@ def next_training_assignment(
             source=bucket,
             ascension=state.ascension,
             cycle_index=state.total_cycles,
-            full_validation_due=_full_validation_due(state),
+            full_validation_due=full_validation_due(state),
         )
     _validate_fresh_seed(state, fresh_seed)
     return TrainingAssignment(
@@ -207,7 +208,7 @@ def next_training_assignment(
         source="fresh",
         ascension=state.ascension,
         cycle_index=state.total_cycles,
-        full_validation_due=_full_validation_due(state),
+        full_validation_due=full_validation_due(state),
     )
 
 
@@ -251,7 +252,7 @@ def record_training_result(
             state,
             seen_fresh_seeds=(*state.seen_fresh_seeds, result.seed),
         )
-    if validation_over_budget:
+    if validation_over_budget and state.phase is CurriculumPhase.FORMAL:
         state = replace(state, validation_interval=2)
     if state.phase is CurriculumPhase.COLD_START:
         return _record_cold_start(state, assignment, result)
@@ -605,13 +606,15 @@ def _validate_state(state: LongRunCurriculumState) -> None:
         raise ValueError("长期 RL curriculum 状态无效")
 
 
-def _full_validation_due(state: LongRunCurriculumState) -> bool:
+def full_validation_due(state: LongRunCurriculumState) -> bool:
     """判断下一轮是否需要完整 3+1 validation。
 
     Args:
         state (LongRunCurriculumState): 当前课程状态。
 
     Returns:
-        bool: 默认每轮执行；超预算后仅偶数 cycle index 执行。
+        bool: 冷启动/迁移仅 training-fresh 轮执行；正式阶段按间隔执行。
     """
+    if state.phase in {CurriculumPhase.COLD_START, CurriculumPhase.TRANSFER}:
+        return state.phase_cycles % 4 == 3
     return state.total_cycles % state.validation_interval == 0

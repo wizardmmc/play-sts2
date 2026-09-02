@@ -288,6 +288,53 @@ class ConflictingStrategicGame:
         return _map_state(state_revision=after_revision + 1)
 
 
+class ConflictingBattleGame:
+    """模拟整局战斗动作窗口短暂关闭后重新开放的游戏。"""
+
+    def __init__(self) -> None:
+        """初始化动作与状态刷新计数。"""
+        self.action_calls = 0
+        self.state_calls = 0
+
+    def execute_action(self, action: str, **_parameters: int) -> dict[str, Any]:
+        """首次拒绝战斗动作，第二次返回胜利终局。
+
+        Args:
+            action (str): Runtime 提交的战斗动作。
+            _parameters (int): 模型动作参数与状态 revision。
+
+        Raises:
+            httpx.HTTPStatusError: 首次动作落在暂不可用窗口时抛出。
+
+        Returns:
+            dict[str, Any]: 第二次动作完成后的胜利终局。
+        """
+        assert action == "end_turn"
+        self.action_calls += 1
+        if self.action_calls == 1:
+            raise _action_unavailable("end_turn", "COMBAT")
+        return _completed(_game_over_state(True, state_revision=3))
+
+    def wait_for_state(
+        self,
+        *,
+        after_revision: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """返回动作窗口重新开放后的战斗状态。
+
+        Args:
+            after_revision (int): Runtime 已处理的状态 revision。
+            timeout (float): 等待下一状态的预算。
+
+        Returns:
+            dict[str, Any]: revision 已推进的可决策战斗状态。
+        """
+        assert timeout > 0
+        self.state_calls += 1
+        return _combat_state(state_revision=after_revision + 1)
+
+
 class TwoShopVisitsGame:
     """模拟关闭第一家商店后离开，并进入第二家商店的游戏。"""
 
@@ -597,6 +644,32 @@ def test_run_runner_keeps_conflict_retry_when_model_retries_are_disabled() -> No
     assert game.action_calls == 2
     assert len(provider.requests) == 2
     assert len(recorder.decisions) == 1
+
+
+def test_run_runner_passes_independent_conflict_budget_to_battle() -> None:
+    """整局训练关闭模型重试时仍应恢复战斗动作窗口竞争。
+
+    Returns:
+        None: 战斗 409 使用独立预算重试且只记录成功动作。
+    """
+    runtime = importlib.import_module("play_sts2.runtime")
+    game = ConflictingBattleGame()
+    provider = WholeRunProvider(["ACTION: end_turn", "ACTION: end_turn"])
+
+    result = runtime.RunRunner(
+        game,
+        provider,
+        max_retries=0,
+        max_conflict_retries=3,
+        state_timeout=1,
+    ).run(_combat_state())
+
+    assert result.outcome is runtime.RunOutcome.VICTORY
+    assert result.battle_count == 1
+    assert game.action_calls == 2
+    assert game.state_calls == 1
+    assert len(provider.requests) == 2
+    assert len(result.decisions) == 1
 
 
 def test_run_runner_reports_terminal_loss_without_model_call() -> None:

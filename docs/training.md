@@ -16,7 +16,7 @@
 → GiGPO + Tree 更新战略 residual 为 S_(n+1)
 → 从 backbone + Tree 入口选择战斗场景
 → 每场景 K=8 战斗 GRPO，更新战斗 residual 为 B_(n+1)
-→ 3 frozen + 1 fresh 完整验证
+→ 仅在 controller 标记 block 结束时跑 3 frozen + 1 fresh 完整验证
 → 记录 TensorBoard、cycle journal 与长期 curriculum 状态
 ```
 
@@ -87,9 +87,12 @@ K=8 中至少出现一局完整胜利，进入迁移阶段。
 
 ## 验证、TensorBoard 与 checkpoint
 
-默认每轮用三个永不训练的 frozen seed 和一条当轮 fresh seed 各玩一局。完整验证
-墙钟若超过总轮次的 20%，改为每两轮一次 3+1，中间轮只跑固定便宜回归；不能把大部分
-时间花在验证上。
+cold-start 与 transfer 严格按一个 `3 target + 1 training-fresh` 训练块只做一次完整
+验证：前三个 target cycle 跳过 3+1，training-fresh cycle 更新完双 residual 后，再用
+三个永不训练的 frozen seed 和一条独立 validation-fresh seed 各玩一局。跳过完整
+验证的 cycle 仍需通过 K=8 合同、KL/ratio/梯度有限、battle/Tree group 准入等便宜
+硬门槛，policy pair 只能标为 provisional。formal 阶段默认每轮完整验证；若验证墙钟
+超过总轮次的 20%，改为每两轮一次。任何阶段都不能让大部分时间花在验证上。
 
 `battle-grpo` 与 `strategy-grpo` 在各自 run 目录下写 `tensorboard/`；本地
 `eval-rl-policy` 和长期 curriculum CLI 通过 `--tensorboard-dir` 写入本轮公共 event

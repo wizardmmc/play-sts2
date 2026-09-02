@@ -51,6 +51,39 @@ def test_cold_start_inserts_one_fresh_cycle_after_three_target_cycles() -> None:
     assert seeds[4:7] == ["AAAAAAAAAA"] * 3
 
 
+def test_cold_start_runs_full_validation_only_after_training_fresh_cycle() -> None:
+    """冷启动完整验证应绑定到每个三 target 加一 fresh 训练块末尾。
+
+    Returns:
+        None: 前三轮跳过完整验证，training-fresh 轮才执行一次 3+1。
+    """
+    from play_sts2.training.rl.orchestration import (
+        new_long_run_curriculum,
+        next_training_assignment,
+        record_training_result,
+    )
+
+    state = new_long_run_curriculum(target_seed="AAAAAAAAAA", ascension=0)
+    due = []
+    for index in range(4):
+        assignment = next_training_assignment(
+            state,
+            fresh_seed=f"FRESH{index:05d}",
+        )
+        due.append(assignment.full_validation_due)
+        state = record_training_result(
+            state,
+            assignment,
+            _result(assignment.seed, ascension=0),
+            rolling_validation_mean_floor=5.0,
+            validation_stable=True,
+            battle_regression_passed=True,
+            tree_regression_passed=True,
+        )
+
+    assert due == [False, False, False, True]
+
+
 def test_transfer_requires_two_distinct_fresh_one_cycle_clears() -> None:
     """固定图首次通关后不能靠一个幸运 fresh seed 直接进入正式循环。
 
@@ -85,6 +118,77 @@ def test_transfer_requires_two_distinct_fresh_one_cycle_clears() -> None:
     assert state.phase is CurriculumPhase.FORMAL
     assert state.transfer_fast_clear_seeds == ("FRESH00001", "FRESH00002")
     assert state.cleared_seeds == ("FRESH00001", "FRESH00002")
+
+
+def test_transfer_runs_full_validation_only_after_training_fresh_cycle() -> None:
+    """迁移阶段也应只在 training-fresh 轮末执行完整验证。
+
+    Returns:
+        None: 三个 target assignment 跳过验证，第四个 fresh assignment 执行。
+    """
+    from play_sts2.training.rl.orchestration import (
+        new_long_run_curriculum,
+        next_training_assignment,
+        record_training_result,
+    )
+
+    state = new_long_run_curriculum(target_seed="AAAAAAAAAA", ascension=0)
+    first = next_training_assignment(state, fresh_seed="FRESH00001")
+    state = record_training_result(
+        state,
+        first,
+        _result(first.seed, ascension=0, wins=1),
+        rolling_validation_mean_floor=5.0,
+        validation_stable=True,
+        battle_regression_passed=True,
+        tree_regression_passed=True,
+    )
+    due = []
+    for index in range(4):
+        assignment = next_training_assignment(
+            state,
+            fresh_seed=f"FRESH{index + 10:05d}",
+        )
+        due.append(assignment.full_validation_due)
+        state = record_training_result(
+            state,
+            assignment,
+            _result(assignment.seed, ascension=0),
+            rolling_validation_mean_floor=5.0,
+            validation_stable=True,
+            battle_regression_passed=True,
+            tree_regression_passed=True,
+        )
+
+    assert due == [False, False, False, True]
+
+
+def test_non_formal_validation_budget_does_not_change_formal_interval() -> None:
+    """冷启动块末验证超预算不能提前改变正式阶段默认间隔。
+
+    Returns:
+        None: 非正式阶段保留 validation_interval=1。
+    """
+    from play_sts2.training.rl.orchestration import (
+        new_long_run_curriculum,
+        next_training_assignment,
+        record_training_result,
+    )
+
+    state = new_long_run_curriculum(target_seed="AAAAAAAAAA", ascension=0)
+    assignment = next_training_assignment(state, fresh_seed="FRESH00001")
+    state = record_training_result(
+        state,
+        assignment,
+        _result(assignment.seed, ascension=0),
+        rolling_validation_mean_floor=5.0,
+        validation_stable=True,
+        battle_regression_passed=True,
+        tree_regression_passed=True,
+        validation_over_budget=True,
+    )
+
+    assert state.validation_interval == 1
 
 
 def test_failed_fresh_seed_cannot_be_reused_as_new() -> None:
@@ -245,18 +349,19 @@ def test_formal_bucket_schedule_uses_twenty_forty_forty_ratio() -> None:
 def test_validation_over_budget_switches_full_three_plus_one_to_every_two_cycles() -> (
     None
 ):
-    """完整验证超过 20% 墙钟后应隔轮执行，而不是继续占用主要时间。
+    """正式阶段验证超过 20% 墙钟后应隔轮执行。
 
     Returns:
         None: 第一次超预算后下一轮跳过，再下一轮恢复完整验证。
     """
+    from dataclasses import replace
+
     from play_sts2.training.rl.orchestration import (
-        new_long_run_curriculum,
         next_training_assignment,
         record_training_result,
     )
 
-    state = new_long_run_curriculum(target_seed="AAAAAAAAAA", ascension=0)
+    state = replace(_formal_state(), total_cycles=0)
     first = next_training_assignment(state, fresh_seed="FRESH20001")
     assert first.full_validation_due is True
     state = record_training_result(

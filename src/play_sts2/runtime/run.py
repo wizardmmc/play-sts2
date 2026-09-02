@@ -173,6 +173,7 @@ class RunRunner:
             max_tokens=max_tokens,
             temperature=temperature,
             max_retries=max_retries,
+            max_conflict_retries=max_conflict_retries,
             state_timeout=state_timeout,
             constrain_actions=constrain_actions,
         )

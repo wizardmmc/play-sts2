@@ -273,6 +273,7 @@ def restore_strategic_checkpoint(
         raise CheckpointMismatchError("恢复后的 mod_version 不一致")
 
     state = resume_run(client)
+    state = _advance_native_chest(client, state, checkpoint.entry.screen)
     state = _advance_native_proceed(client, state, checkpoint.entry.screen)
     for action in checkpoint.entry.resume_actions:
         if state.get("screen") == checkpoint.entry.screen:
@@ -288,8 +289,59 @@ def restore_strategic_checkpoint(
         "option_ids",
         "audit",
     ):
-        if getattr(restored, field) != getattr(checkpoint.entry, field):
+        actual = getattr(restored, field)
+        expected = getattr(checkpoint.entry, field)
+        if actual != expected:
+            if field == "screen":
+                raise CheckpointMismatchError(
+                    f"恢复后的 screen 不一致: expected={expected}, actual={actual}"
+                )
             raise CheckpointMismatchError(f"恢复后的 {field} 不一致")
+    return state
+
+
+def _advance_native_chest(
+    client: GameClient,
+    state: dict[str, Any],
+    target_screen: str,
+) -> dict[str, Any]:
+    """重放宝箱后地图存档中唯一确定的原生宝箱过渡。
+
+    Args:
+        client (GameClient): 连接恢复游戏的客户端。
+        state (dict[str, Any]): 原生 continue 返回的稳定状态。
+        target_screen (str): checkpoint 捕获时的目标页面。
+
+    Returns:
+        dict[str, Any]: 进入宝箱后续页面的状态；动作域不唯一时原样返回。
+    """
+    if target_screen != "MAP" or state.get("screen") != "CHEST":
+        return state
+    if model_actions(state) != ("open_chest",):
+        return state
+    state = _execute_restore_action(client, state, HarnessAction("open_chest", {}))
+    chest = state.get("chest")
+    options = chest.get("relic_options") if isinstance(chest, Mapping) else None
+    if (
+        state.get("screen") != "CHEST"
+        or model_actions(state) != ("choose_treasure_relic",)
+        or not isinstance(options, list)
+        or len(options) != 1
+        or not isinstance(options[0], Mapping)
+        or isinstance(options[0].get("index"), bool)
+        or not isinstance(options[0].get("index"), int)
+    ):
+        return state
+    state = _execute_restore_action(
+        client,
+        state,
+        HarnessAction(
+            "choose_treasure_relic",
+            {"option_index": options[0]["index"]},
+        ),
+    )
+    if state.get("screen") == "CHEST" and model_actions(state) == ("proceed",):
+        return _execute_restore_action(client, state, HarnessAction("proceed", {}))
     return state
 
 

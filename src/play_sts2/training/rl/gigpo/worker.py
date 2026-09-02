@@ -107,14 +107,21 @@ class _BackboneStateCapture:
         floor = run.get("floor") if isinstance(run, Mapping) else None
         if isinstance(floor, bool) or not isinstance(floor, int) or floor < 0:
             raise ValueError("backbone checkpoint 缺少有效楼层")
+        save_is_self_contained = _native_save_is_self_contained(screen, audit)
         if floor < 10:
             ordinal = self._early_candidates
-            self._early_candidates += 1
-            should_capture = ordinal == self._early_target_ordinal
+            if save_is_self_contained:
+                self._early_candidates += 1
+            should_capture = (
+                save_is_self_contained and ordinal == self._early_target_ordinal
+            )
         else:
             ordinal = self._late_candidates
-            self._late_candidates += 1
-            should_capture = ordinal == self._late_target_ordinal
+            if save_is_self_contained:
+                self._late_candidates += 1
+            should_capture = (
+                save_is_self_contained and ordinal == self._late_target_ordinal
+            )
         captured_path = None
         if should_capture:
             destination = self._checkpoint_root / (
@@ -368,6 +375,26 @@ class GameBackboneWorker:
             battles=battles,
             health=self.last_health,
         )
+
+
+def _native_save_is_self_contained(
+    screen: str,
+    audit: Mapping[str, Any],
+) -> bool:
+    """判断当前页面的原生保存局能否独立恢复到同一入口。
+
+    Args:
+        screen (str): 当前模型可见页面。
+        audit (Mapping[str, Any]): 与页面同一时刻的隐藏房间审计。
+
+    Returns:
+        bool: 已知战斗奖励后的 MAP 返回 ``False``，其余页面保持可捕获。
+    """
+    if screen != "MAP":
+        return True
+    run = audit.get("run")
+    room = run.get("current_room") if isinstance(run, Mapping) else None
+    return not isinstance(room, Mapping) or room.get("room_type") != "Monster"
 
 
 def _complete_battle_candidate(

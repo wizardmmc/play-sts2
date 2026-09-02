@@ -36,7 +36,8 @@ def test_long_run_curriculum_cli_initializes_plans_and_records_cycle(
         )
         == 0
     )
-    capsys.readouterr()
+    initialized = json.loads(capsys.readouterr().out)
+    assert initialized["next_full_validation_due"] is False
     assert (
         cli.main(
             [
@@ -86,6 +87,7 @@ def test_long_run_curriculum_cli_initializes_plans_and_records_cycle(
     )
     updated = json.loads(capsys.readouterr().out)
     assert updated["phase"] == "transfer"
+    assert updated["next_full_validation_due"] is False
 
 
 def test_decide_rl_promotion_writes_explicit_hard_gate_receipt(

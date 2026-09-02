@@ -158,6 +158,48 @@ class PrefinishedEventRestoreGame(RestoreGame):
         }
 
 
+class ClosedChestRestoreGame(RestoreGame):
+    """模拟地图 checkpoint 原生恢复到尚未打开的宝箱。"""
+
+    def __init__(
+        self,
+        target_state: dict[str, Any],
+        audit: dict[str, Any],
+    ) -> None:
+        """保存目标地图和确定性的宝箱恢复阶段。
+
+        Args:
+            target_state (dict[str, Any]): 领取宝箱遗物后的地图状态。
+            audit (dict[str, Any]): 地图入口隐藏审计。
+
+        Returns:
+            None: 此方法只初始化恢复阶段。
+        """
+        super().__init__(target_state, audit)
+        self._stage = 0
+
+    def execute_action(self, action: str, **parameters: Any) -> dict[str, Any]:
+        """按原生顺序恢复宝箱、领取唯一遗物并进入地图。
+
+        Args:
+            action (str): 当前恢复阶段唯一允许的动作。
+            parameters (Any): 当前状态 revision 与可选遗物索引。
+
+        Returns:
+            dict[str, Any]: 动作后的稳定宝箱或地图状态。
+        """
+        self.actions.append((action, dict(parameters)))
+        states = (
+            _closed_chest_state(),
+            _opened_chest_state(),
+            _claimed_chest_state(),
+            dict(self._state),
+        )
+        state = states[self._stage]
+        self._stage += 1
+        return {"action": action, "stable": True, "state": state}
+
+
 def test_capture_checkpoint_preserves_native_save_and_entry_audit(
     tmp_path: Path,
 ) -> None:
@@ -376,6 +418,53 @@ def test_restore_checkpoint_advances_one_native_prefinished_event(
     ]
 
 
+def test_restore_map_checkpoint_replays_unique_native_chest(
+    tmp_path: Path,
+) -> None:
+    """宝箱后的地图存档应重放唯一宝箱路径并通过完整入口核对。
+
+    Args:
+        tmp_path (Path): Pytest 提供的临时目录。
+
+    Returns:
+        None: 恢复器依次打开、领取唯一遗物并进入原地图。
+    """
+    checkpoint_module = importlib.import_module("play_sts2.checkpoint")
+    state = _map_state()
+    audit = {
+        "screen": "MAP",
+        "run_id": "CHECKPOINT-SEED",
+        "run_rng": {"TreasureRoomRelics": {"counter": 1}},
+    }
+    source_game = CaptureGame(state, audit)
+    source_home = tmp_path / "source-home"
+    save = checkpoint_module.run_save_path(source_home)
+    save.parent.mkdir(parents=True)
+    save.write_text('{"native":"save"}', encoding="utf-8")
+    checkpoint = checkpoint_module.capture_strategic_checkpoint(
+        source_game,
+        home=source_home,
+        destination=tmp_path / "checkpoint",
+    )
+    restored_game = ClosedChestRestoreGame(state, audit)
+
+    restored = checkpoint_module.restore_strategic_checkpoint(
+        restored_game,
+        checkpoint,
+    )
+
+    assert restored["screen"] == "MAP"
+    assert restored_game.actions == [
+        ("continue_run", {"expected_state_revision": 30}),
+        ("open_chest", {"expected_state_revision": 31}),
+        (
+            "choose_treasure_relic",
+            {"expected_state_revision": 32, "option_index": 0},
+        ),
+        ("proceed", {"expected_state_revision": 33}),
+    ]
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -542,6 +631,72 @@ def _finished_event_state() -> dict[str, Any]:
         ],
     }
     return state
+
+
+def _closed_chest_state() -> dict[str, Any]:
+    """返回原生 MAP checkpoint 恢复出的未打开宝箱。
+
+    Returns:
+        dict[str, Any]: 只有 ``open_chest`` 动作的稳定状态。
+    """
+    return {
+        "state_revision": 31,
+        "screen": "CHEST",
+        "in_combat": False,
+        "available_actions": ["save_and_quit", "open_chest"],
+        "run": dict(_map_state()["run"]),
+        "chest": {
+            "is_opened": False,
+            "has_relic_been_claimed": False,
+            "relic_options": [],
+        },
+    }
+
+
+def _opened_chest_state() -> dict[str, Any]:
+    """返回已打开且只有一件遗物可领取的宝箱。
+
+    Returns:
+        dict[str, Any]: 只有 ``choose_treasure_relic`` 动作的稳定状态。
+    """
+    return {
+        "state_revision": 32,
+        "screen": "CHEST",
+        "in_combat": False,
+        "available_actions": ["save_and_quit", "choose_treasure_relic"],
+        "run": dict(_map_state()["run"]),
+        "chest": {
+            "is_opened": True,
+            "has_relic_been_claimed": False,
+            "relic_options": [
+                {
+                    "index": 0,
+                    "relic_id": "GORGET",
+                    "name": "护喉甲",
+                }
+            ],
+        },
+    }
+
+
+def _claimed_chest_state() -> dict[str, Any]:
+    """返回领取遗物后只允许离开的宝箱。
+
+    Returns:
+        dict[str, Any]: 只有 ``proceed`` 动作的稳定状态。
+    """
+    return {
+        "state_revision": 33,
+        "screen": "CHEST",
+        "in_combat": False,
+        "available_actions": ["save_and_quit", "proceed"],
+        "run": dict(_map_state()["run"]),
+        "chest": {
+            "is_opened": True,
+            "has_relic_been_claimed": True,
+            "relic_options": [],
+        },
+    }
 
 
 def _reward_state() -> dict[str, Any]:
