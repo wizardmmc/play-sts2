@@ -14,8 +14,11 @@ from play_sts2.training.sft import publish_adapter, resolve_device
 from ..battle_trainer import (
     FrozenAnchor,
     backward_grpo_group,
+    compute_grpo_anchor_values,
     evaluate_grpo_group,
     grpo_base_model_dtype,
+    validate_initial_policy_ratio,
+    validate_training_policy_identity,
 )
 from ..gigpo import load_gigpo_training_group
 from ..learner import GrpoTrainingError
@@ -31,7 +34,7 @@ class StrategyGrpoConfig:
         init_adapter (Path): 本轮冻结 ``S_n`` residual。
         policy_model (str): backbone 与 Tree 绑定的 vLLM 模型名。
         run_role (str): ``engineering_smoke`` 或 ``formal``。
-        gigpo_path (Path): 当前同种子八局 GiGPO group。
+        gigpo_path (Path): 单组模式的同种子八局 GiGPO group；多组模式必须留空。
         tree_root (Path): 零至多个 terminal Tree group 文件或目录。
         adapter_root (Path): ``S_(n+1)`` 输出父目录。
         runs_root (Path): 指标与配置输出父目录。
@@ -45,6 +48,12 @@ class StrategyGrpoConfig:
         kl_beta (float): 冻结父 residual sampled-KL 权重。
         backbone_loss_weight (float): 有 Tree 时 GiGPO 数据源权重。
         tree_loss_weight (float): 有 Tree 时全部 Tree 数据源总权重。
+        optimizer_steps (int): 单组模式为同组重复的 epoch 数（1~4）；多组模式
+            必须等于组数除以每组步长，即全数据恰好一遍。
+        loss_normalization (str): 历史 per_arm 或消除独立轨迹长度缩放的 group_tokens。
+        gigpo_paths (tuple[Path, ...]): 多组模式按序加载的全部八局 GiGPO group。
+        groups_per_step (int): 多组模式每次 optimizer 更新累积梯度的组数；
+            组间 loss 取平均，各组保留独立 advantage 与归一化。
     """
 
     base_model: Path
@@ -65,8 +74,12 @@ class StrategyGrpoConfig:
     kl_beta: float
     backbone_loss_weight: float = 0.5
     tree_loss_weight: float = 0.5
+    optimizer_steps: int = 1
     dagger_weight: float = 0.0
     dagger_samples_per_group: int = 0
+    loss_normalization: str = "per_arm"
+    gigpo_paths: tuple[Path, ...] = ()
+    groups_per_step: int = 0
 
 
 def load_strategy_grpo_config(path: Path) -> StrategyGrpoConfig:
@@ -82,13 +95,22 @@ def load_strategy_grpo_config(path: Path) -> StrategyGrpoConfig:
         StrategyGrpoConfig: 已验证的单卡训练配置。
     """
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    raw_single_path = str(data.get("gigpo_path", ""))
     try:
+        raw_multi_paths = data.get("gigpo_paths")
+        if raw_multi_paths is not None and not isinstance(raw_multi_paths, list):
+            raise GrpoTrainingError("gigpo_paths 必须是路径数组")
+        gigpo_paths = (
+            tuple(Path(str(item)) for item in raw_multi_paths)
+            if isinstance(raw_multi_paths, list)
+            else ()
+        )
         config = StrategyGrpoConfig(
             base_model=Path(str(data["base_model"])),
             init_adapter=Path(str(data["init_adapter"])),
             policy_model=str(data["policy_model"]),
             run_role=str(data["run_role"]),
-            gigpo_path=Path(str(data["gigpo_path"])),
+            gigpo_path=Path(raw_single_path),
             tree_root=Path(str(data["tree_root"])),
             adapter_root=Path(str(data["adapter_root"])),
             runs_root=Path(str(data["runs_root"])),
@@ -102,9 +124,28 @@ def load_strategy_grpo_config(path: Path) -> StrategyGrpoConfig:
             kl_beta=float(data.get("kl_beta", 0.02)),
             backbone_loss_weight=float(data.get("backbone_loss_weight", 0.5)),
             tree_loss_weight=float(data.get("tree_loss_weight", 0.5)),
+            optimizer_steps=int(data.get("optimizer_steps", 1)),
+            loss_normalization=str(data.get("loss_normalization", "per_arm")),
+            gigpo_paths=gigpo_paths,
+            groups_per_step=int(data.get("groups_per_step", 0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise GrpoTrainingError("组合战略 GRPO 配置字段无效") from exc
+    multi = bool(config.gigpo_paths)
+    # Path("") 会归一化为 "."，互斥判断必须用原始字符串。
+    if multi == bool(raw_single_path):
+        raise GrpoTrainingError(
+            "gigpo_path 与 gigpo_paths 必须二选一：多组模式只提供 gigpo_paths"
+        )
+    if multi and (
+        config.groups_per_step < 1
+        or len(config.gigpo_paths) % config.groups_per_step != 0
+        or config.optimizer_steps != len(config.gigpo_paths) // config.groups_per_step
+    ):
+        raise GrpoTrainingError(
+            "多组模式要求 groups_per_step>=1、组数整除，且 optimizer_steps "
+            "等于组数除以 groups_per_step（全数据恰好一遍）"
+        )
     weights = config.backbone_loss_weight + config.tree_loss_weight
     if (
         config.run_role not in {"engineering_smoke", "formal"}
@@ -118,9 +159,12 @@ def load_strategy_grpo_config(path: Path) -> StrategyGrpoConfig:
         or config.kl_beta < 0
         or config.backbone_loss_weight <= 0
         or config.tree_loss_weight <= 0
+        or config.loss_normalization not in {"per_arm", "group_tokens"}
         or not math.isclose(weights, 1.0, rel_tol=1e-9, abs_tol=1e-9)
+        or (not multi and not 1 <= config.optimizer_steps <= 4)
     ):
         raise GrpoTrainingError("组合战略 GRPO 配置值无效")
+    validate_training_policy_identity(config)
     return config
 
 
@@ -143,6 +187,7 @@ def train_strategy_grpo(
     Returns:
         dict[str, Any]: 组合 loss、ratio、KL、梯度与输出路径摘要。
     """
+    validate_training_policy_identity(config, check_base=True)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_name):
         raise GrpoTrainingError("组合战略 GRPO run_name 无效")
     adapter_path = config.adapter_root / run_name
@@ -158,10 +203,28 @@ def train_strategy_grpo(
         local_files_only=True,
         trust_remote_code=False,
     )
-    backbone = load_gigpo_training_group(
-        config.gigpo_path,
-        tokenizer,
-        max_length=config.max_length,
+    backbone_groups = (
+        [
+            load_gigpo_training_group(
+                path,
+                tokenizer,
+                max_length=config.max_length,
+            )
+            for path in config.gigpo_paths
+        ]
+        if config.gigpo_paths
+        else [
+            load_gigpo_training_group(
+                config.gigpo_path,
+                tokenizer,
+                max_length=config.max_length,
+            )
+        ]
+    )
+    step_group_indices = _backbone_step_plans(
+        group_count=len(backbone_groups),
+        groups_per_step=config.groups_per_step if config.gigpo_paths else 1,
+        single_group_epochs=1 if config.gigpo_paths else config.optimizer_steps,
     )
     tree_groups = tuple(
         load_terminal_tree_training_group(
@@ -171,7 +234,7 @@ def train_strategy_grpo(
         )
         for path in _terminal_tree_paths(config.tree_root)
     )
-    groups = (backbone, *tree_groups)
+    groups = (*backbone_groups, *tree_groups)
     _validate_strategy_group_receipts(groups, expected_strategy=config.policy_model)
 
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -205,50 +268,93 @@ def train_strategy_grpo(
     random.seed(config.seed)
     optimizer = torch.optim.AdamW(parameters, lr=config.learning_rate)
     anchor = FrozenAnchor(model)
-    optimizer.zero_grad(set_to_none=True)
     has_tree = bool(tree_groups)
     backbone_weight = config.backbone_loss_weight if has_tree else 1.0
-    backbone_metric = backward_grpo_group(
-        model,
-        anchor,
-        backbone.arms,
-        config=config,
-        device=device,
-        loss_scale=backbone_weight,
-    )
+    backbone_anchor_values = [
+        compute_grpo_anchor_values(
+            model,
+            anchor,
+            group.arms,
+            config=config,
+            device=device,
+        )
+        for group in backbone_groups
+    ]
+    tree_anchor_values = [
+        compute_grpo_anchor_values(
+            model,
+            anchor,
+            group.arms,
+            config=config,
+            device=device,
+        )
+        for group in tree_groups
+    ]
+    backbone_metrics: list[dict[str, Any]] = []
     tree_metrics = []
-    for group in tree_groups:
-        tree_metrics.append(
-            backward_grpo_group(
+    grad_norm = None
+    for step_index, chunk_indices in enumerate(step_group_indices):
+        optimizer.zero_grad(set_to_none=True)
+        step_metrics = []
+        for group_index in chunk_indices:
+            step_metrics.append(
+                backward_grpo_group(
+                    model,
+                    anchor,
+                    backbone_groups[group_index].arms,
+                    config=config,
+                    device=device,
+                    loss_scale=backbone_weight / len(chunk_indices),
+                    precomputed_anchor_values=backbone_anchor_values[group_index],
+                )
+            )
+        backbone_metrics.append(_mean_metrics(step_metrics))
+        tree_metrics = []
+        for group, group_anchor_values in zip(
+            tree_groups, tree_anchor_values, strict=True
+        ):
+            tree_metrics.append(
+                backward_grpo_group(
+                    model,
+                    anchor,
+                    group.arms,
+                    config=config,
+                    device=device,
+                    loss_scale=config.tree_loss_weight / len(tree_groups),
+                    precomputed_anchor_values=group_anchor_values,
+                )
+            )
+        if step_index == 0 and config.run_role == "formal":
+            for metric in (*step_metrics, *tree_metrics):
+                validate_initial_policy_ratio(metric)
+        invalid_gradients = [
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+            and parameter.grad is not None
+            and not torch.isfinite(parameter.grad).all().item()
+        ]
+        if invalid_gradients:
+            raise GrpoTrainingError(
+                f"组合战略 GRPO 梯度不是有限数值: {invalid_gradients[0]}"
+            )
+        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, config.max_grad_norm)
+        if not torch.isfinite(grad_norm).item():
+            raise GrpoTrainingError("组合战略 GRPO 梯度范数无效")
+        optimizer.step()
+    assert backbone_metrics and grad_norm is not None
+    backbone_metric = _mean_metrics(backbone_metrics)
+    post_backbone = _mean_metrics(
+        [
+            evaluate_grpo_group(
                 model,
                 anchor,
-                group.arms,
+                backbone_groups[group_index].arms,
                 config=config,
                 device=device,
-                loss_scale=config.tree_loss_weight / len(tree_groups),
             )
-        )
-    invalid_gradients = [
-        name
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad
-        and parameter.grad is not None
-        and not torch.isfinite(parameter.grad).all().item()
-    ]
-    if invalid_gradients:
-        raise GrpoTrainingError(
-            f"组合战略 GRPO 梯度不是有限数值: {invalid_gradients[0]}"
-        )
-    grad_norm = torch.nn.utils.clip_grad_norm_(parameters, config.max_grad_norm)
-    if not torch.isfinite(grad_norm).item():
-        raise GrpoTrainingError("组合战略 GRPO 梯度范数无效")
-    optimizer.step()
-    post_backbone = evaluate_grpo_group(
-        model,
-        anchor,
-        backbone.arms,
-        config=config,
-        device=device,
+            for group_index in step_group_indices[-1]
+        ]
     )
     post_tree = [
         evaluate_grpo_group(
@@ -263,8 +369,15 @@ def train_strategy_grpo(
     post_metrics = (post_backbone, *post_tree)
     if any(not _post_update_metrics_safe(metric) for metric in post_metrics):
         anchor.restore()
-        raise GrpoTrainingError("组合战略更新超过 post-step KL/ratio 硬门槛，已回滚")
+        detail = "; ".join(
+            f"kl={metric.get('kl')}, ratio={metric.get('ratio_mean')}"
+            for metric in post_metrics
+        )
+        raise GrpoTrainingError(
+            f"组合战略更新超过 post-step KL/ratio 硬门槛，已回滚: {detail}"
+        )
 
+    primary = backbone_groups[0]
     summary = {
         "run_name": run_name,
         "status": "completed",
@@ -273,10 +386,13 @@ def train_strategy_grpo(
         "base_model": str(config.base_model),
         "init_adapter": str(config.init_adapter),
         "policy_model": config.policy_model,
-        "battle_policy_model": backbone.battle_policy_version,
-        "generation_profile": dict(backbone.generation_profile or {}),
-        "environment": dict(backbone.environment or {}),
-        "gigpo_path": str(config.gigpo_path),
+        "battle_policy_model": primary.battle_policy_version,
+        "generation_profile": dict(primary.generation_profile or {}),
+        "environment": dict(primary.environment or {}),
+        "gigpo_path": str(config.gigpo_path) if config.gigpo_path != Path(".") else "",
+        "gigpo_paths": [str(path) for path in config.gigpo_paths],
+        "backbone_groups": len(backbone_groups),
+        "groups_per_step": config.groups_per_step if config.gigpo_paths else 1,
         "tree_groups": len(tree_groups),
         "backbone_loss_weight": backbone_weight,
         "tree_loss_weight": config.tree_loss_weight if has_tree else 0.0,
@@ -285,7 +401,8 @@ def train_strategy_grpo(
         "post_backbone_metric": post_backbone,
         "post_tree_metric": _mean_metrics(post_tree),
         "grad_norm": float(grad_norm.detach().cpu()),
-        "optimizer_steps": 1,
+        "optimizer_steps": len(step_group_indices),
+        "loss_normalization": config.loss_normalization,
         "adapter": str(adapter_path),
         "device": device,
     }
@@ -322,6 +439,33 @@ def strategy_tensorboard_payload(summary: dict[str, Any]) -> dict[str, Any]:
         "strategy/post_backbone": summary.get("post_backbone_metric"),
         "strategy/post_tree": summary.get("post_tree_metric"),
     }
+
+
+def _backbone_step_plans(
+    *,
+    group_count: int,
+    groups_per_step: int,
+    single_group_epochs: int,
+) -> list[tuple[int, ...]]:
+    """生成每次 optimizer 更新要累积的 backbone 组索引计划。
+
+    多组模式按加载顺序切块，全数据恰好一遍；单组模式重复同一组索引，
+    保持历史同组多 epoch 语义。调用方已保证组数可整除。
+
+    Args:
+        group_count (int): 已加载的 backbone 组数。
+        groups_per_step (int): 多组模式每步累积的组数。
+        single_group_epochs (int): 单组模式的重复 epoch 数。
+
+    Returns:
+        list[tuple[int, ...]]: 每个 optimizer 步的组索引元组。
+    """
+    if group_count == 1:
+        return [(0,)] * single_group_epochs
+    return [
+        tuple(range(start, start + groups_per_step))
+        for start in range(0, group_count, groups_per_step)
+    ]
 
 
 def _terminal_tree_paths(root: Path) -> tuple[Path, ...]:

@@ -16,3 +16,6 @@ clip = 0.2
 kl_beta = 0.02
 backbone_loss_weight = 0.5
 tree_loss_weight = 0.5
+
+# 终局信用使用组内共同分母，不按每条轨迹长度分别缩放。
+loss_normalization = "group_tokens"

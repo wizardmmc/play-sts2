@@ -18,3 +18,6 @@ dagger_weight = 0.0
 dagger_samples_per_group = 1
 reward_scheme = "core"
 potion_cost = 0.25
+
+# 终局信用使用组内共同分母，不按每条轨迹长度分别缩放。
+loss_normalization = "group_tokens"

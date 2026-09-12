@@ -60,6 +60,7 @@ class BattleGrpoConfig:
         dagger_samples_per_group (int): 每个优化步加入的 DAgger 样本数。
         reward_scheme (BattleRewardScheme): 当前奖励消融方案。
         potion_cost (float): 固定药水成本方案的单瓶成本。
+        loss_normalization (str): per_arm 保留历史逐轨迹平均；group_tokens 使用组内共同分母。
     """
 
     base_model: Path
@@ -83,6 +84,7 @@ class BattleGrpoConfig:
     dagger_samples_per_group: int
     reward_scheme: BattleRewardScheme
     potion_cost: float
+    loss_normalization: str = "per_arm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +238,50 @@ class FrozenAnchor:
                 parameter.copy_(self._state[name])
 
 
+def validate_training_policy_identity(config: Any, *, check_base: bool = False) -> None:
+    """在正式更新前拒绝把旧 adapter 路径标成新 policy。
+
+    Args:
+        config (Any): 含 run_role、init_adapter 和 policy_model 的训练配置。
+        check_base (bool): 在模型加载入口检查 base 的原生 SFT 合并收据。
+
+    Raises:
+        GrpoTrainingError: 正式初始化错配，或 base 没有 SFT 合并来源。
+    """
+    if config.run_role == "formal" and config.init_adapter.name != config.policy_model:
+        raise GrpoTrainingError(
+            f"init_adapter 与 policy_model 不一致: {config.init_adapter} != {config.policy_model}"
+        )
+    if check_base and config.run_role == "formal":
+        try:
+            manifest = json.loads(
+                (config.base_model / "merge_manifest.json").read_text()
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise GrpoTrainingError("正式 RL base 缺少有效 SFT 合并收据") from exc
+        if not isinstance(manifest, dict) or not all(
+            isinstance(manifest.get(key), str) and manifest[key]
+            for key in ("adapter", "merge")
+        ):
+            raise GrpoTrainingError("正式 RL base 的 SFT 合并来源不完整")
+
+
+def validate_initial_policy_ratio(metrics: Mapping[str, float]) -> None:
+    """在首个 optimizer.step 前拒绝明显不匹配的真实行为分布。
+
+    此检查用于发现明显错配，不能替代实际权重路径和 serving 收据校验。
+
+    Args:
+        metrics (Mapping[str, float]): 当前未更新 learner 在首组上的指标。
+
+    Raises:
+        GrpoTrainingError: 初始 ratio 非有限或超出 BF16 等价容差。
+    """
+    ratio = metrics["ratio_mean"]
+    if not math.isfinite(ratio) or not 0.95 <= ratio <= 1.05:
+        raise GrpoTrainingError(f"初始 policy ratio 错配，未执行更新: {ratio}")
+
+
 def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
     """从 TOML 加载战斗 GRPO 配置。
 
@@ -283,6 +329,7 @@ def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
             dagger_samples_per_group=int(data.get("dagger_samples_per_group", 1)),
             reward_scheme=scheme,  # type: ignore[arg-type]
             potion_cost=float(data.get("potion_cost", 0.25)),
+            loss_normalization=str(data.get("loss_normalization", "per_arm")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise GrpoTrainingError(f"无效战斗 GRPO 配置: {exc}") from exc
@@ -308,6 +355,7 @@ def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
         and config.dagger_root is None
         or not config.policy_model.strip()
         or config.run_role not in {"engineering_smoke", "formal"}
+        or config.loss_normalization not in {"per_arm", "group_tokens"}
         or config.run_role == "formal"
         and config.checkpoint_groups < 20
     ):
@@ -319,6 +367,7 @@ def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
             else "组合字段"
         )
         raise GrpoTrainingError(f"战斗 GRPO 配置值无效: {detail}")
+    validate_training_policy_identity(config)
     return config
 
 
@@ -349,6 +398,7 @@ def train_battle_grpo(
     Returns:
         dict[str, Any]: 可序列化的完成或暂停摘要。
     """
+    validate_training_policy_identity(config, check_base=True)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_name):
         raise GrpoTrainingError(
             "战斗 GRPO run_name 只能包含字母、数字、点、横线和下划线"
@@ -478,6 +528,8 @@ def train_battle_grpo(
                 dagger_cursor=dagger_cursor,
                 config=config,
                 device=device,
+                verify_initial_policy=config.run_role == "formal"
+                and next_group_index == 0,
             )
             optimizer_steps += 1
             next_group_index += 1
@@ -516,6 +568,15 @@ def train_battle_grpo(
                 )
 
     completed = next_group_index == len(groups)
+    post_update_metric = None
+    if completed and config.run_role == "formal":
+        post_update_metric = verify_final_battle_update(
+            model,
+            anchor,
+            groups[-1],
+            config=config,
+            device=device,
+        )
     summary = {
         "run_name": run_name,
         "status": "completed" if completed else "paused",
@@ -530,6 +591,11 @@ def train_battle_grpo(
         "groups_total": len(groups),
         "groups_completed": next_group_index,
         "optimizer_steps": optimizer_steps,
+        "loss_normalization": config.loss_normalization,
+        "post_update_metric": post_update_metric,
+        "post_update_group_id": groups[-1].group_id
+        if post_update_metric is not None
+        else None,
         "dagger_samples": len(dagger_samples),
         "dagger_weight": config.dagger_weight,
         "exact_resume": exact_resume,
@@ -541,6 +607,44 @@ def train_battle_grpo(
         publish_adapter(model, tokenizer, adapter_path, summary)
     _write_json(run_path / "summary.json", summary)
     return summary
+
+
+def verify_final_battle_update(
+    model: Any,
+    anchor: FrozenAnchor,
+    group: Any,
+    *,
+    config: Any,
+    device: str,
+) -> dict[str, float]:
+    """在发布前对最后一个完整组重算 KL/ratio，越界时恢复父权重。
+
+    这是最后一步后的局部门禁，不能冒充全数据或未训练场景回归。
+
+    Args:
+        model (Any): 已执行本轮全部更新的候选模型。
+        anchor (FrozenAnchor): 本轮冻结父 residual。
+        group (Any): 本轮最后一个完整八臂组。
+        config (Any): 同一训练配置。
+        device (str): 模型所在设备。
+
+    Raises:
+        GrpoTrainingError: 候选在最后一组上的更新后漂移越界。
+
+    Returns:
+        dict[str, float]: 真正更新后的 KL 与 ratio 指标。
+    """
+    metrics = evaluate_grpo_group(
+        model, anchor, group.arms, config=config, device=device
+    )
+    kl = metrics.get("kl", math.inf)
+    ratio = metrics.get("ratio_mean", math.inf)
+    if not math.isfinite(kl) or kl > 0.05 or not 0.5 <= ratio <= 2.0:
+        anchor.restore()
+        raise GrpoTrainingError(
+            f"战斗 post-step KL/ratio 越界，已恢复父权重: {metrics}"
+        )
+    return metrics
 
 
 def _checkpoint_due(
@@ -631,6 +735,7 @@ def optimize_grpo_group(
     dagger_cursor: int,
     config: BattleGrpoConfig,
     device: str,
+    verify_initial_policy: bool = False,
 ) -> tuple[dict[str, float], int]:
     """对一个八臂 group 及独立 DAgger 小批执行一次更新。
 
@@ -643,6 +748,7 @@ def optimize_grpo_group(
         dagger_cursor (int): 下一批 DAgger 起点。
         config (BattleGrpoConfig): 损失与裁剪配置。
         device (str): 单个训练设备。
+        verify_initial_policy (bool): 正式首组在 optimizer.step 前核对行为分布。
 
     Raises:
         GrpoTrainingError: group、loss 或梯度出现无效数值。
@@ -662,6 +768,8 @@ def optimize_grpo_group(
         config=config,
         device=device,
     )
+    if verify_initial_policy:
+        validate_initial_policy_ratio(totals)
 
     dagger_loss_value = 0.0
     if config.dagger_weight > 0:
@@ -704,6 +812,52 @@ def optimize_grpo_group(
     )
 
 
+def compute_grpo_anchor_values(
+    model: Any,
+    anchor: FrozenAnchor,
+    arms: Sequence[Any],
+    *,
+    config: Any,
+    device: str,
+) -> list[list[Any]]:
+    """在冻结锚权重上一次算清整组逐序列 log-prob。
+
+    多 epoch 更新复用同一批锚值；锚值只依赖冻结权重，与当前 learner 无关。
+
+    Args:
+        model (Any): 当前可训练 policy（锚值计算时临时切到冻结锚）。
+        anchor (FrozenAnchor): 冻结父 adapter。
+        arms (Sequence[Any]): 同组训练 arms。
+        config (Any): 提供 logits 分块大小的配置。
+        device (str): 单个训练设备。
+
+    Raises:
+        GrpoTrainingError: arm 没有可训练 token。
+
+    Returns:
+        list[list[Any]]: 每个 arm 内逐序列的锚 log-prob 张量。
+    """
+    import torch
+
+    values: list[list[Any]] = []
+    for arm in arms:
+        if arm.supervised_tokens <= 0:
+            raise GrpoTrainingError("GRPO arm 没有可训练 token")
+        arm_anchors = []
+        for sequence in arm.sequences:
+            with anchor.applied(), torch.no_grad():
+                arm_anchors.append(
+                    _sequence_logprobs(
+                        model,
+                        sequence,
+                        device=device,
+                        logits_chunk_size=config.logits_chunk_size,
+                    )
+                )
+        values.append(arm_anchors)
+    return values
+
+
 def backward_grpo_group(
     model: Any,
     anchor: FrozenAnchor,
@@ -712,6 +866,7 @@ def backward_grpo_group(
     config: Any,
     device: str,
     loss_scale: float = 1.0,
+    precomputed_anchor_values: Sequence[Sequence[Any]] | None = None,
 ) -> dict[str, float]:
     """累积一个 GRPO/Tree/GiGPO group 的梯度但不更新优化器。
 
@@ -727,6 +882,8 @@ def backward_grpo_group(
         config (Any): 提供 logits 分块、clip 与 KL 权重的配置。
         device (str): 单个训练设备。
         loss_scale (float): 当前数据源在组合战略 loss 中的固定系数。
+        precomputed_anchor_values (Sequence[Sequence[Any]] | None): 可选的
+            ``compute_grpo_anchor_values`` 结果；多 epoch 复用时不再重算。
 
     Raises:
         GrpoTrainingError: arm、重要性权重或 loss 数值无效。
@@ -742,20 +899,23 @@ def backward_grpo_group(
         raise GrpoTrainingError("组合 GRPO loss_scale 必须位于 (0, 1]")
     anchor_values: list[list[Any]] = []
     importance_weights: list[float] = []
-    for arm in arms:
+    for arm_index, arm in enumerate(arms):
         if arm.supervised_tokens <= 0:
             raise GrpoTrainingError("GRPO arm 没有可训练 token")
-        arm_anchors = []
-        for sequence in arm.sequences:
-            with anchor.applied(), torch.no_grad():
-                arm_anchors.append(
-                    _sequence_logprobs(
-                        model,
-                        sequence,
-                        device=device,
-                        logits_chunk_size=config.logits_chunk_size,
+        if precomputed_anchor_values is not None:
+            arm_anchors = list(precomputed_anchor_values[arm_index])
+        else:
+            arm_anchors = []
+            for sequence in arm.sequences:
+                with anchor.applied(), torch.no_grad():
+                    arm_anchors.append(
+                        _sequence_logprobs(
+                            model,
+                            sequence,
+                            device=device,
+                            logits_chunk_size=config.logits_chunk_size,
+                        )
                     )
-                )
         anchor_values.append(arm_anchors)
         if arm.recompute_root_probability:
             try:
@@ -775,6 +935,7 @@ def backward_grpo_group(
     totals = {"policy_loss": 0.0, "kl": 0.0, "ratio_mean": 0.0}
     metric_weight_total = 0.0
     estimator_weights = _importance_estimator_weights(importance_weights)
+    denominators = _loss_normalization_denominators(arms, config, estimator_weights)
     for arm_index, arm in enumerate(arms):
         arm_weight = estimator_weights[arm_index]
         for sequence_index, sequence in enumerate(arm.sequences):
@@ -802,7 +963,7 @@ def backward_grpo_group(
                 kl_beta=config.kl_beta,
             )
             token_count = len(sequence.behavior_logprobs)
-            weight = arm_weight * token_count / arm.supervised_tokens
+            weight = arm_weight * token_count / denominators[arm_index]
             (total * weight * loss_scale).backward()
             totals["policy_loss"] += float(policy.detach().cpu()) * weight
             totals["kl"] += float(kl.detach().cpu()) * weight
@@ -872,6 +1033,7 @@ def evaluate_grpo_group(
             importance = 1.0
         importance_weights.append(importance)
     estimator_weights = _importance_estimator_weights(importance_weights)
+    denominators = _loss_normalization_denominators(arms, config, estimator_weights)
     totals = {"kl": 0.0, "ratio_mean": 0.0}
     metric_weight_total = 0.0
     with torch.no_grad():
@@ -902,7 +1064,7 @@ def evaluate_grpo_group(
                 )
                 token_count = len(sequence.behavior_logprobs)
                 weight = (
-                    estimator_weights[arm_index] * token_count / arm.supervised_tokens
+                    estimator_weights[arm_index] * token_count / denominators[arm_index]
                 )
                 totals["kl"] += float(kl.detach().cpu()) * weight
                 totals["ratio_mean"] += float(ratio.detach().cpu()) * weight
@@ -915,6 +1077,37 @@ def evaluate_grpo_group(
         "importance_mean": sum(importance_weights) / len(importance_weights),
         "importance_max": max(importance_weights),
     }
+
+
+def _loss_normalization_denominators(
+    arms: Sequence[Any], config: Any, estimator_weights: Sequence[float]
+) -> tuple[float, ...]:
+    """选择逐轨迹或全组共同 token 分母，保留原来的 importance estimator。
+
+    Args:
+        arms (Sequence[Any]): 同一冻结策略的完整轨迹。
+        config (Any): 含可选 loss_normalization 的训练配置。
+        estimator_weights (Sequence[float]): 已校验的 pi_old/q/K，保持原值不自归一化。
+
+    Raises:
+        GrpoTrainingError: 轨迹无监督 token 或归一化方式无效。
+
+    Returns:
+        tuple[float, ...]: 每条轨迹使用的固定分母；group_tokens 下全部相同。
+    """
+    lengths = tuple(float(arm.supervised_tokens) for arm in arms)
+    if not lengths or any(length <= 0 for length in lengths):
+        raise GrpoTrainingError("GRPO arm 没有可训练 token")
+    mode = getattr(config, "loss_normalization", "per_arm")
+    if mode == "per_arm":
+        return lengths
+    if mode == "group_tokens":
+        denominator = sum(
+            weight * length
+            for weight, length in zip(estimator_weights, lengths, strict=True)
+        ) / sum(estimator_weights)
+        return (denominator,) * len(lengths)
+    raise GrpoTrainingError(f"未知 loss_normalization: {mode}")
 
 
 def _importance_estimator_weights(values: Sequence[float]) -> tuple[float, ...]:
@@ -1311,7 +1504,9 @@ def _validate_resume_inputs(
     Raises:
         GrpoTrainingError: 配置或输入清单发生变化。
     """
-    if _read_json(run_path / "config.json") != _config_json(config):
+    saved_config = _read_json(run_path / "config.json")
+    saved_config.setdefault("loss_normalization", "per_arm")
+    if saved_config != _config_json(config):
         raise GrpoTrainingError("精确续训配置已变化")
     expected = {
         "policy_model": config.policy_model,
