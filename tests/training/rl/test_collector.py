@@ -1,6 +1,7 @@
 """验证多游戏 worker 的严格同入口 K=8 战斗收集。"""
 
 import importlib
+import json
 from typing import Any
 
 import httpx
@@ -26,6 +27,7 @@ from play_sts2.scenario import (
     ScenarioResetResult,
     ScenarioVerificationError,
 )
+from play_sts2.training.rl.io import write_battle_rollout
 
 
 class FakeBattleWorker:
@@ -147,6 +149,60 @@ def test_collector_builds_k8_group_across_two_workers() -> None:
         for arm_index, expected in worker.calls
         if arm_index != 0
     )
+
+
+def test_completed_arm_is_saved_before_later_infrastructure_failure(tmp_path) -> None:
+    """后续战斗中断不能让已经完成的结构化轨迹一起丢失。"""
+    rl = importlib.import_module("play_sts2.training.rl")
+
+    class FailingWorker(FakeBattleWorker):
+        """完成首臂后模拟游戏基础设施中断。"""
+
+        def collect_arm(self, scenario, *, arm_index, expected_snapshot):
+            """只让首臂完成，后续臂明确失败。"""
+            if arm_index:
+                raise rl.RolloutInfrastructureError("game action timed out")
+            return super().collect_arm(
+                scenario, arm_index=arm_index, expected_snapshot=expected_snapshot
+            )
+
+    def persist(rollout):
+        """按真实序列化入口写入已完成臂。"""
+        write_battle_rollout(
+            tmp_path / f"arm-{rollout.arm_index}.json",
+            rollout,
+            group_id="partial-eval",
+            scenario=_scenario(),
+            environment={"game_version": "v0.111.0"},
+        )
+
+    worker = FailingWorker(rl, "worker-0", _snapshot())
+    with pytest.raises(rl.RolloutInfrastructureError):
+        rl.BattleGroupCollector(
+            [worker], infrastructure_attempts=1, on_rollout=persist
+        ).collect(_scenario(), group_id="partial-eval")
+    saved = json.loads((tmp_path / "arm-0.json").read_text())
+    assert saved["format"] == "battle_rollout"
+    assert saved["group_id"] == "partial-eval"
+    assert saved["rollout"]["arm_index"] == 0
+    assert saved["rollout"]["steps"][0]["action"] == "ACTION: end_turn"
+    assert not (tmp_path / "arm-1.json").exists()
+
+
+def test_persistence_failure_does_not_resample_completed_arm() -> None:
+    """写盘失败不是游戏失败，不能重复执行已经完成的战斗。"""
+    rl = importlib.import_module("play_sts2.training.rl")
+    worker = FakeBattleWorker(rl, "worker-0", _snapshot())
+
+    def fail(rollout):
+        """模拟输出盘不可写。"""
+        raise OSError("disk unavailable")
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        rl.BattleGroupCollector([worker], on_rollout=fail).collect(
+            _scenario(), group_id="write-failure"
+        )
+    assert len(worker.calls) == 1
 
 
 def test_game_worker_resets_scenario_and_projects_runtime_result() -> None:

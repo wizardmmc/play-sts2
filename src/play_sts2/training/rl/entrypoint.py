@@ -15,6 +15,7 @@ from .contracts import (
     BEHAVIOR_LOGPROBS_MODE,
     RL_GAME_VERSION,
     STRUCTURED_OUTPUT_BACKEND,
+    BattleRollout,
 )
 from .dagger import (
     DaggerReplayLabeler,
@@ -26,6 +27,7 @@ from .dagger import (
 from .io import (
     load_battle_scenario,
     load_battle_snapshot,
+    write_battle_rollout,
     write_battle_rollout_group,
 )
 
@@ -47,6 +49,7 @@ def collect_battle_rollout_group(
     infrastructure_attempts: int = 3,
     expected_snapshot_path: Path | None = None,
     allow_zero_variance: bool = False,
+    arm_output_root: Path | None = None,
 ) -> dict[str, object]:
     """从多个隔离游戏实例收集并写出一个严格同入口 group。
 
@@ -66,7 +69,8 @@ def collect_battle_rollout_group(
         infrastructure_attempts (int): 单条 arm 的基础设施总尝试数。
         expected_snapshot_path (Path | None): 可选的 backbone 原始入口快照；提供时
             第一条 reset 也必须逐字段一致。
-        allow_zero_variance (bool): 是否为独立 DAgger 保存零优势完整组。
+        allow_zero_variance (bool): 是否为评估或独立 DAgger 保存无探索/零优势完整组。
+        arm_output_root (Path | None): 可选的空输出目录，每场完成立即保存独立轨迹。
 
     Raises:
         ValueError: 游戏 worker 数、地址或 vLLM 行为概率模式不满足契约。
@@ -91,6 +95,11 @@ def collect_battle_rollout_group(
     ):
         raise ValueError("战斗 RL 要求显式声明 xgrammar backend 与精确版本")
     scenario = load_battle_scenario(scenario_path)
+    if arm_output_root is not None:
+        arm_output_root = Path(arm_output_root)
+        arm_output_root.mkdir(parents=True, exist_ok=True)
+        if any(arm_output_root.iterdir()):
+            raise FileExistsError(f"逐臂输出目录必须为空: {arm_output_root}")
     expected_snapshot = (
         load_battle_snapshot(expected_snapshot_path)
         if expected_snapshot_path is not None
@@ -131,11 +140,24 @@ def collect_battle_rollout_group(
             "structured_output_backend": structured_output_backend,
             "structured_output_version": structured_output_version,
         }
+
+        def persist_arm(rollout: BattleRollout) -> None:
+            """在下一场或其他worker失败前保存当前已完成轨迹。"""
+            assert arm_output_root is not None
+            write_battle_rollout(
+                arm_output_root / f"arm-{rollout.arm_index:02d}.json",
+                rollout,
+                group_id=group_id,
+                scenario=scenario,
+                environment=environment,
+            )
+
         group = BattleGroupCollector(
             workers,
             group_size=group_size,
             infrastructure_attempts=infrastructure_attempts,
             allow_zero_variance=allow_zero_variance,
+            on_rollout=persist_arm if arm_output_root is not None else None,
         ).collect(
             scenario,
             group_id=group_id,

@@ -339,3 +339,21 @@ def _write_profile(profile: Path) -> None:
         '{"fast_mode":"fast","upload_data":false}',
         encoding="utf-8",
     )
+
+
+def test_running_game_stop_terminates_owned_process(tmp_path) -> None:
+    """预算控制使用真实实例接口，只停止其拥有的进程且允许重复清理。"""
+    import subprocess
+    import sys
+
+    from play_sts2.game_launcher import RunningGame
+
+    with subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+    ) as process:
+        game = RunningGame(
+            "http://127.0.0.1:1", tmp_path, tmp_path / "game.log", process
+        )
+        game.stop()
+        assert process.wait(timeout=2) != 0
+        game.stop()

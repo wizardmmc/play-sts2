@@ -50,6 +50,14 @@ class RunningGame:
         """
         return self._process.wait()
 
+    def stop(self) -> None:
+        """停止本实例拥有的游戏进程，供预算截止与上下文清理共用。
+
+        Returns:
+            None: 已退出的实例不再发送信号，可安全重复调用。
+        """
+        _stop_game(self._process)
+
 
 @contextmanager
 def launch_game(

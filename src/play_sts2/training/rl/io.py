@@ -14,7 +14,7 @@ from ...scenario import (
     IntentSnapshot,
     ModelInputSnapshot,
 )
-from .contracts import BattleRolloutGroup
+from .contracts import BattleRollout, BattleRolloutGroup
 
 
 def load_battle_scenario(path: Path) -> BattleScenario:
@@ -46,6 +46,48 @@ def load_battle_scenario(path: Path) -> BattleScenario:
         return BattleScenario(**values)
     except TypeError as exc:
         raise ValueError(f"战斗场景字段无效: {path}") from exc
+
+
+def write_battle_rollout(
+    path: Path,
+    rollout: BattleRollout,
+    *,
+    group_id: str,
+    scenario: BattleScenario,
+    environment: Mapping[str, str],
+) -> Path:
+    """立即保存已完成的一臂，明确它不是完整训练组。
+
+    Args:
+        path (Path): 独立臂文件的输出路径。
+        rollout (BattleRollout): 已完成并通过worker校验的战斗轨迹。
+        group_id (str): 所属采集组标识。
+        scenario (BattleScenario): 统一的场景配置。
+        environment (Mapping[str, str]): 当前游戏与采样后端版本收据。
+
+    Returns:
+        Path: 完整写入后的文件路径。
+
+    Raises:
+        FileExistsError: 输出已存在，不覆盖先前证据。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise FileExistsError(path)
+    payload = {
+        "format": "battle_rollout",
+        "group_id": group_id,
+        "scenario": asdict(scenario),
+        "environment": dict(environment),
+        "rollout": asdict(rollout),
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("x", encoding="utf-8") as output:
+        json.dump(payload, output, ensure_ascii=False, indent=2)
+        output.write("\n")
+    temporary.replace(path)
+    return path
 
 
 def write_battle_rollout_group(

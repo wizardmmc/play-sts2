@@ -1,6 +1,6 @@
 """并行编排多个隔离游戏 worker 收集同场景战斗 arms。"""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
@@ -188,6 +188,7 @@ class BattleGroupCollector:
         group_size: int = 8,
         infrastructure_attempts: int = 3,
         allow_zero_variance: bool = False,
+        on_rollout: Callable[[BattleRollout], None] | None = None,
     ) -> None:
         """保存 worker 池与基础设施重采边界。
 
@@ -195,7 +196,9 @@ class BattleGroupCollector:
             workers (Sequence[BattleRolloutWorker]): 彼此隔离的本地游戏 workers。
             group_size (int): 每个同状态 group 的精确 arm 数。
             infrastructure_attempts (int): 单条 arm 遭遇基础设施故障时的总尝试数。
-            allow_zero_variance (bool): 是否为独立 DAgger 保留零优势完整组。
+            allow_zero_variance (bool): 是否为评估或独立 DAgger 保留无探索/零优势完整组。
+            on_rollout (Callable[[BattleRollout], None] | None): 每臂完成后立即调用；
+                可逐臂持久化，回调失败直接传播，不作为游戏故障重采。
 
         Raises:
             ValueError: worker 为空、group 小于 2 或尝试数小于 1。
@@ -213,6 +216,7 @@ class BattleGroupCollector:
         self._group_size = group_size
         self._infrastructure_attempts = infrastructure_attempts
         self._allow_zero_variance = allow_zero_variance
+        self._on_rollout = on_rollout
 
     def collect(
         self,
@@ -326,7 +330,7 @@ class BattleGroupCollector:
         """
         for attempt in range(self._infrastructure_attempts):
             try:
-                return worker.collect_arm(
+                rollout = worker.collect_arm(
                     scenario,
                     arm_index=arm_index,
                     expected_snapshot=expected_snapshot,
@@ -334,4 +338,8 @@ class BattleGroupCollector:
             except RolloutInfrastructureError:
                 if attempt + 1 == self._infrastructure_attempts:
                     raise
+            else:
+                if self._on_rollout is not None:
+                    self._on_rollout(rollout)
+                return rollout
         raise RuntimeError("基础设施重采循环意外结束")
