@@ -126,6 +126,66 @@ def test_apply_sft_mix_keeps_all_knowledge_and_rare_actions() -> None:
     assert mixed["test"] == splits["test"]
 
 
+def test_apply_sft_mix_oversamples_selected_action_with_suffixed_ids() -> None:
+    """按动作超采样应复制行为行并保留唯一样本 ID。
+
+    Raises:
+        AssertionError: 行为副本数量、样本后缀、身份唯一性或留出分卷被破坏。
+
+    Returns:
+        None: 此测试只检查内存中的确定性复制。
+    """
+    splits = {
+        "train": [
+            _human("claim-1", "claim_reward"),
+            _human(
+                "solver-claim-1",
+                "claim_reward",
+                origin="human_combat_solver",
+            ),
+            _human("dagger-claim-1", "claim_reward", origin="dagger"),
+            _human("play-1", "play_card"),
+        ],
+        "dev": [_human("dev-claim-1", "claim_reward")],
+        "test": [],
+    }
+
+    mixed = sft.apply_sft_mix(
+        splits,
+        seed=7,
+        human_train_action_limits={},
+        human_oversample_per_action={"claim_reward": 3},
+    )
+
+    train_ids = [row["sample_id"] for row in mixed["train"]]
+    assert train_ids.count("claim-1") == 1
+    assert train_ids.count("claim-1#o2") == 1
+    assert train_ids.count("claim-1#o3") == 1
+    assert train_ids.count("solver-claim-1#o2") == 1
+    assert "dagger-claim-1#o2" not in train_ids
+    assert "play-1#o2" not in train_ids
+    assert len(set(train_ids)) == len(train_ids)
+    assert mixed["dev"] == splits["dev"]
+
+
+def test_apply_sft_mix_rejects_invalid_oversample_factor() -> None:
+    """超采样倍数必须是不小于一的整数。
+
+    Raises:
+        AssertionError: 零或负倍数未被拒绝。
+
+    Returns:
+        None: 此测试只检查配方边界。
+    """
+    with pytest.raises(sft.DatasetBuildError):
+        sft.apply_sft_mix(
+            {"train": [], "dev": [], "test": []},
+            seed=7,
+            human_train_action_limits={},
+            human_oversample_per_action={"claim_reward": 0},
+        )
+
+
 def test_apply_sft_mix_is_deterministic_without_knowledge_limits() -> None:
     """不限制行为时三分卷必须原样保留并可重复执行。
 
@@ -243,10 +303,60 @@ status_math = 120
     assert config.seed == 20260828
     assert config.human_game_version == "v0.107.1"
     assert config.human_train_action_limits == {"play_card": 600}
+    assert config.human_oversample_per_action == {}
     assert config.arithmetic_train_per_kind == {
         "orb_focus": 100,
         "status_math": 120,
     }
+
+
+def test_load_sft_mix_reads_oversample_recipe(tmp_path: Path) -> None:
+    """配方可按动作声明超采样倍数并保留其余字段。
+
+    Args:
+        tmp_path (Path): Pytest 提供的隔离目录。
+
+    Raises:
+        AssertionError: 倍数未读入或非法倍数被接受。
+
+    Returns:
+        None: 此测试只检查配置解析。
+    """
+    path = tmp_path / "mix.toml"
+    path.write_text(
+        """seed = 20260902
+
+[human]
+game_version = "v0.107.1"
+
+[human.train_max_per_action]
+claim_reward = 600
+
+[human.oversample_per_action]
+claim_reward = 6
+""",
+        encoding="utf-8",
+    )
+
+    config = sft.load_sft_mix(path)
+
+    assert config.human_train_action_limits == {"claim_reward": 600}
+    assert config.human_oversample_per_action == {"claim_reward": 6}
+
+    broken = tmp_path / "broken.toml"
+    broken.write_text(
+        """seed = 20260902
+
+[human.train_max_per_action]
+claim_reward = 600
+
+[human.oversample_per_action]
+claim_reward = 0
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(sft.DatasetBuildError, match="无效 SFT 混合配方"):
+        sft.load_sft_mix(broken)
 
 
 def test_load_sft_mix_rejects_knowledge_limits(tmp_path: Path) -> None:

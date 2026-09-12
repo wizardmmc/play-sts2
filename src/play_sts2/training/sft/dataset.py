@@ -254,11 +254,13 @@ def build_sft_dataset(
             splits,
             seed=mix_config.seed,
             human_train_action_limits=mix_config.human_train_action_limits,
+            human_oversample_per_action=mix_config.human_oversample_per_action,
             arithmetic_train_per_kind=mix_config.arithmetic_train_per_kind,
         )
         mix_manifest = {
             "seed": mix_config.seed,
             "human_train_action_limits": mix_config.human_train_action_limits,
+            "human_oversample_per_action": mix_config.human_oversample_per_action,
             "arithmetic_train_per_kind": mix_config.arithmetic_train_per_kind,
         }
         if mix_config.human_game_version is not None:

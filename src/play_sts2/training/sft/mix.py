@@ -1,9 +1,9 @@
-"""保留全部知识，只对训练集高频人类动作应用显式上限。"""
+"""保留全部知识，只对训练集高频人类动作应用显式上限与可选超采样。"""
 
 import random
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,13 +18,15 @@ class SftMixConfig:
         seed (int): 确定性人类动作抽样种子。
         human_game_version (str | None): 人类行为录制时的游戏版本声明。
         human_train_action_limits (dict[str, int]): 训练高频动作上限。
+        human_oversample_per_action (dict[str, int]): 按动作重复曝光的行为倍数。
         arithmetic_train_per_kind (dict[str, int]): 每类算术训练样本数。
     """
 
     seed: int
     human_game_version: str | None
     human_train_action_limits: dict[str, int]
-    arithmetic_train_per_kind: dict[str, int]
+    human_oversample_per_action: dict[str, int] = field(default_factory=dict)
+    arithmetic_train_per_kind: dict[str, int] = field(default_factory=dict)
 
 
 def load_sft_mix(path: Path) -> SftMixConfig:
@@ -55,6 +57,11 @@ def load_sft_mix(path: Path) -> SftMixConfig:
             human["train_max_per_action"],
             "human.train_max_per_action",
         )
+        raw_oversample = human.get("oversample_per_action", {})
+        oversample = _repeat_mapping(
+            raw_oversample,
+            "human.oversample_per_action",
+        )
         arithmetic = data.get("arithmetic", {})
         arithmetic_per_kind = _integer_mapping(
             arithmetic.get("train_per_kind", {}),
@@ -68,12 +75,14 @@ def load_sft_mix(path: Path) -> SftMixConfig:
             raw_game_version.strip() if isinstance(raw_game_version, str) else None
         ),
         human_train_action_limits=actions,
+        human_oversample_per_action=oversample,
         arithmetic_train_per_kind=arithmetic_per_kind,
     )
     apply_sft_mix(
         {"train": [], "dev": [], "test": []},
         seed=config.seed,
         human_train_action_limits=config.human_train_action_limits,
+        human_oversample_per_action=config.human_oversample_per_action,
     )
     return config
 
@@ -102,23 +111,50 @@ def _integer_mapping(value: object, name: str) -> dict[str, int]:
     return {str(key): int(item) for key, item in value.items()}
 
 
+def _repeat_mapping(value: object, name: str) -> dict[str, int]:
+    """把 TOML 表转换成字符串到正整数倍数的映射。
+
+    Args:
+        value (object): TOML 解析后的候选表。
+        name (str): 报错时使用的字段名。
+
+    Raises:
+        TypeError: 值不是字符串键和正整数值组成的表。
+
+    Returns:
+        dict[str, int]: 保留 TOML 字段顺序的倍数映射。
+    """
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str)
+        or not isinstance(item, int)
+        or isinstance(item, bool)
+        or item < 1
+        for key, item in value.items()
+    ):
+        raise TypeError(f"{name} 必须是正整数表")
+    return {str(key): int(item) for key, item in value.items()}
+
+
 def apply_sft_mix(
     splits: Mapping[str, Sequence[dict[str, Any]]],
     *,
     seed: int,
     human_train_action_limits: Mapping[str, int],
+    human_oversample_per_action: Mapping[str, int] | None = None,
     arithmetic_train_per_kind: Mapping[str, int] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """保留全部知识和留出行为，只裁剪训练集指定高频动作。
+    """保留全部知识和留出行为，只裁剪训练集指定高频动作并可选超采样。
 
     Args:
         splits (Mapping[str, Sequence[dict[str, Any]]]): 已完成知识与整局分卷的样本。
         seed (int): 确定性抽样种子。
         human_train_action_limits (Mapping[str, int]): 训练行为动作上限。
+        human_oversample_per_action (Mapping[str, int] | None): 按动作的重复曝光
+            倍数；副本带 ``#oN`` 样本后缀，不改变 dev/test。
         arithmetic_train_per_kind (Mapping[str, int] | None): 可选的每类算术数量。
 
     Raises:
-        DatasetBuildError: 分卷缺失或行为上限不是非负整数。
+        DatasetBuildError: 分卷缺失、行为上限或超采样倍数不是有效正整数。
 
     Returns:
         dict[str, list[dict[str, Any]]]: 保持原始相对顺序的混合后分卷。
@@ -133,6 +169,14 @@ def apply_sft_mix(
     ]
     if invalid_actions:
         raise DatasetBuildError(f"SFT 人类动作上限无效: {invalid_actions}")
+    oversample = dict(human_oversample_per_action or {})
+    invalid_oversample = [
+        action
+        for action, factor in oversample.items()
+        if not isinstance(factor, int) or isinstance(factor, bool) or factor < 1
+    ]
+    if invalid_oversample:
+        raise DatasetBuildError(f"SFT 人类动作超采样倍数无效: {invalid_oversample}")
     arithmetic_limits = dict(arithmetic_train_per_kind or {})
     invalid_arithmetic = [
         kind
@@ -191,10 +235,45 @@ def apply_sft_mix(
                 )
             selected.update(_take_indices(indices, limit, rng))
     return {
-        "train": [row for index, row in enumerate(rows) if index in selected],
+        "train": _expand_train_rows(
+            [row for index, row in enumerate(rows) if index in selected],
+            oversample,
+        ),
         "dev": list(splits["dev"]),
         "test": list(splits["test"]),
     }
+
+
+def _expand_train_rows(
+    train_rows: Sequence[dict[str, Any]],
+    oversample: Mapping[str, int],
+) -> list[dict[str, Any]]:
+    """按动作倍数复制训练行为行并生成带后缀的样本身份。
+
+    Args:
+        train_rows (Sequence[dict[str, Any]]): 上限抽样后的训练行。
+        oversample (Mapping[str, int]): 动作到重复曝光倍数。
+
+    Returns:
+        list[dict[str, Any]]: 副本紧跟原行且样本 ID 以 ``#oN`` 区分。
+    """
+    expanded: list[dict[str, Any]] = []
+    for row in train_rows:
+        expanded.append(row)
+        factor = oversample.get(str(row.get("action", "")))
+        if (
+            factor is None
+            or factor < 2
+            or row.get("source") != "human_play"
+            or row.get("behavior_origin") == "dagger"
+        ):
+            continue
+        sample_id = str(row.get("sample_id", ""))
+        for copy_index in range(2, factor + 1):
+            duplicate = dict(row)
+            duplicate["sample_id"] = f"{sample_id}#o{copy_index}"
+            expanded.append(duplicate)
+    return expanded
 
 
 def _take_indices(

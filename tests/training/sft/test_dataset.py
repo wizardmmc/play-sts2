@@ -1477,6 +1477,7 @@ def test_build_sft_dataset_applies_explicit_mix_recipe(tmp_path: Path) -> None:
     assert manifest["mix"] == {
         "seed": 3,
         "human_train_action_limits": {},
+        "human_oversample_per_action": {},
         "arithmetic_train_per_kind": {},
     }
 
