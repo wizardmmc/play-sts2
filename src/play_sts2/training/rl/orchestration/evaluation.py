@@ -210,7 +210,7 @@ class _EvaluationWorker:
         Returns:
             PolicyRunEvaluation: 当前整局结果。
         """
-        for attempt in range(2):
+        for attempt in range(4):
             try:
                 return self._run_once(
                     seed=seed,
@@ -219,7 +219,7 @@ class _EvaluationWorker:
                     attempt=attempt,
                 )
             except Exception as exc:
-                if not retryable_full_run_error(exc) or attempt == 1:
+                if not retryable_full_run_error(exc) or attempt == 3:
                     raise
         raise RuntimeError("完整验证基础设施重采循环意外结束")
 

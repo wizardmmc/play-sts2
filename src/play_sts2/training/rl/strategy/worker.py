@@ -177,6 +177,7 @@ class GameTreeRolloutWorker:
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
                 max_retries=0,
+                max_conflict_retries=3,
                 constrain_actions=True,
             )
             seed = self._checkpoint.entry.audit.get("run_id")
