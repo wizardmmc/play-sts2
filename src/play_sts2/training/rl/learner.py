@@ -445,6 +445,7 @@ def compare_battle_reward_schemes(
     definitions = (
         ("core", "core", 0.25),
         ("core_no_turn", "core_no_turn", 0.25),
+        ("core_no_turn_boss_progress", "core_no_turn_boss_progress", 0.25),
         ("potion_cost_0.1", "potion_cost", 0.1),
         ("potion_cost_0.25", "potion_cost", 0.25),
         ("legacy_remaining_potion", "legacy_remaining_potion", 0.25),
@@ -831,11 +832,40 @@ def _rollout_reward(
             model_error=outcome == "model_error",
             potions_entry=potions_entry,
             potions_used=potions_used,
+            enemy_entry_hp=_state_enemy_hp_total(entry_state),
+            enemy_final_hp=(
+                None if outcome == "model_error" else _state_enemy_hp_total(final_state)
+            ),
         ),
         scheme=scheme,
         potion_cost=potion_cost,
     )
     return reward.total
+
+
+def _state_enemy_hp_total(state: Mapping[str, object]) -> int:
+    """从完整游戏状态读取全部敌人当前生命总和。
+
+    Args:
+        state (Mapping[str, object]): arm 的入口或终局完整状态。
+
+    Returns:
+        int: 敌人当前生命总和；缺少战斗或敌人数据时为零，奖励层据此
+        拒绝把缺失数据当作击杀进度。
+    """
+    combat = state.get("combat")
+    if not isinstance(combat, Mapping):
+        return 0
+    enemies = combat.get("enemies")
+    if not isinstance(enemies, list):
+        return 0
+    total = 0
+    for enemy in enemies:
+        if isinstance(enemy, Mapping):
+            hp = enemy.get("current_hp")
+            if isinstance(hp, int) and not isinstance(hp, bool) and hp > 0:
+                total += hp
+    return total
 
 
 def _required_text(value: Mapping[object, object], field: str) -> str:

@@ -1,0 +1,851 @@
+{
+  "group_id": "battle-refresh-001-battle-001",
+  "policy_version": "qwen3.5-e7-b3",
+  "behavior_logprobs_mode": "processed_logprobs",
+  "action_constraint_mode": "vllm_structured_choice",
+  "generation_profile": {
+    "max_tokens": 128,
+    "temperature": 0.8,
+    "max_retries": 0,
+    "thinking_enabled": false
+  },
+  "entry_snapshot": {
+    "source": "同入口奖励事实投影"
+  },
+  "environment": {
+    "game_version": "v0.111.0",
+    "mod_version": "0.8.0-rlsts2.50",
+    "protocol_version": "2026-08-30-v3",
+    "structured_output_backend": "xgrammar",
+    "structured_output_version": "0.1.33"
+  },
+  "rollouts": [
+    {
+      "arm_index": 0,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 4",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2",
+            "ACTION: play_card 3 0",
+            "ACTION: play_card 3 1",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 6,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 24
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 1,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 5",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1 0",
+            "ACTION: play_card 1 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5 0",
+            "ACTION: play_card 5 1",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7",
+            "ACTION: play_card 8"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 6,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 24
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 2,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 2 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2",
+            "ACTION: play_card 3 0",
+            "ACTION: play_card 3 1",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 2,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 24
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 3,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 6",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 2",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0 0",
+            "ACTION: play_card 0 1",
+            "ACTION: play_card 1 0",
+            "ACTION: play_card 1 1",
+            "ACTION: play_card 2",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4 0",
+            "ACTION: play_card 4 1",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 6,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 22
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 4,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 2 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3 0",
+            "ACTION: play_card 3 1",
+            "ACTION: play_card 4 0",
+            "ACTION: play_card 4 1",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 2,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 24
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 5,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 2 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 8",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3 0",
+            "ACTION: play_card 3 1",
+            "ACTION: play_card 4 0",
+            "ACTION: play_card 4 1",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7 0",
+            "ACTION: play_card 7 1",
+            "ACTION: play_card 8"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 2,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 23
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 6,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 0",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 6",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1 0",
+            "ACTION: play_card 1 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5 0",
+            "ACTION: play_card 5 1",
+            "ACTION: play_card 6"
+          ],
+          "before_state": {
+            "turn": 4,
+            "run": {
+              "current_hp": 3,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 24
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    },
+    {
+      "arm_index": 7,
+      "policy_version": "qwen3.5-e7-b3",
+      "behavior_logprobs_mode": "processed_logprobs",
+      "action_constraint_mode": "vllm_structured_choice",
+      "generation_profile": {
+        "max_tokens": 128,
+        "temperature": 0.8,
+        "max_retries": 0,
+        "thinking_enabled": false
+      },
+      "entry_snapshot": {
+        "source": "同入口奖励事实投影"
+      },
+      "steps": [
+        {
+          "index": 0,
+          "action": "ACTION: play_card 6",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2 0",
+            "ACTION: play_card 2 1",
+            "ACTION: play_card 3",
+            "ACTION: play_card 4",
+            "ACTION: play_card 5",
+            "ACTION: play_card 6",
+            "ACTION: play_card 7"
+          ],
+          "before_state": {
+            "turn": 1,
+            "run": {
+              "current_hp": 45,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 0
+        },
+        {
+          "index": 1,
+          "action": "ACTION: play_card 1",
+          "finish_reason": "stop",
+          "response_choices": [
+            "ACTION: end_turn",
+            "ACTION: play_card 0",
+            "ACTION: play_card 1",
+            "ACTION: play_card 2",
+            "ACTION: play_card 3 0",
+            "ACTION: play_card 3 1",
+            "ACTION: play_card 6 0",
+            "ACTION: play_card 6 1",
+            "ACTION: play_card 7 0",
+            "ACTION: play_card 7 1"
+          ],
+          "before_state": {
+            "turn": 3,
+            "run": {
+              "current_hp": 36,
+              "max_hp": 90,
+              "potions": [
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                },
+                {
+                  "potion_id": null,
+                  "occupied": false
+                }
+              ]
+            }
+          },
+          "source_step_index": 19
+        }
+      ],
+      "outcome": "died",
+      "final_state": {
+        "run": {
+          "current_hp": 0,
+          "max_hp": 90
+        }
+      }
+    }
+  ]
+}

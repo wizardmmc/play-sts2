@@ -282,6 +282,7 @@ def test_compare_reward_schemes_keeps_arm_level_audit(tmp_path: Path) -> None:
     assert set(schemes) == {
         "core",
         "core_no_turn",
+        "core_no_turn_boss_progress",
         "potion_cost_0.1",
         "potion_cost_0.25",
         "legacy_remaining_potion",

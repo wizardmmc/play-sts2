@@ -175,6 +175,7 @@ def build_battle_failure_rollout(
             potions_used=sum(
                 step.action.startswith("ACTION: use_potion ") for step in rollout_steps
             ),
+            enemy_entry_hp=_enemy_hp_total(entry_state),
         ),
         scheme="core",
     )
@@ -334,10 +335,37 @@ def score_battle_result(
             died=result.outcome is BattleOutcome.DIED,
             potions_entry=potions_entry,
             potions_used=potions_used,
+            enemy_entry_hp=_enemy_hp_total(entry_state),
+            enemy_final_hp=_enemy_hp_total(result.final_state),
         ),
         scheme=scheme,
         potion_cost=potion_cost,
     )
+
+
+def _enemy_hp_total(state: Mapping[str, Any]) -> int:
+    """读取战斗状态中全部敌人当前生命总和。
+
+    Args:
+        state (Mapping[str, Any]): 完整游戏状态或其投影。
+
+    Returns:
+        int: 敌人当前生命总和；缺少战斗或敌人数据时为零，表示不提供
+        可信敌方进度而不是当作击杀。
+    """
+    combat = state.get("combat")
+    if not isinstance(combat, Mapping):
+        return 0
+    enemies = combat.get("enemies")
+    if not isinstance(enemies, list):
+        return 0
+    total = 0
+    for enemy in enemies:
+        if isinstance(enemy, Mapping):
+            hp = enemy.get("current_hp")
+            if isinstance(hp, int) and not isinstance(hp, bool) and hp > 0:
+                total += hp
+    return total
 
 
 def _current_hp(state: Mapping[str, Any], label: str) -> int:

@@ -303,6 +303,7 @@ def load_battle_grpo_config(path: Path) -> BattleGrpoConfig:
         if scheme not in {
             "core",
             "core_no_turn",
+            "core_no_turn_boss_progress",
             "potion_cost",
             "legacy_remaining_potion",
         }:

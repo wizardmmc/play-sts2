@@ -60,6 +60,113 @@ def test_no_turn_reward_is_core_without_speed_tiebreak() -> None:
     assert no_turn.total - core.total == pytest.approx(0.35)
 
 
+def test_boss_progress_rewards_damage_on_death_without_turn_tiebreak() -> None:
+    """Boss 进度方案在正常死亡时按敌方削减给部分分，其余与去回合一致。
+
+    Returns:
+        None: 此测试固定 λ=1 的部分分、缺失数据归零和方案间边界。
+    """
+    died_more_damage = rl.BattleRewardInput(
+        entry_hp=70,
+        max_hp=75,
+        final_hp=0,
+        turns=45,
+        cleared=False,
+        died=True,
+        enemy_entry_hp=321,
+        enemy_final_hp=91,
+    )
+    died_less_damage = rl.BattleRewardInput(
+        entry_hp=70,
+        max_hp=75,
+        final_hp=0,
+        turns=45,
+        cleared=False,
+        died=True,
+        enemy_entry_hp=321,
+        enemy_final_hp=176,
+    )
+
+    more = rl.score_battle_reward(died_more_damage, scheme="core_no_turn_boss_progress")
+    less = rl.score_battle_reward(died_less_damage, scheme="core_no_turn_boss_progress")
+    flat = rl.score_battle_reward(died_less_damage, scheme="core_no_turn")
+
+    # λ=1 固定：基础 -9 加上 (321-91)/321≈0.716 与 (321-176)/321≈0.452。
+    assert more.total == pytest.approx(-9.0 + (321 - 91) / 321)
+    assert less.total == pytest.approx(-9.0 + (321 - 176) / 321)
+    assert more.total > less.total > flat.total
+    components = {c.name: c.value for c in more.components}
+    assert components["turns"] == 0.0
+    assert components["damage_progress"] == pytest.approx((321 - 91) / 321)
+
+    # 缺少可信敌方终局数据不得记为击杀进度。
+    missing = rl.BattleRewardInput(
+        entry_hp=70,
+        max_hp=75,
+        final_hp=0,
+        turns=45,
+        cleared=False,
+        died=True,
+        enemy_entry_hp=321,
+        enemy_final_hp=None,
+    )
+    assert rl.score_battle_reward(
+        missing, scheme="core_no_turn_boss_progress"
+    ).total == pytest.approx(-9.0)
+
+    # 胜利与模型失败不获得部分分，保持原有边界。
+    victory = rl.BattleRewardInput(
+        entry_hp=70,
+        max_hp=75,
+        final_hp=30,
+        turns=40,
+        cleared=True,
+        died=False,
+        enemy_entry_hp=321,
+        enemy_final_hp=0,
+    )
+    assert (
+        rl.score_battle_reward(victory, scheme="core_no_turn_boss_progress").total
+        == rl.score_battle_reward(victory, scheme="core_no_turn").total
+    )
+    model_error = rl.BattleRewardInput(
+        entry_hp=70,
+        max_hp=75,
+        final_hp=0,
+        turns=3,
+        cleared=False,
+        died=False,
+        model_error=True,
+        enemy_entry_hp=321,
+        enemy_final_hp=100,
+    )
+    assert (
+        rl.score_battle_reward(model_error, scheme="core_no_turn_boss_progress").total
+        == rl.score_battle_reward(model_error, scheme="core_no_turn").total
+    )
+
+
+def test_boss_progress_rejects_invalid_enemy_hp() -> None:
+    """敌方生命事实必须非负，防止把脏数据写进奖励审计。
+
+    Returns:
+        None: 此测试固定新字段的输入契约。
+    """
+    with pytest.raises(ValueError, match="敌方生命值无效"):
+        rl.score_battle_reward(
+            rl.BattleRewardInput(
+                entry_hp=70,
+                max_hp=75,
+                final_hp=0,
+                turns=45,
+                cleared=False,
+                died=True,
+                enemy_entry_hp=-1,
+            ),
+            scheme="core_no_turn_boss_progress",
+        )
+
+
 def test_potion_cost_penalizes_useless_consumption() -> None:
     """固定消耗成本不能像旧剩余药水项一样奖励无效喝药。
 
