@@ -72,6 +72,30 @@ def test_complete_plan_macros_use_policy_iid_and_keep_duplicates() -> None:
         )
         == "policy_iid"
     )
+    assert (
+        _terminal_sampling_mode(
+            "card_reward",
+            (
+                "ACTION: claim_reward 0",
+                "ACTION: claim_reward 1",
+                "ACTION: proceed",
+            ),
+        )
+        == "stratified"
+    )
+    assert (
+        _terminal_sampling_mode(
+            "card_reward",
+            (
+                "ACTION: claim_reward 0",
+                "ACTION: claim_reward 1",
+                "ACTION: claim_reward 2",
+                "ACTION: claim_reward 3",
+                "ACTION: proceed",
+            ),
+        )
+        == "policy_iid"
+    )
     repeated = "ACTION: choose_event_option 0"
     branches = tuple(
         replace(

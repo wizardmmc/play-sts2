@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from queue import Empty, Queue
 from threading import Event
 from typing import Protocol
 
@@ -82,21 +83,16 @@ class BackboneGroupCollector:
         Returns:
             CollectedBackboneGroup: 训练组与 Mac 本地候选。
         """
-        allocations = [
-            list(range(index, self._group_size, len(self._workers)))
-            for index in range(len(self._workers))
-        ]
+        pending: Queue[int] = Queue()
+        for index in range(self._group_size):
+            pending.put(index)
         stop = Event()
         batches = []
         failure: BaseException | None = None
         with ThreadPoolExecutor(max_workers=len(self._workers)) as executor:
             futures = [
-                executor.submit(_collect_batch, worker, indices, stop)
-                for worker, indices in zip(
-                    self._workers,
-                    allocations,
-                    strict=True,
-                )
+                executor.submit(_collect_batch, worker, pending, stop)
+                for worker in self._workers
             ]
             for future in as_completed(futures):
                 exception = future.exception()
@@ -125,22 +121,28 @@ class BackboneGroupCollector:
 
 def _collect_batch(
     worker: BackboneRolloutWorker,
-    arm_indices: Sequence[int],
+    arm_indices: Queue[int],
     stop: Event,
 ) -> tuple[BackboneEpisodeDraft, ...]:
-    """让一个本地进程顺序完成分配的完整游戏。
+    """让独占实例的 worker 完成一局后再领取下一局。
 
     Args:
         worker (BackboneRolloutWorker): 独占端口与 HOME 的 worker。
-        arm_indices (Sequence[int]): 当前 worker 的 episode 序号。
+        arm_indices (Queue[int]): 全组尚未开始的 episode 序号队列。
         stop (Event): 另一 worker 失败后阻止启动下一条 episode。
 
     Returns:
         tuple[BackboneEpisodeDraft, ...]: 按分配顺序完成的游戏。
     """
     drafts = []
-    for index in arm_indices:
-        if stop.is_set():
+    while not stop.is_set():
+        try:
+            index = arm_indices.get_nowait()
+        except Empty:
             break
-        drafts.append(worker.collect_arm(arm_index=index))
+        try:
+            drafts.append(worker.collect_arm(arm_index=index))
+        except BaseException:
+            stop.set()
+            raise
     return tuple(drafts)

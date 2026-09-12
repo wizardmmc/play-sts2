@@ -34,8 +34,8 @@ def collect_terminal_tree_group(
 ) -> dict[str, Any]:
     """从一个真实 checkpoint 采集二至四条 terminal branches。
 
-    只有二至四岔 MAP 逐动作分层强制；事件、奖励、火堆、商店等组合宏从冻结战略
-    policy 独立采四条完整计划。所有 continuation 使用同一个冻结战斗 residual。
+    二至四岔 MAP 与卡牌奖励根域逐动作分层强制；事件、火堆、商店等组合宏从冻结
+    战略 policy 独立采四条完整计划。所有 continuation 使用同一个冻结战斗 residual。
 
     Args:
         checkpoint_path (Path): backbone 发布的原生 checkpoint 目录。
@@ -144,15 +144,15 @@ def collect_terminal_tree_group(
 
 
 def _terminal_sampling_mode(kind: str, root_actions: tuple[str, ...]) -> str:
-    """区分单步地图根动作与需要完整计划采样的组合宏。
+    """区分根动作强制分层与需要完整计划采样的组合宏。
 
     Args:
         kind (str): checkpoint 类型。
         root_actions (tuple[str, ...]): 入口完整合法动作行。
 
     Returns:
-        str: 地图二至四选一使用分层 proposal，其余使用 policy iid 计划。
+        str: 地图与卡牌奖励根域使用分层 proposal，其余使用 policy iid 计划。
     """
-    if kind == "map" and 2 <= len(root_actions) <= 4:
+    if kind in {"map", "card_reward"} and 2 <= len(root_actions) <= 4:
         return "stratified"
     return "policy_iid"

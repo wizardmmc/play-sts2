@@ -37,6 +37,7 @@ def collect_gigpo_group(
     temperature: float = 0.8,
     lambda_milestone: float = 1.0,
     normalization: str = "one",
+    late_checkpoint_min_floor: int = 10,
 ) -> dict[str, Any]:
     """收集同 seed 八条完整游戏并写出训练组和本地候选清单。
 
@@ -64,6 +65,7 @@ def collect_gigpo_group(
         temperature (float): 冻结采样温度。
         lambda_milestone (float): episode-level 进度课程权重。
         normalization (str): ``one`` 或 ``std``。
+        late_checkpoint_min_floor (int): 晚期 checkpoint 物化预算的起始楼层。
 
     Raises:
         ValueError: 拓扑、策略、行为概率或 structured output 无效。
@@ -102,6 +104,7 @@ def collect_gigpo_group(
             ascension=ascension,
             max_tokens=max_tokens,
             temperature=temperature,
+            late_checkpoint_min_floor=late_checkpoint_min_floor,
         )
         for index, port in enumerate(ports)
     )
@@ -121,6 +124,11 @@ def collect_gigpo_group(
         "group_id": group_id,
         "strategy_policy_version": strategy_policy_model,
         "battle_policy_version": battle_policy_model,
+        "checkpoint_sampling": {
+            "early_max_floor": 9,
+            "late_min_floor": late_checkpoint_min_floor,
+            "max_materialized_per_episode": 2,
+        },
         "checkpoints": [
             {
                 "arm_index": draft.episode.arm_index,

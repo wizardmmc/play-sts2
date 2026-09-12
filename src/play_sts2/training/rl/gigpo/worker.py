@@ -39,6 +39,7 @@ class _BackboneStateCapture:
         seed: str,
         early_target_ordinal: int,
         late_target_ordinal: int,
+        late_checkpoint_min_floor: int = 10,
     ) -> None:
         """保存当前游戏与本局候选输出位置。
 
@@ -48,7 +49,8 @@ class _BackboneStateCapture:
             checkpoint_root (Path): 本局 checkpoint 输出目录。
             seed (str): 当前完整游戏种子。
             early_target_ordinal (int): 楼层十以前要物化的候选序号。
-            late_target_ordinal (int): 楼层十起要物化的候选序号。
+            late_target_ordinal (int): 晚期楼层范围内要物化的候选序号。
+            late_checkpoint_min_floor (int): 开始消耗晚期物化预算的楼层。
         """
         self._game = game
         self._home = home
@@ -56,6 +58,7 @@ class _BackboneStateCapture:
         self._seed = seed
         self._early_target_ordinal = early_target_ordinal
         self._late_target_ordinal = late_target_ordinal
+        self._late_checkpoint_min_floor = late_checkpoint_min_floor
         self._seen_macro_scopes: set[tuple[str, ...]] = set()
         self._early_candidates = 0
         self._late_candidates = 0
@@ -115,13 +118,15 @@ class _BackboneStateCapture:
             should_capture = (
                 save_is_self_contained and ordinal == self._early_target_ordinal
             )
-        else:
+        elif floor >= self._late_checkpoint_min_floor:
             ordinal = self._late_candidates
             if save_is_self_contained:
                 self._late_candidates += 1
             should_capture = (
                 save_is_self_contained and ordinal == self._late_target_ordinal
             )
+        else:
+            should_capture = False
         captured_path = None
         if should_capture:
             destination = self._checkpoint_root / (
@@ -188,6 +193,7 @@ class GameBackboneWorker:
         max_tokens: int = 128,
         temperature: float = 0.8,
         infrastructure_attempts: int = 3,
+        late_checkpoint_min_floor: int = 10,
     ) -> None:
         """保存本地游戏与 A100 双 residual 参数。
 
@@ -209,9 +215,10 @@ class GameBackboneWorker:
             temperature (float): 两层冻结采样温度。
             infrastructure_attempts (int): 网络或超时故障时从干净 HOME 重采同一
                 episode 的总尝试数。
+            late_checkpoint_min_floor (int): 开始使用晚期 checkpoint 预算的楼层。
 
         Raises:
-            ValueError: 基础设施尝试数小于一。
+            ValueError: 基础设施尝试数小于一或晚期楼层早于第十层。
         """
         self.worker_id = worker_id
         self._executable = executable
@@ -228,6 +235,9 @@ class GameBackboneWorker:
         self._ascension = ascension
         self._max_tokens = max_tokens
         self._temperature = temperature
+        if late_checkpoint_min_floor < 10:
+            raise ValueError("晚期 checkpoint 起点不能低于第十层")
+        self._late_checkpoint_min_floor = late_checkpoint_min_floor
         if infrastructure_attempts < 1:
             raise ValueError("backbone 基础设施总尝试数必须为正")
         self._infrastructure_attempts = infrastructure_attempts
@@ -316,6 +326,7 @@ class GameBackboneWorker:
                 seed=self._seed,
                 early_target_ordinal=arm_index % 4,
                 late_target_ordinal=arm_index % 3,
+                late_checkpoint_min_floor=self._late_checkpoint_min_floor,
             )
             result = RunRunner(
                 game,

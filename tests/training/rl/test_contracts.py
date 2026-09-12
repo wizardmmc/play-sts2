@@ -136,6 +136,7 @@ def test_build_battle_rollout_preserves_policy_facts_and_scores_reward() -> None
         ("turns", -0.05),
         ("model_error", 0.0),
         ("potions", 0.0),
+        ("damage_progress", 0.0),
     )
 
 
@@ -501,6 +502,31 @@ def test_build_battle_group_rejects_missing_first_action_exploration() -> None:
             rollouts=rollouts,
             expected_size=8,
         )
+
+
+def test_evaluation_can_keep_identical_zero_advantage_arms() -> None:
+    """评估必须保留八次相同表现，不能因缺少训练信号筛掉结果。"""
+    rl = importlib.import_module("play_sts2.training.rl")
+    snapshot = _snapshot()
+    rollouts = tuple(
+        _rollout(
+            rl,
+            arm_index=index,
+            snapshot=snapshot,
+            action="ACTION: end_turn",
+            reward=1.0,
+        )
+        for index in range(8)
+    )
+    group = rl.build_battle_rollout_group(
+        group_id="evaluation-identical",
+        scenario=_scenario(),
+        rollouts=rollouts,
+        expected_size=8,
+        allow_zero_variance=True,
+    )
+    assert len(group.rollouts) == 8
+    assert group.advantages == (0.0,) * 8
 
 
 def _rollout(

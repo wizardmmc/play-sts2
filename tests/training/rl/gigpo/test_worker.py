@@ -103,3 +103,50 @@ def _map_state() -> dict[str, Any]:
             ],
         },
     }
+
+
+def test_late_checkpoint_budget_can_be_reserved_for_act_two(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """第一幕中段不消耗晚期预算，到第二幕后只物化一次。"""
+    worker = importlib.import_module("play_sts2.training.rl.gigpo.worker")
+    game = SimpleNamespace(
+        checkpoint_audit=lambda: {"run": {"current_room": {"room_type": "Event"}}}
+    )
+    floors = []
+
+    def capture_checkpoint(game: Any, *, destination: Path, **kwargs: Any) -> Any:
+        """记录真实触发物化的楼层，代替外部游戏存退。"""
+        floors.append(game.current_state["run"]["floor"])
+        return SimpleNamespace(root=destination, state=game.current_state)
+
+    monkeypatch.setattr(worker, "capture_strategic_checkpoint", capture_checkpoint)
+    monkeypatch.setattr(
+        worker,
+        "restore_strategic_checkpoint",
+        lambda game, checkpoint: checkpoint.state,
+    )
+    capture = worker._BackboneStateCapture(
+        game=game,
+        home=tmp_path / "home",
+        checkpoint_root=tmp_path / "checkpoints",
+        seed="WORKER-SEED",
+        early_target_ordinal=0,
+        late_target_ordinal=0,
+        late_checkpoint_min_floor=18,
+    )
+    for floor in (3, 11, 18, 19):
+        state = _map_state()
+        state["run"].update(floor=floor, act_id="1" if floor >= 18 else "0")
+        state["map"]["current_node"]["row"] = (floor - 1) % 17
+        for node in state["map"]["available_nodes"]:
+            node["row"] = floor % 17
+        game.current_state = state
+        capture(state)
+    assert floors == [3, 18]
+    assert [item.path is not None for item in capture.checkpoints] == [
+        True,
+        False,
+        True,
+        False,
+    ]

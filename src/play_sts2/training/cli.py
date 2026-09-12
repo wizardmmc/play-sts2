@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_rl.add_argument(
         "--allow-zero-variance",
         action="store_true",
-        help="为独立 DAgger 保存零优势完整八臂组",
+        help="为评估或独立 DAgger 保存无探索/零优势完整八臂组",
     )
     collect_tree = subparsers.add_parser(
         "collect-rl-tree",
@@ -166,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_gigpo.add_argument("--group-size", type=int, default=8)
     collect_gigpo.add_argument("--max-tokens", type=int, default=128)
     collect_gigpo.add_argument("--temperature", type=float, default=0.8)
+    collect_gigpo.add_argument("--late-checkpoint-min-floor", type=int, default=10)
     collect_gigpo.add_argument("--lambda-milestone", type=float, default=1.0)
     collect_gigpo.add_argument(
         "--normalization",
@@ -662,6 +663,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             temperature=args.temperature,
             lambda_milestone=args.lambda_milestone,
             normalization=args.normalization,
+            late_checkpoint_min_floor=args.late_checkpoint_min_floor,
         )
     elif args.command == "collect-rl-terminal-tree":
         output = collect_terminal_tree_group(

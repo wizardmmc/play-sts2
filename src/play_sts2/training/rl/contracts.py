@@ -177,7 +177,7 @@ def build_battle_rollout_group(
         scenario (BattleScenario): 所有 arm 请求使用的场景。
         rollouts (Sequence[BattleRollout]): 已完成的候选 arms。
         expected_size (int): 本轮采样要求的精确 arm 数。
-        allow_zero_variance (bool): 是否为独立 DAgger 保留零优势完整组。
+        allow_zero_variance (bool): 是否为评估或独立 DAgger 保留无探索/零优势完整组。
 
     Raises:
         BattleGroupRejected: arm 数、入口、策略、动作或奖励方差不满足准入。
@@ -212,7 +212,10 @@ def build_battle_rollout_group(
 
     for rollout in ordered:
         _validate_rollout(rollout)
-    if len({rollout.first_action for rollout in ordered}) < 2:
+    if (
+        not allow_zero_variance
+        and len({rollout.first_action for rollout in ordered}) < 2
+    ):
         raise BattleGroupRejected("战斗 group 没有探索至少两个不同首动作")
 
     rewards = tuple(rollout.reward.total for rollout in ordered)
