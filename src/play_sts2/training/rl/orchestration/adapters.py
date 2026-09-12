@@ -109,7 +109,8 @@ def compose_serving_adapter(
     训练仍在函数等价的 merged-SFT base 上只更新 residual；vLLM 请求一次只能激活
     一个 LoRA，因此服务产物按 rank 维拼接两个低秩分解。输出采用
     ``alpha = combined_rank``，并把各输入 ``alpha/r`` 吸收到对应 B 矩阵，函数为
-    ``Delta_parent + Delta_residual``，不做平均或近似 merge。
+    ``Delta_parent + Delta_residual``，不做平均或近似 merge。权重键同时改写为
+    vLLM 条件生成外壳的 ``language_model`` 模块路径，否则 vLLM 会静默不应用。
 
     Args:
         parent_adapter (Path): 冻结最终 SFT LoRA。
@@ -201,6 +202,7 @@ def compose_serving_adapter(
         )
     if not combined or len(combined) != len(parent_state):
         raise GrpoTrainingError("composite serving LoRA 含非 A/B 权重")
+    combined = {_vllm_module_key(key): tensor for key, tensor in combined.items()}
     combined_rank = parent_rank + residual_rank
     config = dict(parent_config)
     config["r"] = combined_rank
@@ -228,6 +230,28 @@ def compose_serving_adapter(
         encoding="utf-8",
     )
     return {"name": name, "output": str(destination), "rank": combined_rank}
+
+
+def _vllm_module_key(key: str) -> str:
+    """把 PEFT 键改写为 vLLM 条件生成外壳实际挂载的模块路径。
+
+    vLLM 把该基座的文本栈挂在 ``language_model.model.layers``，而 PEFT 训练
+    键是 ``base_model.model.model.layers``；不改写时 vLLM 会静默不应用 LoRA。
+
+    Args:
+        key (str): 组合后的 PEFT 权重键。
+
+    Raises:
+        GrpoTrainingError: 键不是已知的线性层路径。
+
+    Returns:
+        str: 供 vLLM serving 使用的键。
+    """
+    prefix = "base_model.model.model.layers."
+    replacement = "base_model.model.language_model.model.layers."
+    if key.startswith(prefix):
+        return replacement + key[len(prefix) :]
+    raise GrpoTrainingError(f"composite serving 遇到未知模块键: {key}")
 
 
 def _lora_config(root: Path) -> dict[str, object]:

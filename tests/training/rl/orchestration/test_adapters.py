@@ -6,6 +6,8 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 
+_KEY = "base_model.model.model.layers.0.linear_attn.in_proj_a"
+
 
 def test_compose_serving_adapter_preserves_sum_of_two_lora_deltas(
     tmp_path: Path,
@@ -16,7 +18,7 @@ def test_compose_serving_adapter_preserves_sum_of_two_lora_deltas(
         tmp_path (Path): 两个输入 adapter 与输出目录。
 
     Returns:
-        None: 手工矩阵前向在浮点容差内一致。
+        None: 手工矩阵前向在浮点容差内一致，且输出键使用 vLLM 模块路径。
     """
     from play_sts2.training.rl.orchestration import compose_serving_adapter
 
@@ -44,8 +46,16 @@ def test_compose_serving_adapter_preserves_sum_of_two_lora_deltas(
 
     state = load_file(output / "adapter_model.safetensors")
     config = json.loads((output / "adapter_config.json").read_text(encoding="utf-8"))
-    a = state["layer.lora_A.weight"]
-    b = state["layer.lora_B.weight"]
+    a = state[
+        f"{_KEY}.lora_A.weight".replace("model.layers", "language_model.model.layers")
+    ]
+    b = state[
+        f"{_KEY}.lora_B.weight".replace("model.layers", "language_model.model.layers")
+    ]
+    assert set(state) == {
+        f"{_KEY}.lora_A.weight".replace("model.layers", "language_model.model.layers"),
+        f"{_KEY}.lora_B.weight".replace("model.layers", "language_model.model.layers"),
+    }
     vector = torch.tensor([0.5, -1.0])
     expected = 2.0 * (torch.tensor([[3.0]]) @ torch.tensor([[1.0, 2.0]]) @ vector)
     expected += torch.tensor([[6.0]]) @ torch.tensor([[4.0, 5.0]]) @ vector
@@ -86,7 +96,9 @@ def _adapter(
                 "use_dora": False,
                 "lora_dropout": 0.0,
                 "target_modules": (
-                    ["other", "layer"] if reverse_targets else ["layer", "other"]
+                    ["other", "in_proj_a"]
+                    if reverse_targets
+                    else ["in_proj_a", "other"]
                 ),
             }
         ),
@@ -94,8 +106,8 @@ def _adapter(
     )
     save_file(
         {
-            "layer.lora_A.weight": a,
-            "layer.lora_B.weight": b,
+            f"{_KEY}.lora_A.weight": a,
+            f"{_KEY}.lora_B.weight": b,
         },
         root / "adapter_model.safetensors",
     )
