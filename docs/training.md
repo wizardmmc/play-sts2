@@ -1,29 +1,7 @@
 # RL 训练
 
-2026-09-11 当前执行路线已由用户切换为局部教师能力筛查与小批纠错实验。
-当前目标、预算、准入与下一步以 `docs/current_progress.md` 及
-`runs/rl/a0-local-learning/EXPERIMENT.md` 为准。下文保留原正式 RL 课程和历史
-恢复配置，不据此自动重开整局刷胜或 multi2；教师监督是否启用由本轮实战证据决定。
-
-本节是正式长期 RL 的运行规范；`docs/current-doing-rl.md` 保存算法依据、工程阶段和
-历史 smoke，不再覆盖本节的课程、预算或是否启用 DAgger。
-
-2026-09-06 接手修正：E7 S4～S20 的保存服务配置存在别名/实际 adapter 错配，
-暂停直接沿旧后代血缘续训，按 `docs/e7-recovery.md` 建立受检服务并重新采样。
-当前扩量 pilot 从可信 B3 的入口配置池重采，最多 24 个不同场景补足 16 个有效
-K=8 战斗组；pilot 验证后将该预算应用于每轮。backbone K=8、Tree 至多两个节点、
-DAgger 关闭不变。有效组不足必须报告不足，不能用尝试数冒充训练量。
-
-恢复首批实测补充：16 个旧 core 准入组中，5 个八臂全灭组仅靠死亡回合差产生
-方差。恢复训练改用已有 `core_no_turn`，去除全部回合项；原始 group 不改写，
-按 learner 配方重算后仅 11 组进入首轮更新。后续 batch CLI 默认按该配方计有效量，
-重算零方差的完整组保留在 rejected/，不会混入 battle/ 训练目录。
-
-当前用户目标：三天内通关固定 target `RLA0000001` 的 DEFECT/A0，再视时间推进
-下述迁移和正式循环。每完成一轮，使用 GLM-1 配置、`glm-5.3` 做只读独立审查；
-用户已允许直接 Claude Code CLI 替代 Trowel，并授权每轮发送本项目代码、模型路径/
-训练配置、脱敏游戏轨迹和指标到 GLM-1 智谱接口，禁止发送密钥、个人存档或其他
-项目资料。审查重点是实际模型身份、on-policy 来源、奖励、梯度/ratio/KL 与完成证据。
+本节是长期 RL 的正式运行规范，覆盖课程、预算、准入门槛与单轮执行顺序。
+各轮实验的执行状态与证据保存在 `runs/rl/` 对应 run 目录的实验文档里。
 
 ## 资源与单轮顺序
 
@@ -44,7 +22,7 @@ post-step 指标使用同一权重。该组常数缩放不是严格无偏梯度�
 ### 执行拓扑
 
 - 当前进阶记为 `A`，初始为 A0；同一轮所有 rollout 必须使用同一个 `A`。
-- Mac 固定启动两个隔离无头 STS2 v0.111.0 实例，服务器默认只使用一张 A100；本地
+- Mac 固定启动两个隔离无头 STS2 v0.111.0 实例，服务器默认只使用一张 GPU；本地
   不做模型推理或训练。
 - 一轮开始后冻结 `(S_n, B_n, generation profile, environment)`，依次执行：
 
@@ -143,7 +121,7 @@ cold-start 与 transfer 严格按一个 `3 target + 1 training-fresh` 训练块�
 
 `battle-grpo` 与 `strategy-grpo` 在各自 run 目录下写 `tensorboard/`；本地
 `eval-rl-policy` 和长期 curriculum CLI 通过 `--tensorboard-dir` 写入本轮公共 event
-目录。A100 run 产物同步回本地后，TensorBoard 递归读取 `runs/rl/`，分别展示 loss、
+目录。服务器上的 run 产物同步回本地后，TensorBoard 递归读取 `runs/rl/`，分别展示 loss、
 KL、ratio、梯度、胜率、楼层、Boss、战斗战损、frozen/fresh 验证、阶段与进阶：
 
 ```bash

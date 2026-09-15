@@ -376,3 +376,9 @@ uv run pytest e2e/scenario --run-e2e
 
 录制数据格式见 [docs/data-format.md](docs/data-format.md)，训练配方见
 [docs/training.md](docs/training.md)。
+
+## 许可证
+
+Python 侧代码采用 MIT 许可证，全文见 [LICENSE](LICENSE)。`mod/STS2AIAgent`
+源自 [CharTyr/STS2-Agent](https://github.com/CharTyr/STS2-Agent)，沿用其
+AGPL-3.0 许可证，见 `mod/STS2AIAgent/LICENSE` 与 `UPSTREAM.md`。

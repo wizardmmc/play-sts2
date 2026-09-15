@@ -22,3 +22,6 @@ htmlcov/
 /configs/
 
 reference
+
+AGENTS.local.md
+.zcode/
