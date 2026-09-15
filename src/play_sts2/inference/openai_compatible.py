@@ -1,5 +1,6 @@
 """通过 OpenAI-compatible chat completions 协议调用推理服务。"""
 
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from types import TracebackType
@@ -53,6 +54,7 @@ class OpenAICompatibleProvider:
         capture_token_metadata: bool = False,
         timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.BaseTransport | None = None,
+        retry_remote_disconnect: bool = False,
     ) -> None:
         """初始化推理服务连接。
 
@@ -66,6 +68,8 @@ class OpenAICompatibleProvider:
                 和逐 token 行为策略 log-prob。
             timeout (float): 单次生成请求允许等待的秒数。
             transport (httpx.BaseTransport | None): 可选的 HTTP 传输实现。
+            retry_remote_disconnect (bool): 未收到响应便断连时，是否允许同一
+                无状态推理请求重发一次；不重试模型回复或游戏动作。
 
         Returns:
             None: 此方法在当前实例上完成初始化。
@@ -78,6 +82,17 @@ class OpenAICompatibleProvider:
         self._model = model
         self._enable_thinking = enable_thinking
         self._capture_token_metadata = capture_token_metadata
+        self._retry_remote_disconnect = retry_remote_disconnect
+        self._remote_disconnect_retries = 0
+
+    @property
+    def remote_disconnect_retries(self) -> int:
+        """返回本实例已重发的无响应推理请求数，供采样收据审计。
+
+        Returns:
+            int: 累计发生的单次传输重试数量。
+        """
+        return self._remote_disconnect_retries
 
     @property
     def thinking_enabled(self) -> bool | None:
@@ -177,7 +192,19 @@ class OpenAICompatibleProvider:
                 raise ValueError("结构化回复候选不能为空")
             body["structured_outputs"] = {"choice": list(response_choices)}
 
-        response = self._http.post(_CHAT_PATH, json=body)
+        try:
+            response = self._http.post(_CHAT_PATH, json=body)
+        except httpx.RemoteProtocolError as exc:
+            if not self._retry_remote_disconnect or str(exc) != (
+                "Server disconnected without sending a response."
+            ):
+                raise
+            self._remote_disconnect_retries += 1
+            logging.getLogger(__name__).warning(
+                "推理连接未返回响应，重发同一请求一次；累计次数=%s",
+                self._remote_disconnect_retries,
+            )
+            response = self._http.post(_CHAT_PATH, json=body)
         response.raise_for_status()
         reply = _parse_reply(
             response,

@@ -69,6 +69,7 @@ def launch_game(
     mode: str,
     enable_debug_actions: bool = False,
     run_save: Path | None = None,
+    startup_deadline: float | None = None,
 ) -> Iterator[RunningGame]:
     """启动并在离开上下文时清理一个隔离游戏实例。
 
@@ -80,6 +81,8 @@ def launch_game(
         mode (str): ``headless`` 或 ``headed`` 启动模式。
         enable_debug_actions (bool): 是否开放场景重置使用的调试动作。
         run_save (Path | None): 可选的原生 ``current_run.save`` checkpoint。
+        startup_deadline (float | None): 可选的 ``time.monotonic()`` 绝对启动
+            截止时间，用于共享外部实验预算；不延长默认启动等待上限。
 
     Raises:
         FileNotFoundError: 游戏文件或隔离存档模板不存在。
@@ -90,6 +93,8 @@ def launch_game(
     Yields:
         RunningGame: 已进入可操作主菜单的游戏实例。
     """
+    if startup_deadline is not None and time.monotonic() >= startup_deadline:
+        raise TimeoutError("游戏启动前共享预算已到")
     if not executable.is_file():
         raise FileNotFoundError(f"找不到 STS2 可执行文件: {executable}")
     if not (executable.parent / "steam_appid.txt").is_file():
@@ -117,8 +122,15 @@ def launch_game(
             start_new_session=True,
         )
         try:
-            _wait_until_ready(process, base_url, log_path)
+            if startup_deadline is None:
+                _wait_until_ready(process, base_url, log_path)
+            else:
+                _wait_until_ready(
+                    process, base_url, log_path, startup_deadline=startup_deadline
+                )
             _verify_isolated_mod_configuration(log_path, enabled_mods)
+            if startup_deadline is not None and time.monotonic() >= startup_deadline:
+                raise TimeoutError("游戏启动完成时共享预算已到")
             yield RunningGame(base_url, home, log_path, process)
         finally:
             _stop_game(process)
@@ -250,6 +262,8 @@ def _wait_until_ready(
     process: subprocess.Popen[bytes],
     base_url: str,
     log_path: Path,
+    *,
+    startup_deadline: float | None = None,
 ) -> None:
     """等待 Mod HTTP 服务与可操作主菜单同时就绪。
 
@@ -257,6 +271,7 @@ def _wait_until_ready(
         process (subprocess.Popen[bytes]): 当前游戏进程。
         base_url (str): Agent Mod HTTP 服务根地址。
         log_path (Path): 游戏标准输出日志路径。
+        startup_deadline (float | None): 外部共享预算的单调时钟截止时间。
 
     Raises:
         RuntimeError: 游戏在主菜单就绪前退出。
@@ -266,6 +281,8 @@ def _wait_until_ready(
         None: 主菜单已经可以开始或继续游戏时返回。
     """
     deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
+    if startup_deadline is not None:
+        deadline = min(deadline, startup_deadline)
     with httpx.Client(timeout=1.0) as client:
         while time.monotonic() < deadline:
             return_code = process.poll()
@@ -282,14 +299,20 @@ def _wait_until_ready(
                     and state.status_code == 200
                     and _main_menu_is_ready(state.json())
                 ):
+                    if startup_deadline is not None and time.monotonic() >= deadline:
+                        break
                     return
             except (httpx.HTTPError, ValueError):
                 pass
             time.sleep(1.0)
 
+    limit = (
+        f"{_STARTUP_TIMEOUT_SECONDS:.0f} 秒"
+        if startup_deadline is None
+        else "默认启动上限与共享预算的较早截止时间"
+    )
     raise TimeoutError(
-        f"STS2 在 {_STARTUP_TIMEOUT_SECONDS:.0f} 秒内未就绪\n"
-        f"日志末尾:\n{_read_log_tail(log_path)}"
+        f"STS2 在 {limit} 内未就绪\n日志末尾:\n{_read_log_tail(log_path)}"
     )
 
 

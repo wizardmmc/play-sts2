@@ -124,3 +124,123 @@ def test_retry_preserves_incomplete_attempt_and_skips_completed(tmp_path) -> Non
     retry.mkdir()
     (retry / "result.json").write_text(json.dumps({"status": "completed"}))
     assert select_trial_path(tmp_path, "solver", 1, retry_incomplete=True) == retry
+
+
+@pytest.mark.parametrize("student_model", [None, "qwen3.5-a0-b3-real1"])
+def test_main_binds_the_requested_student_model(tmp_path, monkeypatch, student_model):
+    """显式real1不能静默变成B3，旧实验未配置时仍保留B3默认值。"""
+    from contextlib import nullcontext
+
+    from play_sts2.training.rl.orchestration import teacher_diagnostic as module
+
+    plan = {
+        "output_root": str(tmp_path / "run"),
+        "cases": [{"name": "case"}],
+        "total_seconds": 60,
+        "executable": "game",
+        "profile": "profile",
+        "port": 8084,
+        "model_url": "http://model",
+        "agent_order": ["student"],
+    }
+    if student_model:
+        plan["student_model"] = student_model
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(plan))
+    monkeypatch.setattr("sys.argv", ["diagnostic", "--plan", str(path)])
+    monkeypatch.setattr(
+        module,
+        "launch_game",
+        lambda *a, **kw: nullcontext(SimpleNamespace(base_url="http://game")),
+    )
+    monkeypatch.setattr(
+        module,
+        "GameClient",
+        lambda *a: nullcontext(SimpleNamespace(health=lambda: None)),
+    )
+    monkeypatch.setattr(module, "validate_rl_game_health", lambda *a: {})
+    observed = []
+
+    def provider(*args, **kwargs):
+        """记录真正用于构造学生提供者的模型身份。"""
+        observed.append(kwargs["model"])
+        return nullcontext(object())
+
+    def trial(*args, **kwargs):
+        """隔离真实游戏，仅让CLI完成一次学生调度。"""
+        return {"case": "case", "agent": "student", "repeat": 0, "status": "completed"}
+
+    monkeypatch.setattr(module, "OpenAICompatibleProvider", provider)
+    monkeypatch.setattr(module, "run_trial", trial)
+    module.main()
+    assert observed == [student_model or "qwen3.5-e7-b3"]
+
+
+@pytest.mark.parametrize(
+    "agent,temperature,override",
+    [
+        ("student", 0.8, None),
+        ("b3", 0.8, None),
+        ("solver", 0.0, None),
+        ("student", 0.0, 0.0),
+    ],
+)
+def test_trial_preserves_student_sampling_temperature(
+    tmp_path, monkeypatch, agent, temperature, override
+):
+    """学生改用通用名称后不能误用教师的确定性温度。"""
+    from play_sts2.runtime import BattleOutcome, BattleResult
+    from play_sts2.scenario.models import BattleSnapshot, ModelInputSnapshot
+    from play_sts2.training.rl.orchestration import teacher_diagnostic as module
+
+    state = {"run": {"current_hp": 40, "max_hp": 75}}
+    snapshot = BattleSnapshot(1, (), (), ModelInputSnapshot("system", "user", ()))
+    reset = SimpleNamespace(state=state, snapshot=snapshot)
+    monkeypatch.setattr(module, "check_online_serving", lambda *a: {})
+    monkeypatch.setattr(module, "load_battle_scenario", lambda *a: None)
+    monkeypatch.setattr(
+        module,
+        "BattleResetter",
+        lambda *a: SimpleNamespace(reset=lambda *a, **kw: reset),
+    )
+    observed = []
+
+    def runner(*args, **kwargs):
+        """记录战斗执行器实际收到的温度而不运行游戏。"""
+        observed.append(kwargs["temperature"])
+        return SimpleNamespace(
+            run=lambda *a: BattleResult(BattleOutcome.CLEARED, (), state)
+        )
+
+    monkeypatch.setattr(module, "BattleRunner", runner)
+    result = module.run_trial(
+        object(),
+        object(),
+        plan={
+            "model_url": "url",
+            "bindings": {},
+            "trial_seconds": 60,
+            **({"student_temperature": override} if override is not None else {}),
+        },
+        case={"name": "case", "scenario": "scenario"},
+        root=tmp_path,
+        agent=agent,
+        repeat=0,
+        trial_root=tmp_path / "case" / "arm",
+        total_deadline=time.monotonic() + 60,
+    )
+    assert result["status"] == "completed"
+    assert observed == [temperature]
+
+
+def test_solver_query_budget_stops_before_game_access():
+    """查询尝试耗尽时不再访问游戏，singleton不消耗建议预算。"""
+    from play_sts2.training.rl.orchestration.teacher_diagnostic import SolverProvider
+
+    provider = SolverProvider(object(), time.monotonic() + 60, max_queries=0)
+    assert (
+        provider.chat([], response_choices=["ACTION: end_turn"]).text
+        == "ACTION: end_turn"
+    )
+    with pytest.raises(RuntimeError, match="额度"):
+        provider.chat([], response_choices=["ACTION: end_turn", "ACTION: play_card 0"])

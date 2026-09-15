@@ -357,3 +357,56 @@ def test_running_game_stop_terminates_owned_process(tmp_path) -> None:
         game.stop()
         assert process.wait(timeout=2) != 0
         game.stop()
+
+
+def test_expired_startup_deadline_prevents_process_poll(tmp_path: Path) -> None:
+    """调用方预算已到时，启动等待不能再轮询游戏或HTTP。"""
+    from types import SimpleNamespace
+
+    launcher = importlib.import_module("play_sts2.game_launcher")
+    log = tmp_path / "headless.log"
+    log.write_text("")
+
+    def unexpected_poll():
+        """已过截止时间时不应再访问游戏进程。"""
+        raise AssertionError("截止后仍轮询进程")
+
+    with pytest.raises(TimeoutError):
+        launcher._wait_until_ready(
+            SimpleNamespace(poll=unexpected_poll),
+            "http://127.0.0.1:1",
+            log,
+            startup_deadline=0.0,
+        )
+
+
+def test_launch_forwards_deadline_and_reaps_failed_startup(tmp_path, monkeypatch):
+    """公开启动器应传递共享截止时间，并回收未就绪实例。"""
+    launcher = importlib.import_module("play_sts2.game_launcher")
+    executable = tmp_path / "game"
+    executable.write_text("")
+    (tmp_path / "steam_appid.txt").write_text("test")
+    process = ExitedProcess()
+    monkeypatch.setattr(launcher, "_port_is_open", lambda _port: False)
+    monkeypatch.setattr(launcher.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(launcher.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def expire_startup(_process, _url, _log, *, startup_deadline=None):
+        """替代外部启动等待，验证截止时间后报告未就绪。"""
+        assert startup_deadline == 123.0
+        raise TimeoutError("shared deadline")
+
+    monkeypatch.setattr(launcher, "_wait_until_ready", expire_startup)
+    with (
+        pytest.raises(TimeoutError, match="shared deadline"),
+        launcher.launch_game(
+            executable,
+            port=8084,
+            home=tmp_path / "home",
+            profile=launcher.DEFAULT_PROFILE,
+            mode="headless",
+            startup_deadline=123.0,
+        ),
+    ):
+        pytest.fail("未就绪实例不应交给调用方")
+    assert process.wait_calls == 1

@@ -612,3 +612,85 @@ def test_openai_provider_preserves_http_error() -> None:
         provider.chat((inference.ChatMessage(role="user", content="状态"),))
 
     assert error.value.response.status_code == 503
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_remote_disconnect_retry_is_bounded_and_preserves_request(
+    persistent: bool,
+) -> None:
+    """未收到响应时仅重发同一推理请求一次，连续断连仍向上传播。"""
+    from play_sts2.inference import ChatMessage, OpenAICompatibleProvider
+
+    bodies = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """模拟成功响应到达前的连接断开，不产生可执行模型回复。"""
+        bodies.append(request.content)
+        if len(bodies) == 1 or persistent:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response.", request=request
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "test",
+                "choices": [
+                    {
+                        "message": {"content": "ACTION: end_turn"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    with OpenAICompatibleProvider(
+        "http://test",
+        model="test",
+        retry_remote_disconnect=True,
+        transport=httpx.MockTransport(respond),
+    ) as provider:
+        if persistent:
+            with pytest.raises(httpx.RemoteProtocolError):
+                provider.chat([ChatMessage(role="user", content="只结束回合")])
+        else:
+            assert (
+                provider.chat([ChatMessage(role="user", content="只结束回合")]).text
+                == "ACTION: end_turn"
+            )
+        assert provider.remote_disconnect_retries == 1
+    assert len(bodies) == 2 and bodies[0] == bodies[1]
+
+
+@pytest.mark.parametrize(
+    "enabled,error",
+    [
+        (
+            False,
+            httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            ),
+        ),
+        (True, httpx.ReadTimeout("late")),
+        (True, httpx.RemoteProtocolError("illegal status line")),
+    ],
+)
+def test_remote_disconnect_retry_does_not_retry_other_failures(enabled, error) -> None:
+    """默认不开重试，超时和已接收的损坏协议也不扩大重试范围。"""
+    from play_sts2.inference import ChatMessage, OpenAICompatibleProvider
+
+    calls = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """记录请求并返回指定的真实传输异常。"""
+        calls.append(request)
+        raise error
+
+    with OpenAICompatibleProvider(
+        "http://test",
+        retry_remote_disconnect=enabled,
+        transport=httpx.MockTransport(respond),
+    ) as provider:
+        with pytest.raises(type(error)):
+            provider.chat([ChatMessage(role="user", content="结束")])
+        assert provider.remote_disconnect_retries == 0
+    assert len(calls) == 1

@@ -28,10 +28,14 @@ class SolverUnsupportedState(ValueError):
 class SolverProvider:
     """把当前 revision 的合法 Solver 建议交给普通执行器。"""
 
-    def __init__(self, game: GameClient, deadline: float) -> None:
+    def __init__(
+        self, game: GameClient, deadline: float, *, max_queries: int | None = None
+    ) -> None:
         """保存本场游戏与墙钟截止时间。"""
         self.game = game
         self.deadline = deadline
+        self.max_queries = max_queries
+        self.queries = 0
 
     def chat(
         self,
@@ -55,6 +59,9 @@ class SolverProvider:
             raise TimeoutError("Solver 单场诊断预算耗尽")
         if response_choices is not None and len(response_choices) == 1:
             return ModelReply(text=response_choices[0], model="forced-single-action")
+        if self.max_queries is not None and self.queries >= self.max_queries:
+            raise RuntimeError("Solver查询额度耗尽")
+        self.queries += 1
         if response_choices and any(
             action.startswith("ACTION: select_deck_card ")
             for action in response_choices
@@ -217,13 +224,19 @@ def run_trial(
             write_json(snapshot_path, asdict(reset.snapshot))
         write_json(trial_root / "initial-state.json", reset.state)
         deadline = min(total_deadline, time.monotonic() + plan["trial_seconds"])
-        provider = SolverProvider(game, deadline) if agent == "solver" else student
+        provider = (
+            SolverProvider(game, deadline, max_queries=plan.get("max_queries"))
+            if agent == "solver"
+            else student
+        )
         recorder = RecordingProvider(provider, trial_root / "requests.jsonl", deadline)
         result = BattleRunner(
             game,
             recorder,
             max_tokens=128,
-            temperature=0.8 if agent == "b3" else 0.0,
+            temperature=0.0
+            if agent == "solver"
+            else plan.get("student_temperature", 0.8),
             max_retries=0,
             max_conflict_retries=2,
             constrain_actions=True,
@@ -271,7 +284,7 @@ def run_trial(
 
 
 def main() -> None:
-    """执行实验单中的有限教师筛查，已完成结果只读取而不重复运行。"""
+    """执行有限教师筛查；学生可由student_model指定，旧计划默认B3。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--case", action="append")
@@ -308,7 +321,7 @@ def main() -> None:
             GameClient(running.base_url) as game,
             OpenAICompatibleProvider(
                 plan["model_url"],
-                model="qwen3.5-e7-b3",
+                model=plan.get("student_model", "qwen3.5-e7-b3"),
                 enable_thinking=False,
                 capture_token_metadata=True,
                 timeout=45,
