@@ -92,7 +92,28 @@ ID 只用于带明确 provenance 的人工确认修正。
 
 游戏知识应按 `export → rebuild（应用版本化人工修正）→ generate-questions →
 generate-arithmetic → review` 顺序重建；两个 generate 命令都不会创建 E3 正式
-分卷。完整参数见项目 README。
+分卷。以下以 v0.107.1 为例；导出时需先启动加载 Agent Mod 的对应版本游戏：
+
+```bash
+uv run play-sts2-knowledge export
+uv run play-sts2-knowledge rebuild \
+  data/game_knowledge/mod_export/v0.107.1/raw \
+  --wiki-root data/game_knowledge/web_wiki \
+  --cycles-root /path/to/human-rl/data/cycles \
+  --event-entries-root data/game_knowledge/event_entries/v0.107.1/events
+uv run play-sts2-knowledge generate-questions \
+  data/game_knowledge/mod_export/v0.107.1
+uv run play-sts2-knowledge generate-arithmetic
+uv run play-sts2-knowledge review \
+  data/game_knowledge/mod_export/v0.107.1
+```
+
+`rebuild` 的三个补充来源参数按已有数据提供。其他版本需同时指定对应的快照和
+输出路径；参数见各子命令的 `--help`。已有结构化 Wiki 可先导入：
+
+```bash
+uv run play-sts2-knowledge import-wiki /path/to/wiki
+```
 
 重建某一局 transcript：
 
